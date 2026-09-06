@@ -14,9 +14,15 @@ Lista de compras compartida en tiempo real para grupos (ej. "Familia Alba"): var
   - *unidades invocables* → la definición (`rg -n 'export (async )?function <nombre>'`), nunca el nombre en el sitio de llamada.
   - *superficie de rutas* → el árbol real del App Router: `find app -name 'route.ts' -o -name 'page.tsx'`.
   - *superficie cliente* → `pnpm build`.
-- **Constitution sections:** A, B, C, D de este archivo.
+- **Constitution sections:** A, B, C, D, E de este archivo.
+- **Test host:** Martins-MacBook-Pro (máquina de desarrollo local; Docker + navegadores reales, no hay sandbox que los corra)
+- **Gate commands:** `pnpm typecheck && pnpm lint && pnpm test && pnpm build`
 - **Runtime check:** `pnpm test:e2e` (Playwright; incluye el test de dos contextos de navegador simultáneos) y `pnpm dev` con verificación manual en viewport móvil de 390px.
+- **Hard fails:** datos de un grupo visibles para quien no es miembro `active` (incluye `pending`, `rejected` y `removed`) · acceso concedido por poseer un link, sin aprobación del owner · `DELETE` físico sobre una tabla publicada en `supabase_realtime` · claves o cualquier `.env*` dentro del control de versiones · una función `SECURITY DEFINER` sin `search_path` fijado
 - **Code languages:** TypeScript / TSX, SQL (migraciones y políticas RLS).
+- **Checkpoint file:** `docs/CHECKPOINT.md`
+- **Roadmap file:** `docs/ROADMAP.md`
+- **Tech debt file:** `docs/TECHNICAL_DEBT.md`
 
 ## Commands
 
@@ -66,3 +72,35 @@ Lista de compras compartida en tiempo real para grupos (ej. "Familia Alba"): var
 4. **Efectos idempotentes.** Aceptar una invitación, aprobar un miembro o expulsar tolera entregas duplicadas sin doble aplicación — clave estable o constraint única.
 5. **Migraciones expand/contract**, compatibles hacia atrás y verificadas contra el esquema real.
 6. **Timeouts y reintentos acotados.** Toda llamada de red tiene timeout explícito. Un fallo aguas arriba degrada con elegancia; no cuelga al usuario ni rompe la request.
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->
+
+## E. Pruebas — qué cuenta como prueba
+
+<!-- Estas dos reglas salieron de cuatro rondas de revisión en las que el mismo
+     defecto reapareció con formas distintas: una garantía implementada y
+     probada una capa por debajo de la superficie que el requisito nombraba.
+     Cerrar instancias una a una garantizaba otra ronda idéntica. -->
+
+1. **Toda prueba ataca la capa que su requisito nombra.** Si el requisito dice
+   "la vista lo dice", la prueba monta la vista. Si dice "el servidor lo
+   impide", la prueba llama al servidor sin pasar por la interfaz. Si dice "la
+   base lo rechaza", la prueba ataca la base con el token del usuario. Una
+   prueba en una capa inferior es evidencia de apoyo, **nunca** la prueba
+   principal: pasa mientras la superficie prometida sigue rota.
+2. **Toda guarda viaja con una sonda que debe ser cazada.** Un test que sólo
+   comprueba casos limpios no distingue "detecta" de "no detecta nada": una
+   base sin políticas no viola la regla, pero tampoco la cumple. Cada guarda
+   —regex sobre políticas, barrido de ficheros, matriz de privilegios— incluye
+   un caso construido para violarla, y el test falla si no lo caza.
+3. **Un test que no puede fallar es peor que ninguno**, porque ocupa el sitio
+   del que sí probaría. Al escribir un test, decir en una línea qué cambio del
+   producto lo pondría rojo; si no hay ninguno, el test sobra o está mal.
