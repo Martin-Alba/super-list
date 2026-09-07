@@ -1,6 +1,7 @@
 import type { Browser, BrowserContext, Page } from '@playwright/test'
 import { createServerClient } from '@supabase/ssr'
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
+import { appHostname } from './appOrigin'
 
 const URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
 const ANON = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
@@ -35,7 +36,7 @@ export async function signedInContext(browser: Browser, user: TestUser): Promise
   const { error } = await client.auth.signInWithPassword({ email: user.email, password: user.password })
   if (error) throw error
   const context = await browser.newContext()
-  await context.addCookies(jar.map(c => ({ name: c.name, value: c.value, domain: '127.0.0.1', path: '/' })))
+  await context.addCookies(jar.map(c => ({ name: c.name, value: c.value, domain: appHostname(), path: '/' })))
   return context
 }
 

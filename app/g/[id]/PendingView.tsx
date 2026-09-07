@@ -1,6 +1,7 @@
 'use client'
 
 import { useRouter } from 'next/navigation'
+import { createClient } from '@/lib/supabase/client'
 import { useGroupChannel } from '@/lib/useGroupChannel'
 
 /** R5 — el pendiente no ve la lista. Se entera de la decisión en vivo. */
@@ -13,10 +14,17 @@ export function PendingView({ groupId, userId }: { groupId: string; userId: stri
   const channelState = useGroupChannel(groupId, {
     onMembership: (row) => {
       if (row.user_id !== userId) return
-      // Aceptado: entra. Rechazado o expulsado: fuera, sin esperar a que un
-      // refresco acabe produciendo un 404 (A.3, fallar cerrado).
-      if (row.status === 'active') router.refresh()
-      else router.replace('/')
+      // U1 — mismo motivo que en la vista de grupo: el primer evento puede ser
+      // uno anterior a la suscripción. Aceptado: entra. Para lo demás se
+      // confirma contra la fuente antes de sacar a nadie.
+      if (row.status === 'active') { router.refresh(); return }
+      void createClient()
+        .from('group_members').select('status')
+        .eq('group_id', groupId).eq('user_id', userId).maybeSingle()
+        .then(({ data }) => {
+          if (data?.status === 'active') router.refresh()
+          else if (data?.status !== 'pending') router.replace('/')
+        })
     },
     onResync: () => router.refresh(),
   })

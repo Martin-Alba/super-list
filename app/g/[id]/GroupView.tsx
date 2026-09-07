@@ -59,6 +59,8 @@ export function GroupView({
 
   // R9 — el borrado viaja como UPDATE (deleted_at), por eso va autorizado por
   // RLS. Un DELETE físico no lo estaría: los eventos DELETE están exentos.
+  const [eventosPeligrosos, setEventosPeligrosos] = useState(0)
+
   const channelState = useGroupChannel(group.id, {
     onItem: (row) => setItems(prev => {
       const rest = prev.filter(i => i.id !== row.id)
@@ -70,12 +72,32 @@ export function GroupView({
     // dejarlo en manos de que un refresco produzca un 404 es más frágil que
     // actuar sobre el dato que acaba de llegar.
     onMembership: (row) => {
-      if (row.user_id === me.id && row.status !== 'active') {
-        setItems([])
-        router.replace('/')
-        return
-      }
-      router.refresh()
+      if (row.user_id !== me.id) { router.refresh(); return }
+      // V2 — Costura de medición, no comportamiento. `e2e/stale-events.spec.ts`
+      // esperaba 6 s a ciegas y daba verde contra el defecto sólo 2 de 4 veces:
+      // cuando el slot ya se había drenado, afirmaba sobre una página a la que
+      // no había llegado nada.
+      //
+      // Cuenta sólo los eventos PELIGROSOS —los que dicen que ya no soy
+      // `active`—, porque son los únicos que pueden expulsar. Contar también los
+      // `active` dejaba la precondición demasiado floja: la cumplía el evento
+      // inofensivo, y el test seguía dando verde 2 de 4 con U1 revertido.
+      if (row.status !== 'active') setEventosPeligrosos(n => n + 1)
+      // U1 — el canal entrega, tras `SUBSCRIBED`, los cambios anteriores que
+      // siguen en el slot de replicación. Actuar sobre el PRIMER evento expulsa
+      // a un miembro activo con su propio `pending` viejo: medido 6 de 6. Esta
+      // propiedad ya estaba escrita en `unit/expel-event.test.ts` —"mirar el
+      // ÚLTIMO estado, no el primero"—, sólo que el producto no la aplicaba.
+      // Por eso se confirma contra la fuente antes de vaciar y navegar.
+      if (row.status === 'active') { router.refresh(); return }
+      void createClient()
+        .from('group_members').select('status')
+        .eq('group_id', group.id).eq('user_id', me.id).maybeSingle()
+        .then(({ data }) => {
+          if (data?.status === 'active') { router.refresh(); return }
+          setItems([])
+          router.replace('/')
+        })
     },
     // I7 — lo ocurrido entre el render del servidor y la suscripción no llegó
     // por el canal a nadie; se relee al quedar suscrito.
@@ -133,6 +155,14 @@ export function GroupView({
         <Link href="/" className="min-h-[44px] py-3 text-sm text-neutral-500">← Grupos</Link>
         <h1 className="text-xl font-semibold" data-testid="group-name">{group.name}</h1>
       </header>
+
+      {/* N2 — señal POSITIVA: sólo existe cuando el canal está vivo. Afirmar
+          la ausencia del aviso de degradado se resuelve en el instante inicial,
+          cuando el estado aún es `connecting`, y pasa con el servicio parado. */}
+      {channelState === 'live' && (
+        <span role="status" data-testid="channel-live" className="sr-only">Lista en vivo</span>
+      )}
+      <span data-testid="eventos-membresia-peligrosos" data-n={eventosPeligrosos} className="sr-only" />
 
       {channelState === 'degraded' && (
         <p role="status" data-testid="channel-degraded"

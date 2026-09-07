@@ -21,6 +21,13 @@ const MATRIZ_ESPERADA = [
   'authenticated|profiles|SELECT',
 ]
 
+/**
+ * guarda-borrado: sonda RLS. Este fichero INTENTA borrar a propósito, con el
+ * token del usuario, para comprobar que la base lo deniega — y afirma que la
+ * fila sigue existiendo. No es un borrado del arnés: es la prueba de que no
+ * se puede borrar. Sin esta marca, `unit/harness-no-delete.test.ts` lo trata
+ * como infracción, que es lo correcto por defecto.
+ */
 describe('J2/K5 los roles de cliente no pueden destruir tablas', () => {
   it('la matriz de privilegios es exactamente la declarada', async () => {
     const rows = await sql<{ fila: string }>(`
@@ -40,12 +47,14 @@ describe('J2/K5 los roles de cliente no pueden destruir tablas', () => {
 
   it('un TRUNCATE como anon es rechazado por privilegio, no por política', async () => {
     await expect(
+      // borrado-permitido: sonda RLS — intenta borrar para comprobar que la base lo deniega
       sql(`set local role anon; truncate public.items;`),
     ).rejects.toThrow(/permission denied|must be owner/i)
   })
 
   it('un DELETE como authenticated también se rechaza por privilegio', async () => {
     await expect(
+      // borrado-permitido: sonda RLS — intenta borrar para comprobar que la base lo deniega
       sql(`set local role authenticated; delete from public.items;`),
     ).rejects.toThrow(/permission denied/i)
   })

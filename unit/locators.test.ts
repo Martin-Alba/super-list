@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { sinComentarios } from './comentarios'
 import { readdirSync, readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -11,16 +12,23 @@ import { tmpdir } from 'node:os'
  */
 const FORBIDDEN = /getByText\(/
 
-/** Un `getByText(` dentro de un comentario o una cadena no es una asercion. */
+/**
+ * Un `getByText(` dentro de un comentario o una cadena no es una aserción.
+ *
+ * Y5 — Esto era un segundo despojador de comentarios, hermano del que
+ * `unit/comentarios.ts` ya había tenido que arreglar tres veces, y con la misma
+ * ceguera: el `//` final del literal `/\/realtime\/v1\//` de
+ * `e2e/resilience.spec.ts` le comía el resto de la línea, así que un
+ * `getByText(` detrás era invisible. Dos guardas con el mismo agujero y dos
+ * sitios donde arreglarlo. Ahora hay uno.
+ */
 export function stripNoise(source: string): string {
-  // L7 — las CADENAS primero. Al revés, un `//` dentro de una cadena se comía
-  // el resto de la línea: la imagen especular del defecto que K9 arregló.
-  return source
+  // Las cadenas se vacían DESPUÉS de que el compilador haya quitado los
+  // comentarios: un `getByText(` dentro de una cadena tampoco es una aserción.
+  return sinComentarios(source)
     .replace(/'(?:[^'\\\n]|\\.)*'/g, "''")
     .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
     .replace(/`(?:[^`\\]|\\.)*`/g, '``')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
 }
 
 // Todo `e2e/`, no solo los *.spec.ts: fixtures.ts y global-setup.ts escapaban.
@@ -60,5 +68,25 @@ describe('K9 la guarda de localizadores', () => {
     const file = join(dir, 'malo.spec.ts')
     writeFileSync(file, "test('x', async ({ page }) => {\n  await expect(page.getByText(nombre)).toBeVisible()\n})\n")
     expect(stripNoise(readFileSync(file, 'utf8'))).toMatch(FORBIDDEN)
+  })
+})
+
+/**
+ * Y5 / DoD 80 — Sonda inyectada en el fichero REAL que tiene el literal de
+ * expresión regular. La versión anterior de `stripNoise` se comía el resto de
+ * esa línea, así que un `getByText(` detrás era invisible para la guarda.
+ */
+describe('Y5 la guarda no se ciega tras un literal de expresión regular', () => {
+  it('caza un getByText inyectado justo detrás', () => {
+    const fuente = readFileSync('e2e/resilience.spec.ts', 'utf8')
+    const i = fuente.indexOf('routeWebSocket')
+    expect(i, 'el literal de regex ya no está: la sonda mira otra cosa').toBeGreaterThan(0)
+    const fin = fuente.indexOf('\n', i)
+    const contaminado = fuente.slice(0, fin) + '; page.getByText("pan")' + fuente.slice(fin)
+    expect(FORBIDDEN.test(stripNoise(contaminado)), 'el regex volvió a cegar la guarda').toBe(true)
+  })
+
+  it('y sigue sin cazar uno que está dentro de un comentario', () => {
+    expect(FORBIDDEN.test(stripNoise('// evitar page.getByText("pan")'))).toBe(false)
   })
 })

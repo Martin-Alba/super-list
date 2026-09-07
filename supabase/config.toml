@@ -83,6 +83,9 @@ enabled = true
 # Bind realtime via either IPv4 or IPv6. (default: IPv4)
 # ip_version = "IPv6"
 # The maximum length in bytes of HTTP request headers. (default: 4096)
+# U7 — vuelve al valor por defecto. Subirlo era el arreglo del fallo 2 antes
+# de reencuadrarlo; con los hosts separados no hace falta, y mantenerlo 4x
+# por encima ABSORBERIA el 431 que debe delatar que los hosts se juntaron.
 # max_header_length = 4096
 
 [studio]
@@ -151,9 +154,14 @@ max_indexes = 5
 enabled = true
 # The base URL of your website. Used as an allow-list for redirects and for constructing URLs used
 # in emails.
-site_url = "http://127.0.0.1:3000"
+# T1 — la app se sirve en `localhost` y Supabase en `127.0.0.1`: hosts
+# distintos, asi que el navegador NO manda cookies de la app al endpoint de
+# realtime. Es la topologia de produccion (dominios distintos), reproducida
+# en local. Antes compartian host y las cookies desbordaban la cabecera.
+site_url = "http://localhost:3000"
 # A list of *exact* URLs that auth providers are permitted to redirect to post authentication.
-additional_redirect_urls = ["https://127.0.0.1:3000"]
+# Corregido de paso: arrastraba `https` mientras la app sirve por `http`.
+additional_redirect_urls = ["http://localhost:3000"]
 # How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
 jwt_expiry = 3600
 # JWT issuer URL. If not set, defaults to the local API URL (http://127.0.0.1:<port>/auth/v1).
@@ -189,7 +197,10 @@ password_requirements = ""
 
 [auth.rate_limit]
 # Number of emails that can be sent per hour. Requires auth.email.smtp to be enabled.
-email_sent = 2
+# N4 — los tests obtienen un `code` PKCE real via magic link + Mailpit,
+# que es la unica forma de recorrer la salida de exito del callback sin
+# credenciales de Google. Con 2 correos por hora no caben.
+email_sent = 30
 # Number of SMS messages that can be sent per hour. Requires auth.sms to be enabled.
 sms_sent = 30
 # Number of anonymous sign-ins that can be made per hour per IP address. Requires enable_anonymous_sign_ins = true.
@@ -326,6 +337,17 @@ url = ""
 skip_nonce_check = false
 # If enabled, it will allow the user to successfully authenticate when the provider does not return an email address.
 email_optional = false
+
+[auth.external.google]
+enabled = true
+# NUNCA en claro: los dos valores se sustituyen desde el entorno.
+client_id = "env(SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID)"
+# DO NOT commit your OAuth provider secret to git. Use environment variable substitution instead:
+secret = "env(SUPABASE_AUTH_EXTERNAL_GOOGLE_SECRET)"
+# Debe coincidir EXACTAMENTE con el redirect URI dado de alta en Google Cloud.
+redirect_uri = "http://127.0.0.1:54321/auth/v1/callback"
+# Requerido para el login local con Google (ver el comentario del bloque apple).
+skip_nonce_check = true
 
 # Allow Solana wallet holders to sign in to your project via the Sign in with Solana (SIWS, EIP-4361) standard.
 # You can configure "web3" rate limit in the [auth.rate_limit] section and set up [auth.captcha] if self-hosting.

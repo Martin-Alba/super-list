@@ -104,3 +104,20 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 3. **Un test que no puede fallar es peor que ninguno**, porque ocupa el sitio
    del que sí probaría. Al escribir un test, decir en una línea qué cambio del
    producto lo pondría rojo; si no hay ninguno, el test sobra o está mal.
+4. **Un arreglo que cambia el mecanismo se prueba TAMBIÉN por la puerta que
+   abre.** El test de la puerta que se cierra **se conserva**: es el que se pone
+   rojo cuando alguien revierte. Pero el mecanismo nuevo habilita caminos que el
+   viejo no tenía, y ésos no los mira nadie. Antes de dar por bueno el cambio:
+   **(a)** nombrar por escrito el camino nuevo; **(b)** probarlo en la capa donde
+   ese camino existe (§E.1) — si el requisito dice "dos pestañas", dos corrutinas
+   no valen; **(c)** demostrar que ese test se pone rojo sin la guarda,
+   **repitiéndolo hasta ver que falla siempre y no la mitad de las veces**.
+
+   <!-- Cinco iteraciones seguidas la incumplieron, cada una arreglando lo que
+        abrió la anterior: un redirect que quitó la normalización de URL (500 y
+        código de sesión quemado); una codificación por carácter que partió pares
+        suplentes (el mismo 500); un lector de cookies propio que se atragantaba
+        con un `%` de una cookie ajena. Y la iteración que escribió esta regla la
+        incumplió al escribirla: su test cazaba el defecto 2 de cada 4 veces,
+        porque dependía de que el slot de replicación entregara un evento que no
+        siempre entrega. De ahí el "hasta ver que falla siempre". -->
