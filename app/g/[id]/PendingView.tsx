@@ -1,6 +1,7 @@
 'use client'
 
 import { useRouter } from 'next/navigation'
+import { SIN_CONEXION_ESPERA } from '@/lib/errors'
 import { createClient } from '@/lib/supabase/client'
 import { useGroupChannel } from '@/lib/useGroupChannel'
 
@@ -37,7 +38,7 @@ export function PendingView({ groupId, userId }: { groupId: string; userId: stri
       </p>
       {channelState === 'degraded' && (
         <p role="status" data-testid="channel-degraded" className="text-sm text-amber-800">
-          Sin conexión en vivo. Recarga la página para comprobar si ya te han aceptado.
+          {SIN_CONEXION_ESPERA}
         </p>
       )}
     </main>

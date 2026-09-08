@@ -110,3 +110,42 @@ export const PLATAFORMA_LEGITIMA: ReadonlyArray<readonly [string, string]> = [
 /** AB1 / DoD 102 — el nombre reaparece declarado de otra forma: deja de estar demostrado. */
 export const AMBITO_AMBIGUO =
   "const next = new Set(prev)\nnext.delete(x)\nconst next2 = 1\nconst next = admin.from('items')\nawait next.delete()"
+
+/** U8 — sonda de la guarda de migraciones: SQL que sí borra. */
+export const SQL_QUE_BORRA = 'delete from public.items where id = 1;'
+
+/** V6 — las dos formas que se colaban, y son las naturales al escribir esto. */
+export const SQL_CON_CTE =
+  'with viejos as (select id from public.items) delete from public.items where id in (select id from viejos);'
+/** W2 — la forma CANÓNICA de una deduplicación: paréntesis anidados. */
+export const SQL_CON_CTE_ANIDADA =
+  'with dup as (select id, row_number() over (partition by group_id order by created_at) r from public.items) ' +
+  'delete from public.items where id in (select id from dup where r > 1);'
+export const SQL_CON_DOS_CTE =
+  'with a as (select 1), b as (select coalesce(2, 3)) delete from public.items where id = 1;'
+
+export const SQL_DINAMICO =
+  "do $$ begin execute 'delete from public.items where id = 1'; end $$;"
+
+/** X3 — las cuatro formas que la revisión midió coladas. */
+export const SQL_CTE_CON_COLUMNAS =
+  'with dup(id, r) as (select id, row_number() over (partition by group_id) from public.items) ' +
+  'delete from public.items where id in (select id from dup where r > 1);'
+export const SQL_BUCLE_PLPGSQL =
+  'do $$ begin for x in select id from public.items loop delete from public.items where id = x.id; end loop; end $$;'
+export const SQL_IF_PLPGSQL =
+  'do $$ begin if true then delete from public.items where id = 1; end if; end $$;'
+export const SQL_EXECUTE_VARIABLE =
+  "do $$ declare q text; begin q := 'delete from public.items'; execute q; end $$;"
+
+/** Y7 — las ocho formas que la revisión midió coladas. */
+export const SQL_MAS_FORMAS: [string, string][] = [
+  ['case when', 'do $$ begin case when true then delete from public.items; end case; end $$;'],
+  ['elsif', 'do $$ begin if false then null; elsif true then delete from public.items; end if; end $$;'],
+  ['loop sin cabecera', 'do $$ begin loop delete from public.items; exit; end loop; end $$;'],
+  ['foreach', 'do $$ begin foreach x in array a loop delete from public.items; end loop; end $$;'],
+  ['exception when', 'do $$ begin null; exception when others then delete from public.items; end $$;'],
+  ['execute por concatenación', "do $$ declare q text; begin q := 'del' || 'ete from public.items'; execute q; end $$;"],
+  ['cuerpo de función como literal', "create function f() returns void as 'delete from public.items' language sql;"],
+  ['merge', 'merge into public.items t using x on t.id = x.id when matched then delete;'],
+]

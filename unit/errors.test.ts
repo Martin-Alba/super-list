@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { describeError } from '../lib/errors'
+import { claseDe, mensajeDe } from '../lib/errors'
 
 /**
  * L5 / DoD 67 — `failed to fetch` es el texto del navegador; Node, en servidor,
@@ -14,18 +14,18 @@ describe('L5 la traduccion de errores cubre el fallo de red del servidor', () =>
     'The operation was aborted',
     'signal timed out',
   ])('%s se traduce como problema de conexion', (raw) => {
-    expect(describeError(raw)).toContain('conexión')
+    expect(mensajeDe(claseDe({ message: raw }))).toContain('conexión')
   })
 
   it('una denegacion de RLS no se confunde con un problema de red', () => {
-    const msg = describeError('new row violates row-level security policy for table "items"')
+    const msg = mensajeDe(claseDe({ message: 'new row violates row-level security policy for table "items"' }))
     expect(msg).not.toContain('conexión')
     expect(msg).toContain('acceso')
   })
 
   it('nunca devuelve el texto crudo', () => {
     const crudo = 'new row violates row-level security policy for table "items"'
-    expect(describeError(crudo)).not.toContain('row-level')
-    expect(describeError(crudo)).not.toContain('items')
+    expect(mensajeDe(claseDe({ message: crudo }))).not.toContain('row-level')
+    expect(mensajeDe(claseDe({ message: crudo }))).not.toContain('items')
   })
 })

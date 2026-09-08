@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { activeItems, type Item } from '@/lib/items'
+import { claseDe, type Clase } from '@/lib/errors'
 
 export type Membership = { user_id: string; status: string; role: string }
 export type Profile = { id: string; display_name: string | null }
@@ -15,7 +16,18 @@ export type GroupPayload = {
    * nadie hubiera pedido entrar. Es la misma clase de fallo silencioso que I6 y
    * J1 existen para matar, así que el fallo viaja y la vista lo dice.
    */
-  error: string | null
+  /**
+   * AD3 — Era el **texto crudo** de Postgres, arrastrado hasta la vista para que
+   * allí alguien lo tradujera. Ahora viaja la clase: no hay texto que filtrar, y
+   * la página no tiene que reclasificar nada para pintarlo.
+   */
+  /**
+   * AE6 — Aquí iba también `errorCode`, y desde AD3 **no lo consumía nadie**: la
+   * página dejó de desestructurarlo y lo único que lo defendía era un test que
+   * buscaba la palabra en el fuente. Un campo que viaja en el payload de Flight
+   * en cada carga y no lo lee nadie es peso, no información.
+   */
+  clase: Clase | null
 }
 
 /**
@@ -37,21 +49,22 @@ export async function loadGroupPayload(
     supabase.from('groups').select('id, name').eq('id', groupId).maybeSingle(),
     // Criterio unificado: las tres devuelven su fallo. Antes `activeItems`
     // lanzaba (y tumbaba la página) mientras sus hermanas se lo tragaban.
-    activeItems(supabase, groupId)
-      .then(data => ({ data, error: null as string | null }))
-      .catch((e: unknown) => ({ data: [] as Item[], error: e instanceof Error ? e.message : String(e) })),
+    // AD3 — aquí se leía `e.message` para arrastrarlo hasta la vista.
+    // AE1 — y aquí se recogía el OBJETO crudo con un `catch`. `activeItems` ya no
+    // lanza: devuelve su clase como las otras dos, y este envoltorio desaparece.
+    activeItems(supabase, groupId),
     supabase.from('group_members')
       .select('user_id, status, role, profiles!group_members_user_id_fkey(id, display_name)')
       .eq('group_id', groupId),
   ])
 
   const items = itemsRes.data
-  const error = groupRes.error?.message ?? itemsRes.error ?? membersRes.error?.message ?? null
+  const clase = claseDe(groupRes.error) ?? itemsRes.clase ?? claseDe(membersRes.error)
   const rows = (membersRes.data ?? []) as Array<Membership & { profiles: Profile | Profile[] | null }>
   const members = rows.map(({ user_id, status, role }) => ({ user_id, status, role }))
   const profiles = rows
     .map(r => (Array.isArray(r.profiles) ? r.profiles[0] : r.profiles))
     .filter((p): p is Profile => Boolean(p))
 
-  return { group: groupRes.data, items, members, profiles, error }
+  return { group: groupRes.data, items, members, profiles, clase }
 }

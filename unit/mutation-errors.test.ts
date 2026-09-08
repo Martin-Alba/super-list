@@ -13,8 +13,8 @@ describe('I11 las mutaciones denegadas devuelven el error', () => {
     const gid = await newGroup(owner)
     const outsider = await newUser('me-out')
 
-    const { data, error } = await addItem(outsider.client, gid, outsider.id, 'intruso')
-    expect(error, 'la denegación de RLS llegó como éxito').toBeTruthy()
+    const { data, clase } = await addItem(outsider.client, gid, outsider.id, 'intruso')
+    expect(clase, 'la denegación de RLS llegó como éxito').toBeTruthy()
     expect(data).toBeNull()
   })
 
@@ -35,15 +35,17 @@ describe('I11 las mutaciones denegadas devuelven el error', () => {
     // puede pasar es que la interfaz lo lea como guardado.
     const renamed = await updateItem(guest.client, item!.id, { name: 'huevos camperos' })
     const deleted = await softDeleteItem(guest.client, item!.id)
-    expect(renamed.data).toBe(0)
+    // W7 — `updateItem` devuelve la FILA: ausente significa que no se tocó
+    // ninguna. `softDeleteItem` sigue devolviendo el recuento.
+    expect(renamed.data).toBeNull()
     expect(deleted.data).toBe(0)
   })
 
   it('el éxito no lleva error: la señal distingue de verdad', async () => {
     const owner = await newUser('me-owner3')
     const gid = await newGroup(owner)
-    const { data, error } = await addItem(owner.client, gid, owner.id, 'pan')
-    expect(error).toBeNull()
+    const { data, clase } = await addItem(owner.client, gid, owner.id, 'pan')
+    expect(clase).toBeNull()
     expect(data?.name).toBe('pan')
   })
 })

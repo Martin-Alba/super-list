@@ -46,7 +46,7 @@ vi.mock('@/app/actions', () => ({
 vi.mock('next/navigation', () => ({ useRouter: () => ({ refresh, replace }) }))
 vi.mock('@/lib/items', async (orig) => ({
   ...(await orig<typeof import('@/lib/items')>()),
-  activeItems: vi.fn(async () => []),
+  activeItems: vi.fn(async () => ({ data: [], clase: null, code: null })),
 }))
 
 const { GroupView } = await import('@/app/g/[id]/GroupView')
@@ -63,7 +63,6 @@ const montar = () => render(
     members={[{ user_id: 'u1', status: 'active', role: 'member' }]}
     profiles={[{ id: 'u1', display_name: 'Yo' }]}
     me={{ id: 'u1', role: 'member' }}
-    loadError={null}
   />,
 )
 

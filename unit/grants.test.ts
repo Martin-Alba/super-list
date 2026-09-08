@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest'
-import { sql } from './helpers'
+import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { newUser, newGroup, sql } from './helpers'
 
 /**
  * J2 / K5 — RLS gobierna SELECT, INSERT, UPDATE y DELETE, pero **no** gobierna
@@ -15,9 +17,11 @@ const MATRIZ_ESPERADA = [
   'authenticated|group_invites|SELECT',
   'authenticated|group_members|SELECT',
   'authenticated|groups|SELECT',
-  'authenticated|items|INSERT',
+  // Y1 — `items` ya no tiene INSERT/UPDATE a nivel de TABLA: se revocaron para
+  // conceder por columna, porque `updated_at` y `created_at` son autoridad del
+  // servidor. El SELECT sigue siendo de tabla. La matriz de columnas se afirma
+  // aparte, y es la que ahora manda.
   'authenticated|items|SELECT',
-  'authenticated|items|UPDATE',
   'authenticated|profiles|SELECT',
 ]
 
@@ -36,6 +40,40 @@ describe('J2/K5 los roles de cliente no pueden destruir tablas', () => {
        where table_schema = 'public' and grantee in ('anon','authenticated')
        order by 1`)
     expect(rows.map(r => r.fila)).toEqual(MATRIZ_ESPERADA)
+  })
+
+  /**
+   * Y1 / DoD 74 — Donde vive ahora la autoridad. El cliente no puede escribir
+   * `updated_at` ni `created_at`: son la clave con la que la vista decide quién
+   * gana al fusionar, y dejarlas escribibles permitía envenenar una fila para que
+   * la primera edición de cualquiera se revirtiera en pantalla.
+   */
+  it('el cliente no puede escribir las columnas de hora de items', async () => {
+    const rows = await sql<{ fila: string }>(`
+      select privilege_type || ':' || string_agg(column_name, ',' order by column_name) as fila
+        from information_schema.column_privileges
+       where table_name = 'items' and grantee = 'authenticated'
+       group by privilege_type order by 1`)
+    expect(rows.map(r => r.fila)).toEqual([
+      'INSERT:created_by,group_id,name,quantity',
+      'SELECT:created_at,created_by,deleted_at,group_id,id,name,quantity,updated_at',
+      'UPDATE:created_by,deleted_at,group_id,name,quantity',
+    ])
+  })
+
+  // Z1 / DoD 82 — la clave primaria no la reescribe el cliente.
+  it('un miembro no puede reescribir el id de un ítem', async () => {
+    const owner = await newUser('pk'); const gid = await newGroup(owner)
+    const { data: fila } = await owner.client.from('items')
+      .insert({ group_id: gid, name: 'pan', created_by: owner.id }).select('id').single()
+    /**
+     * AA1 — Esto apuntaba a un uuid **fijo** que ya existía en la base — lo dejó
+     * mi propio experimento de R-C —, así que fallaba por `23505` y pasaba igual
+     * con el privilegio devuelto: no podía ponerse rojo por lo que nombra.
+     */
+    const { error } = await owner.client.from('items')
+      .update({ id: randomUUID() }).eq('id', fila!.id)
+    expect(error?.code, 'el cliente reescribió la clave primaria').toBe('42501')
   })
 
   it('anon no conserva ningún privilegio', async () => {
@@ -89,5 +127,45 @@ describe('J2/K5 los roles de cliente no pueden destruir tablas', () => {
        where n.nspname='public' and has_function_privilege('anon', p.oid, 'EXECUTE')
        order by 1`)
     expect(rows.map(r => r.proname)).toEqual(['invite_preview'])
+  })
+})
+
+/**
+ * AC8 / DoD 110 — El texto de la migración y el privilegio se habían separado ya
+ * dos veces: la iteración 8 lo arregló y la 10 lo reintrodujo en el mismo
+ * fichero. Un comentario que miente sobre lo que concede un `grant` es peor que
+ * no tenerlo, porque el siguiente que lo lea no irá a mirar el catálogo.
+ *
+ * Así que el comentario se compara con la base, no con la memoria de nadie.
+ */
+describe('AC8 el texto de la migración dice lo que hace el grant', () => {
+  const SQL = readFileSync('supabase/migrations/20260908000300_autoridad_hora.sql', 'utf8')
+
+  const declaradas = (verbo: 'INSERT' | 'UPDATE'): string[] => {
+    const m = new RegExp(`^--\\s+${verbo}: (.+?)(?=\\n--\\s*\\n)`, 'ms').exec(SQL)
+    if (!m) throw new Error(`el comentario no declara las columnas de ${verbo}`)
+    return [...m[1].matchAll(/`([a-z_]+)`/g)].map(x => x[1]).sort()
+  }
+
+  const concedidas = (verbo: string, sql: string): string[] => {
+    const m = new RegExp(`grant ${verbo.toLowerCase()} \\(([^)]+)\\)`, 'i').exec(sql)
+    return m![1].split(',').map(c => c.trim()).sort()
+  }
+
+  it.each(['INSERT', 'UPDATE'] as const)('el comentario de %s casa con su grant', (verbo) => {
+    expect(declaradas(verbo), `el texto de ${verbo} no dice lo que concede`)
+      .toEqual(concedidas(verbo, SQL))
+  })
+
+  it('y las dos casan con el catálogo de la base', async () => {
+    const rows = await sql<{ privilege_type: string; column_name: string }>(
+      `select privilege_type, column_name from information_schema.column_privileges
+       where table_schema = 'public' and table_name = 'items' and grantee = 'authenticated'
+         and privilege_type in ('INSERT', 'UPDATE')`)
+    for (const verbo of ['INSERT', 'UPDATE'] as const) {
+      const enLaBase = rows.filter(r => r.privilege_type === verbo).map(r => r.column_name).sort()
+      expect(enLaBase, `${verbo}: la base no concede lo que el comentario declara`)
+        .toEqual(declaradas(verbo))
+    }
   })
 })

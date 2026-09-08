@@ -1,6 +1,7 @@
 'use client'
 
 import { useActionState } from 'react'
+import Link from 'next/link'
 import { createGroupAction, type ActionState } from './actions'
 
 export function CreateGroupForm() {
@@ -15,7 +16,16 @@ export function CreateGroupForm() {
           Crear
         </button>
       </div>
-      {state.error && <p role="alert" className="text-sm text-red-600">{state.error}</p>}
+      {/* S1 — `role="alert"` lo emite también el anunciador de ruta de Next, y un
+          test que lo busque por rol casa con los dos: medido, 15 rojos de 30. */}
+      {state.mensaje && (
+        <p role="alert" data-testid="group-notice" className="text-sm text-red-600">
+          {state.mensaje}
+          {state.clase === 'sesion' && (
+            <Link href="/login" data-testid="volver-a-entrar" className="ml-2 underline">Volver a entrar</Link>
+          )}
+        </p>
+      )}
     </form>
   )
 }

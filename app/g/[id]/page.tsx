@@ -21,12 +21,16 @@ export default async function GroupPage({ params }: { params: Promise<{ id: stri
   // Un 403 confirmaría que existe.
   if (me?.status !== 'active') notFound()
 
-  const { group, items, members, profiles, error } = await loadGroupPayload(supabase, id)
+  const { group, items, members, profiles, clase } = await loadGroupPayload(supabase, id)
+  // U6 — medido en el payload de Flight: el mensaje crudo de Postgres viajaba
+  // entero al navegador. No se enseñaba, pero llegaba.
+  // AD3 — Y ya no existe: del servidor sale la **clase**, siete valores fijos.
+  // La página no traduce ni reclasifica; la vista pinta desde la etiqueta.
 
   // L3 — un fallo de consulta no es "el grupo no existe". Antes los dos daban
   // `null` y respondian 404: a un miembro legitimo se le decia que su grupo no
   // existe por una caida pasajera. El 404 queda para la ausencia real.
-  if (!group && !error) notFound()
+  if (!group && !clase) notFound()
 
   return (
     <GroupView
@@ -35,7 +39,7 @@ export default async function GroupPage({ params }: { params: Promise<{ id: stri
       members={members}
       profiles={profiles}
       me={{ id: user.id, role: me.role }}
-      loadError={error}
+      loadClase={clase}
     />
   )
 }

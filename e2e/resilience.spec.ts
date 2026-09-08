@@ -1,5 +1,6 @@
 import { test, expect, type WebSocketRoute } from '@playwright/test'
 import { createUser, makeGroup, addActiveMember, signedInContext, api } from './fixtures'
+import { LISTA_EN_VIVO, SIN_CONEXION_LISTA } from '../lib/errors'
 
 /**
  * I6 (DoD 30) y I7 (DoD 31): el canal caído se anuncia, y al volver se recupera
@@ -44,11 +45,15 @@ test('el canal caído se anuncia, y al volver se recupera lo perdido', async ({ 
     await page.goto(`/g/${groupId}`)
     await expect(page.getByTestId('item').first().getByLabel('Nombre')).toHaveValue('pan')
     await expect(page.getByTestId('channel-live')).toHaveCount(1)
+    // AI7 / DoD 176 — se afirma el TEXTO, no sólo el localizador: AH5 mudó estos
+    // tres avisos al traductor y nada comprobaba que siguieran diciendo lo mismo.
+    await expect(page.getByTestId('channel-live')).toHaveText(LISTA_EN_VIVO)
 
     // DoD 30 — sin señal, la lista se congela y el usuario cree que está al día.
     bloqueado = true
     for (const s of abiertos) s.close()
     await expect(page.getByTestId('channel-degraded')).toBeVisible({ timeout: 30_000 })
+    await expect(page.getByTestId('channel-degraded')).toHaveText(SIN_CONEXION_LISTA)
 
     // Mientras el canal está caído, otro miembro añade algo: ese evento no le
     // llega a nadie que no esté escuchando.

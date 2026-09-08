@@ -49,10 +49,11 @@ vista absorbería una regresión completa de `owns_group_of` sin poner rojo nada
 
 ## Inconsistencias menores
 
-### 6. `leaveGroupAction` lanza en vez de devolver `{error}`
-`app/actions.ts` — es la única de las cuatro acciones de mutación cuyo fallo sale
-por un límite de error en lugar de por el aviso de la vista. Quedó fuera del
-criterio que unificó a las demás.
+### 6. `leaveGroupAction` lanzaba en vez de devolver `{error}` — RESUELTO (2026-09-08)
+`app/actions.ts` — era la única de las cuatro acciones cuyo fallo salía por un
+límite de error en lugar de por el aviso de la vista. Next enmascaraba el mensaje
+con un digest y no hay `error.tsx` en la app, así que el usuario veía una pantalla
+de error. Ahora devuelve `ActionState` como las otras tres y la vista lo pinta.
 
 ### 7. `text.includes('abort')` casa de más
 `lib/errors.ts` — atrapa `current transaction is aborted` de Postgres y lo
@@ -196,9 +197,9 @@ sólo `{id}` y `new` vacío. La causa es que `items` tiene `relreplident = 'd'`
 `group_id` y no puede casar con el filtro.
 
 **Hoy no afecta a nada**, y por eso no se arregla: la app **no borra en duro**.
-`lib/items.ts:62` marca `deleted_at`, y ese camino viaja como UPDATE, lleva
+`lib/items.ts` marca `deleted_at` en `softDeleteItem`, y ese camino viaja como UPDATE, lleva
 `group_id`, casa con el filtro y va autorizado por RLS —
-`app/g/[id]/GroupView.tsx:60` ya lo documenta. Verificado en el navegador: la
+el comentario de `soltar` en `app/g/[id]/GroupView.tsx` ya lo documenta. Verificado en el navegador: la
 fila borrada en suave desaparece sola; la borrada en duro se queda en pantalla
 hasta recargar.
 
@@ -236,10 +237,18 @@ la spec de funcionalidad chocará, porque toca cookies y `searchParams`.
   plegado en `propiedad()` (un argumento).
 - `const { delete: borrar } = admin.from('items'); await borrar()`, y
   `.delete.call/.apply(...)`.
-- SQL dinámico: `execute format('delete from %I', …)` y `execute '…'` dentro de
-  plpgsql, que es *la* forma de borrar desde una función.
-- `with d as (delete from … returning *) select …`, porque `with` se descarta
-  como verbo inofensivo.
+**Cerrado el 2026-09-08**, con la lista medida (V6, W2, X3, Y7): `execute` con
+literal, con variable y con concatenación; el cuerpo de función como literal
+(`as 'delete …'`); CTE con paréntesis anidados, con lista de columnas y
+encadenadas; las estructuras de control de plpgsql —`for`, `foreach`, `while`,
+`if`, `elsif`, `case`, `when`, `exception`, `loop` sin cabecera—, que se retiran
+**hasta estabilizarse** porque una deja al descubierto la siguiente; y
+`merge … when matched then delete`.
+
+**Sigue abierto:** `with d as (delete from … returning *) select …`. El borrado va
+**dentro** de la CTE, no después, y el despojado la retira entera. Medido, no
+supuesto: la iteración 6 declaró cerrada la categoría entera y la revisión
+demostró ocho formas vivas. Ésta queda nombrada en vez de tachada.
 - `drop table` y `alter table … drop column` sobre tabla publicada.
 **Cota:** ninguna aparece hoy en el repositorio; verificado por AST y catálogo.
 
@@ -257,7 +266,7 @@ desactivando una guarda. Y una fecha en la línea anterior exime la línea enter
 requisito que iba a arreglarlo (AA9) no tenía fila de DoD, y por eso nadie lo
 detectó: **la cicatriz es esa**, no el comentario.
 
-### 24. Dos tautologías supervivientes
+### 24. Tautologías supervivientes
 `unit/app-origin.test.ts` y `unit/client-adapter.test.ts` — afirman que un regex
 casa una cadena construida al lado: pasarían con las aserciones reales borradas
 (§E.3). Es la misma forma que se retiró en otros dos ficheros.
@@ -270,3 +279,67 @@ casa una cadena construida al lado: pasarían con las aserciones reales borradas
 Ver entrada 17. Con la prohibición de borrar en duro, la limpieza tendrá que ser
 una tarea explícita fuera del arnés, o un borrado suave donde el esquema lo
 permita. **Medido el 2026-09-07: 7.922 filas en `auth.users`.**
+
+## Del ciclo «que ningún fallo se quede sin contar» (cierre 2026-09-08)
+
+*Las cuatro entradas siguientes comparten una causa: la iteración 10 convirtió R3
+—«ninguna acción enseña el texto crudo»— en «demostrar estáticamente que ningún
+refactor futuro podría enseñarlo». El registro de ese salto y su coste está en
+`docs/CHECKPOINT.md`. Lo que queda vivo son los huecos de esa demostración, y
+todos ellos son **hipotéticos**: ninguno se ha observado en el código que se
+ejecuta, y los cuatro caminos de fallo están verificados en navegador.*
+
+### 27. La guarda de contaminación es fail-open por construcción
+`unit/contaminacion.ts` + `unit/textoCrudo.ts` (`usosIndebidosDelError`) — 833 +
+282 líneas de análisis de flujo sobre el AST, sin información de tipos ni
+resolución entre módulos. **Nueve rondas de revisión encontraron nueve familias
+de escape distintas** (la forma de la salida, el nombre de la semilla, el
+receptor del campo, el objeto que trae el error, el cuerpo de un callback…), y la
+última las midió sobre los ficheros reales con la puerta entera en verde.
+
+No hay razón para creer que la décima no exista. **Verde aquí no es prueba**: es
+que ninguna de las formas conocidas está presente. Lo que sí es prueba, y es lo
+que sostiene R3 de verdad, son dos cosas baratas: `Result` ya no lleva texto
+—`avisarTexto(r.error)` no compila (`unit/texto-crudo.test.ts`, DoD 112)— y
+`lecturasDeMensaje`, que prohíbe leer `.message` fuera de `lib/errors.ts` en los
+22 ficheros de producto sin analizar nada.
+
+*Contención:* las dos reglas baratas de arriba, más los cuatro caminos
+verificados en Chrome contra build de producción el 2026-09-08.
+*Si se retoma:* no ampliar el motor forma a forma. O se apoya en el compilador
+(un tipo `Opaco<string>` que sólo `lib/errors.ts` sepa abrir) o se acepta que es
+una red, no una demostración.
+
+### 28. La cota de D.6 se apagó por seis vías distintas en seis rondas
+`unit/cota-sesion.test.ts` (1.057 líneas) — reconoce el cliente de auth siguiendo
+el dato, cruza ficheros para encontrar accesores y exige la cota a quien exporta
+algo derivado de la sesión. Aun así, cada revisión encontró una vía nueva: el
+nombre del parámetro, la forma de la condición, el izado a variable, el paso como
+argumento, las cinco maneras de exportar el símbolo, el parámetro desestructurado
+de un callback.
+
+*Contención:* el `Promise.race` de 2 s está puesto y probado en los dos sitios
+que lo necesitan (`GroupView.tsx`, `lib/errors.ts`), y `unit/timeouts.test.ts`
+vigila la cota de transporte de las tres fábricas.
+*Si se retoma:* lo que fallaría en producción es una espera muda de 30 s, que es
+observable. Un test de comportamiento con el servicio de auth colgado vale más
+que la séptima forma sintáctica.
+
+### 29. El ancla de la trayectoria puede ponerse roja sola
+`unit/trayectoria.ts` — busca en todo el repositorio la etiqueta de las tres
+rondas siguientes a la última fila escrita. **Tres veces durante este ciclo se
+puso roja por su propia documentación**: al escribir una etiqueta futura como
+ejemplo en un comentario o en un caso de test. Se resolvió componiendo las
+cadenas en vez de escribirlas, pero la trampa sigue puesta para quien no lo sepa.
+
+*Contención:* está dicho en el comentario del propio fichero.
+*Coste si se deja:* un rojo desconcertante y cinco minutos de quien lo sufra.
+
+### 30. `funcionesQueSanean` decide sobre el traductor, no sobre quien lo usa
+`unit/traductor.ts` — calcula qué exportaciones de `lib/errors.ts` sanean de
+verdad, con un punto fijo sobre el módulo. Es la parte del andamiaje que mejor
+envejece, pero sólo mira **ese** fichero: un traductor en otro módulo no lo
+reconocería nadie.
+
+*Contención:* hoy no existe otro traductor, y `unit/texto-crudo.test.ts` exige
+que toda función exportada del traductor la llame alguien.

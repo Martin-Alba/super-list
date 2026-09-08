@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { ficherosDeProducto } from './producto'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { sql, pool } from './helpers'
@@ -83,7 +84,10 @@ function ficherosDelArnes(): string[] {
   }
   // AA6 — El hard fail no distingue arnés de producto: `app/`, `lib/` y
   // `proxy.ts` son justo lo que corre contra usuarios.
-  recorrer('e2e'); recorrer('unit'); recorrer('supabase/migrations'); recorrer('app'); recorrer('lib')
+  recorrer('e2e'); recorrer('unit'); recorrer('supabase/migrations')
+  // AG9 — el producto sale de su única definición: aquí había una cuarta copia,
+  // que es la cicatriz X2 que AF8 vino a cerrar y dejó a medias.
+  for (const r of ficherosDeProducto()) salida.push(r)
   salida.push('proxy.ts')
   return salida
 }

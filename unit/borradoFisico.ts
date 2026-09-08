@@ -342,14 +342,94 @@ const VERBOS_SQL = new Set([
   'grant', 'revoke', 'set', 'do', 'begin', 'comment', 'declare', 'call', 'execute', 'copy',
 ])
 
+/**
+ * W2 — El despojado de CTE se paraba en el **primer** paréntesis, así que
+ * `with dup as (select … row_number() over (…) …) delete from …` se colaba — y
+ * ésa es la forma canónica de una migración de deduplicación. La única sonda que
+ * cazaba era la que no tenía paréntesis anidados. Aquí se cuentan.
+ */
+function sinCte(sentencia: string): string {
+  const m = sentencia.match(/^\s*with\b\s+(recursive\s+)?/i)
+  if (!m) return sentencia
+  let i = m[0].length
+  /**
+   * X3 — Una CTE puede declarar sus columnas: `with dup(id, r) as (…)`. Contando
+   * paréntesis a secas, el primer grupo que se cerraba era esa lista y el verbo
+   * quedaba en `as`. Se salta el nombre y su lista opcional antes de empezar.
+   */
+  const cabecera = sentencia.slice(i).match(/^\s*[a-z_][\w]*\s*(\([^)]*\))?\s*as\s*/i)
+  if (cabecera) i += cabecera[0].length
+  let profundidad = 0
+  for (; i < sentencia.length; i++) {
+    const c = sentencia[i]
+    if (c === '(') profundidad++
+    else if (c === ')') {
+      profundidad--
+      if (profundidad === 0) {
+        // Tras cerrar una CTE puede venir una coma (otra más) o ya el verbo.
+        const resto = sentencia.slice(i + 1)
+        const coma = resto.match(/^\s*,/)
+        if (!coma) return resto
+        i += coma[0].length
+      }
+    }
+  }
+  return sentencia
+}
+
 export function sqlPeligroso(fuente: string): boolean {
+  /**
+   * V6 — `execute '…'` es LA forma de borrar desde plpgsql, y el despojador vacía
+   * los literales: el peligro desaparecía justo donde vive. Aquí el literal **es**
+   * la sentencia, así que se mira en el texto original.
+   */
+  for (const m of fuente.matchAll(/\bexecute\s+(?:format\s*\(\s*)?'([^']*)'/gi)) {
+    if (PELIGRO_SQL.test(m[1])) return true
+  }
+  /**
+   * X3 — `execute q` con la sentencia en una variable: el literal peligroso está
+   * en la asignación, no en el `execute`. Si el cuerpo ejecuta SQL dinámico y en
+   * algún literal suyo hay un borrado, cuenta.
+   */
+  if (/\bexecute\s+[a-z_][\w]*/i.test(fuente)) {
+    // Y7 — la sentencia puede construirse por concatenación: se juntan los
+    // literales de la asignación antes de mirarlos.
+    for (const m of fuente.matchAll(/:=\s*((?:'[^']*'\s*(?:\|\|\s*)?)+)/g)) {
+      const junto = [...m[1].matchAll(/'([^']*)'/g)].map(x => x[1]).join('')
+      if (PELIGRO_SQL.test(junto)) return true
+    }
+  }
+  // Y7 — el cuerpo de una función SQL es un literal: `as 'delete from …'`.
+  for (const m of fuente.matchAll(/\bas\s+'([^']*)'/gi)) if (PELIGRO_SQL.test(m[1])) return true
+  // Y7 — `merge … when matched then delete`.
+  if (/\bmerge\b[\s\S]*?\bthen\s+delete\b/i.test(fuente)) return true
   return sentenciasSql(fuente).some(sentencia => {
     // `begin`, `declare` y compañía no separan con punto y coma dentro de un
     // cuerpo plpgsql, así que el borrado queda pegado a ellos en la misma
     // sentencia. Se retiran para llegar al verbo que de verdad manda.
-    const limpia = sentencia
-      .replace(/\bfor\s+delete\b/gi, '')
-      .replace(/^\s*(begin|declare|do|execute|language\s+\w+|end)\b/i, '')
+    /**
+     * Y7 — Los verbos de control se retiran **hasta estabilizarse**: en
+     * `begin loop delete …` el primero deja al descubierto el segundo, y con una
+     * sola pasada el primer token seguía siendo `loop`.
+     */
+    let limpia = sentencia.replace(/\bfor\s+delete\b/gi, '')
+    for (;;) {
+      const antes = limpia
+      limpia = limpia
+        .replace(/^\s*(begin|declare|do|language\s+\w+|end|loop|end\s+loop|then|else|exit)\b/i, '')
+        .replace(/^\s*for\b[^;]*?\bloop\b/i, '')
+        .replace(/^\s*foreach\b[^;]*?\bloop\b/i, '')
+        .replace(/^\s*if\b[^;]*?\bthen\b/i, '')
+        .replace(/^\s*elsif\b[^;]*?\bthen\b/i, '')
+        .replace(/^\s*while\b[^;]*?\bloop\b/i, '')
+        .replace(/^\s*case\b[^;]*?\bthen\b/i, '')
+        .replace(/^\s*when\b[^;]*?\bthen\b/i, '')
+        .replace(/^\s*exception\b[^;]*?\bthen\b/i, '')
+      if (limpia === antes) break
+    }
+    limpia = sinCte(limpia)
+    // Y `execute '…'` es LA forma de borrar desde plpgsql: se destapa.
+    limpia = limpia.replace(/^\s*execute\s+/i, '')
     const primerToken = limpia.trim().split(/\s+/)[0]?.toLowerCase() ?? ''
 
     // Prosa: los títulos de los tests dicen "un TRUNCATE como anon es
