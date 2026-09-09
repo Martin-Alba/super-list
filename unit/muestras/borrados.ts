@@ -24,6 +24,9 @@ export const FORMAS_PROHIBIDAS: ReadonlyArray<readonly [string, string]> = [
   ['rpc dinámica', 'await admin.rpc(nombreFuncion, {})'],
   ['fetch con method DELETE', "await fetch(url, { method: 'DELETE' })"],
   ['fetch con method en minúsculas', "await fetch(url, { method: 'delete' })"],
+  // La otra mitad de la exención de la deuda 20: sin el tipo delante, un
+  // `.delete()` sobre algo que nadie ha declarado sigue siendo sospechoso.
+  ['almacén sin tipar', 'conTienda(LISTAS, "readwrite", t => t.delete(clave))'],
 ]
 
 /**
@@ -41,6 +44,14 @@ export const FORMAS_LEGITIMAS: ReadonlyArray<readonly [string, string]> = [
   ['removeChannel', 'await admin.removeChannel(canal)'],
   ['rpc del producto', "await cli.rpc('decide_member', { p_group_id: g })"],
   ['method distinto de DELETE', "await fetch(url, { method: 'POST' })"],
+  /**
+   * Deuda 20, cumplida: el almacén local llegó y la guarda lo marcó. Queda aquí
+   * como forma legítima para que un cambio futuro de la guarda que vuelva a
+   * marcarla se ponga rojo. El receptor es el parámetro de la transacción, que es
+   * la vía que la guarda ya reconoce.
+   */
+  ['tienda de IndexedDB tipada', 'conTienda(LISTAS, "readwrite", (t: IDBObjectStore) => t.delete(clave))'],
+  ['cola de IndexedDB tipada', 'conTienda(COLA, "readwrite", (t: IDBObjectStore) => t.delete(id))'],
 ]
 
 /** Formas legítimas en SQL que no deben cazarse (Z10). */

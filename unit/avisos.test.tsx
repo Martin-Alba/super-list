@@ -113,10 +113,13 @@ describe('R5 un guardado fallido no se lleva lo escrito', () => {
   it('el campo conserva el texto del usuario tras fallar', async () => {
     montar([item('i1', 'original')])
     const campo = screen.getByLabelText('Nombre') as HTMLInputElement
+    // R1 — sin código y con la red del navegador en pie, el fallo es del
+    // servidor de datos, no de la conexión de quien escribe. Lo que R5 exige es
+    // que el campo conserve lo tecleado, y eso no cambia.
     respuesta = { error: 'TypeError: failed to fetch', code: null, data: 0 }
     fireEvent.change(campo, { target: { value: 'lo que escribi' } })
     fireEvent.blur(campo)
-    await waitFor(() => expect(screen.getByTestId('notice').textContent).toMatch(/conexión/i))
+    await waitFor(() => expect(screen.getByTestId('notice').textContent).toMatch(/despertando/i))
     expect(campo.value, 'se perdió lo tecleado y el aviso invita a reintentar').toBe('lo que escribi')
   })
 

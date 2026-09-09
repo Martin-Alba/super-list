@@ -58,7 +58,9 @@ export async function activeItems(
   } catch (fallo) {
     // Una promesa rechazada —red caída, cota agotada— también traía el objeto
     // hasta aquí. Se clasifica y se suelta.
-    return { data: [], clase: claseDe(fallo) ?? 'red', code: null }
+    // `claseDe` nunca devuelve `null` para un error de verdad, así que aquí no
+    // hace falta comodín: el `?? 'red'` que había era una rama inalcanzable.
+    return { data: [], clase: claseDe(fallo), code: null }
   }
 }
 

@@ -32,8 +32,8 @@ describe('R1 el traductor decide por código', () => {
 
   // Sonda (§E.2): el mismo código con y sin sesión NO puede dar el mismo mensaje.
   it('42501 dice cosas distintas según haya sesión o no', () => {
-    const conSesion = mensajeDe(claseDe({ message: 'permission denied for table items', code: '42501' }, true))
-    const sinSesion = mensajeDe(claseDe({ message: 'permission denied for table items', code: '42501' }, false))
+    const conSesion = mensajeDe(claseDe({ message: 'permission denied for table items', code: '42501' }, { haySesion: true }))
+    const sinSesion = mensajeDe(claseDe({ message: 'permission denied for table items', code: '42501' }, { haySesion: false }))
     expect(sinSesion).not.toBe(conSesion)
     expect(sinSesion).toBe(SESION)
   })
@@ -46,19 +46,19 @@ describe('R3/R4 lo que ve el usuario', () => {
       ['duplicate key value violates unique constraint "items_nombre_unico"', '23505'],
       ['new row violates row-level security policy for table "items"', '42501'],
     ] as const) {
-      const visto = mensajeDe(claseDe({ message: raw, code: code }, true))
+      const visto = mensajeDe(claseDe({ message: raw, code: code }, { haySesion: true }))
       expect(visto).not.toMatch(/violates|constraint|relation |row-level|policy|table "/i)
     }
   })
 
   it('la sesión caducada se nombra como tal, no como falta de acceso', () => {
-    expect(mensajeDe(claseDe({ message: 'JWT expired', code: 'PGRST301' }, true))).toBe(SESION)
+    expect(mensajeDe(claseDe({ message: 'JWT expired', code: 'PGRST301' }, { haySesion: true }))).toBe(SESION)
     expect(SESION).toMatch(/sesión/i)
     expect(SESION).not.toMatch(/acceso a este grupo/i)
   })
 
   it('el duplicado tiene su propio mensaje', () => {
-    expect(mensajeDe(claseDe({ message: 'duplicate key value', code: '23505' }, true))).toBe(DUPLICADO)
+    expect(mensajeDe(claseDe({ message: 'duplicate key value', code: '23505' }, { haySesion: true }))).toBe(DUPLICADO)
     expect(DUPLICADO).toMatch(/ya est/i)
   })
 })
@@ -75,7 +75,7 @@ describe('S3 el 42501 del trigger no es el 42501 de RLS', () => {
     'a deleted item cannot be restored',
   ])('%j es integridad, no falta de acceso', (msg) => {
     expect(clasificar('42501', msg, true)).toBe('integridad')
-    expect(mensajeDe(claseDe({ message: msg, code: '42501' }, true))).toBe('Ese cambio no está permitido.')
+    expect(mensajeDe(claseDe({ message: msg, code: '42501' }, { haySesion: true }))).toBe('Ese cambio no está permitido.')
   })
 
   it('el 42501 de RLS sigue siendo falta de acceso', () => {

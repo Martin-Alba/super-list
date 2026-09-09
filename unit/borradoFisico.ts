@@ -38,6 +38,8 @@ type Contexto = {
  * correcto se acaba desactivando — y la spec siguiente toca cookies el primer
  * día.
  */
+const TIPOS_DE_COLECCION = new Set(['Set', 'Map', 'IDBObjectStore'])
+
 const ACCESORES_SEGUROS = new Set([
   'searchParams', 'cookies', 'headers', 'formData', 'sessionStorage', 'localStorage',
   'cache', 'caches', 'dataTransfer',
@@ -163,10 +165,17 @@ function contexto(arbol: ts.SourceFile): Contexto {
         }
       }
     }
-    // AB2 — un `Set`/`Map` recibido por parámetro está tipado, y eso basta.
+    /**
+     * AB2 — una colección recibida por parámetro está **tipada**, y eso basta.
+     * La deuda 20 anunció que el primer almacén local chocaría aquí, y así fue:
+     * un `store.delete(clave)` de IndexedDB es un borrado local, no contra la
+     * base. Se añade su tipo a la lista, que es lo que esa deuda dejó escrito —
+     * exentar el accesor con su muestra, nunca desactivar la guarda. El nombre
+     * sin anotar sigue marcándose: la exención la da el tipo, no la costumbre.
+     */
     if (ts.isParameter(nodo) && ts.isIdentifier(nodo.name) && nodo.type &&
         ts.isTypeReferenceNode(nodo.type) && ts.isIdentifier(nodo.type.typeName) &&
-        (nodo.type.typeName.text === 'Set' || nodo.type.typeName.text === 'Map')) {
+        TIPOS_DE_COLECCION.has(nodo.type.typeName.text)) {
       parametros.add(nodo.name.text)
     }
     ts.forEachChild(nodo, visitar)

@@ -35,7 +35,18 @@ const conClase = async (clase: Clase | null) => {
     group: { id: 'g1', name: 'Familia' }, items: [], members: [], profiles: [], clase,
   })
   const elemento = await GroupPage({ params: Promise.resolve({ id: 'g1' }) })
-  return (elemento as { props: { loadClase?: Clase | null } }).props
+  /**
+   * Se busca al que **lleva** la prop, esté en la raíz o dentro de un envoltorio.
+   * La página ha devuelto las dos formas en este ciclo —fragmento mientras
+   * `RecordarUsuario` la acompañaba, vista suelta desde que vive en el layout— y
+   * afirmar sobre una daba `undefined` con la otra: el test se ponía rojo por el
+   * envoltorio, no por la costura que mira. La costura es quién recibe la clase.
+   */
+  const lleva = (n: unknown): n is { props: { loadClase?: Clase | null } } =>
+    !!n && typeof n === 'object' && 'props' in n && 'loadClase' in (n as { props: object }).props
+  if (lleva(elemento)) return elemento.props
+  const hijos = (elemento as { props?: { children?: unknown } }).props?.children
+  return (Array.isArray(hijos) ? hijos : [hijos]).find(lleva)?.props ?? {}
 }
 
 describe('AE7 la página reenvía la clase que el payload le da', () => {

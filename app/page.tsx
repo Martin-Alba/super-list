@@ -1,6 +1,6 @@
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase/server'
-import { signOutAction } from './actions'
+import { BotonSalir } from './BotonSalir'
 import { CreateGroupForm } from './CreateGroupForm'
 
 export default async function Home() {
@@ -25,9 +25,7 @@ export default async function Home() {
     <main className="mx-auto flex min-h-dvh max-w-md flex-col gap-6 p-6">
       <header className="flex items-center justify-between gap-4">
         <h1 className="text-2xl font-semibold">Mis grupos</h1>
-        <form action={signOutAction}>
-          <button className="min-h-[44px] px-3 text-sm text-neutral-500" data-testid="signout">Salir</button>
-        </form>
+        <BotonSalir usuario={user.id} />
       </header>
 
       <ul className="flex flex-col gap-2" data-testid="groups">

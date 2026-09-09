@@ -230,10 +230,101 @@ encontró CRITICAL en seis iteraciones más, entre ellos dos que este mismo
 documento habría dado por cerrados. El alcance de la frase es el ciclo del
 esqueleto, no el repositorio.
 
+---
+
+## 2026-09-09 — Que la app funcione donde se usa (PWA con cola local + la pausa del plan gratuito)
+
+Entrega pedida por el usuario: la app se queda en el plan gratuito de Supabase, y
+la lista se abre en un supermercado. Dos cosas: **apuntar sin conexión** y
+**explicar el primer acceso tras la pausa** del proyecto, aprovechando para saldar
+la deuda 7 de `lib/errors.ts`.
+
+### Qué se construyó
+
+- **Un traductor de errores que clasifica por código, no por texto** (`lib/errors.ts`).
+  Toda respuesta de PostgREST trae código; **no traer ninguno** es la firma fiable
+  de que no ha contestado nadie que hable PostgREST. Con eso más el estado de red
+  del navegador salen tres estados distinguibles: sin red del usuario, servidor
+  dormido, y fallo real. El mensaje de proyecto pausado no se puede clasificar por
+  texto: llega como `{message:"Project is paused"}`, sin código y sin estado.
+- **Cola local en IndexedDB** (`lib/local.ts`): apuntar sin red, caducidad a 24 h,
+  drenado FIFO de uno en uno al volver la conexión. La idempotencia no la pone el
+  bucle: la pone el índice único de la base — reenviar un alta que ya entró
+  devuelve `23505`, y eso es éxito.
+- **Service worker escrito a mano** (`public/sw.js`) y **shell estático**
+  (`app/sin-conexion/`) para el arranque en frío sin red. El shell **no lleva
+  dato de nadie**: lo estático va a Cache Storage, lo del usuario a IndexedDB,
+  que es lo único que `olvidarTodo` puede vaciar.
+- **PWA instalable** (`app/manifest.ts`, iconos generados sin dependencias).
+
+### Decisiones que conviene no volver a discutir
+
+- **Ninguna navegación se cachea.** La primera versión guardaba el documento y eso
+  resultó ser un fallo duro de A.1: medido, 9.851 B con el nombre del grupo y sus
+  ítems, sobreviviendo al cierre de sesión y legibles por otro usuario del mismo
+  dispositivo con sólo navegar. Un documento renderizado con sesión es dato de
+  alguien; en un disco compartido no entra.
+- **Quién está dentro se registra en el layout, y en ningún otro sitio.** Estuvo en
+  la vista del grupo y llegaba tarde; se movió a las páginas con sesión y seguía
+  llegando tarde, porque la rama `pending` gana antes y la página de invitación
+  redirige sin renderizar. Medido con dos sesiones reales: un `pending` abría sin
+  red la URL del grupo de otro y veía su lista.
+- **El shell exige sesión en el dispositivo antes de pintar la instantánea.** La
+  marca dice *de quién* es la foto, no *quién* está mirando. Medido con Chromium:
+  borradas las cookies y sin red, una pestaña nueva pintaba la lista del anterior.
+  Fuera de alcance, escrito: quien pueda fabricar la cookie o abrir el almacén con
+  las herramientas del navegador ya tiene el dispositivo.
+- **La sesión la lee el navegador, no el servidor.** Preguntarla en el layout
+  añadía dos viajes a `/auth/v1/user` por render sobre los que ya hacen el proxy y
+  la página: medido en el mismo camino autenticado, **15 → 11** peticiones, y con
+  el servicio de auth colgado el peor caso bajaba de 20,0 s a 10 s. Para una clave
+  local no hace falta autoridad: un id equivocado sólo encuentra cero
+  instantáneas, que es fallar cerrado.
+- **Nada entra en la caché sin decir qué es, y una instalación a medias no deja
+  nada escrito.** Un portal cautivo contesta 200 y HTML para todo: sin
+  comprobarlo, un chunk pedido bajo esa wifi se guardaba como si fuera código, y
+  como los estáticos se sirven de caché sin revalidar, el dispositivo quedaba con
+  una app que no arranca ni con red ni sin ella.
+
+### El techo del ciclo disparó, y se escaló
+
+En la quinta iteración la revisión seguía devolviendo HIGH. La regla dice parar y
+escalar, y se paró: **no se decidió seguir por criterio propio**. El usuario eligió
+una vuelta acotada a dos hallazgos, y esa vuelta —la sexta— destapó un CRÍTICO que
+ella misma había introducido, que también se arregló por ser suyo, no alcance
+nuevo.
+
+Los dos recuentos, leídos en cada vuelta: **iteraciones que arreglaron algo que un
+usuario sufre en el producto funcionando: 6 de 6**. Ninguna vuelta fue de
+instrumentos solos, y el segundo número no adelantó al primero en ninguna ronda.
+Es lo contrario del ciclo de 18 iteraciones de 2026-09-08, donde el último defecto
+alcanzable por un usuario se arregló en la octava.
+
+### Trayectoria del cuarto ciclo — la app sin conexión
+
+> **Aviso de etiquetas.** Las marcas que este ciclo dejó **en el código** son
+> `I`–`M` (`I1`…`I10`, `J1`…`J8`, `K1`…`K8`, `L1`…`L7`, `M1`…`M4`), y esas letras
+> ya las había usado el primer ciclo: `I10` significa dos cosas distintas en dos
+> ficheros. Se descubrió al cerrar, con 242 ocurrencias repartidas y rangos
+> numéricos que se solapan, así que renombrarlas con una expresión regular no es
+> posible sin leer cada sitio. La columna de esta tabla lleva el **código global**,
+> que es el que el ancla de la trayectoria exige monótono; la última columna dice
+> qué marca buscar en el código. Anotado en `docs/TECHNICAL_DEBT.md` 39.
+
+| # | Fecha | Qué encontró la revisión | Qué cambió (marca en el código) |
+|---|---|---|---|
+| base | 2026-09-08 | — | Traductor por código, cola local, service worker, shell, manifiesto, indicador de red (sin marca) |
+| 2 (AK) | 2026-09-08 | El worker cacheaba el documento: 9.851 B con datos de un grupo legibles por otro usuario del dispositivo | Ninguna navegación se cachea; shell estático; instantánea sólo con red; reintento del servicio dormido (marcas `I…`) |
+| 3 (AL) | 2026-09-09 | `/sin-conexion` no era pública: el precacheado guardaba el 307 al login, y el arranque en frío daba `ERR_FAILED` a todo usuario real. Y un `pending` veía sin red la lista de otro | Ruta pública; el precacheado rechaza redirecciones; registro de usuario al layout; el cerrojo del drenado deja de tragarse trabajo (marcas `J…`) |
+| 4 (AM) | 2026-09-09 | La puerta de terminal estaba **roja** y se declaró verde: se leyó el recuento, no el código de salida. Y el shell pintaba la instantánea sin comprobar que quedara sesión | La puerta se lee por su código de salida; el shell exige cookie de sesión; el almacén informa en vez de romper; el layout deja de preguntar por la sesión (marcas `K…`) |
+| 5 (AN) | 2026-09-09 | Tres requisitos de la vuelta anterior resueltos a medias: `open()` que lanza, la cantidad cruzada, y el arnés arreglado en un sitio y no en su estructura | `try` dentro del ejecutor; se devuelve el alta entera o nada; la marca del anterior se quita antes de borrar; dos tests que no podían fallar, arreglados (marcas `L…`) |
+| 6 (AO) | 2026-09-09 | **Techo disparado y escalado.** El usuario acotó a dos: el vaciado con red pisaba lo tecleado, y los recursos del shell se daban por buenos | Una sola forma para los dos caminos; los recursos del shell son el shell; y lo que la propia vuelta abrió: nada entra en caché sin decir qué es, y una instalación fallida se purga (marcas `M…`) |
+
 ### Siguiente
 
 `docs/ROADMAP.md` — lo primero es transferir la propiedad y borrar el grupo.
-`docs/TECHNICAL_DEBT.md` — lo que quedó vivo, medido y con su motivo.
+`docs/TECHNICAL_DEBT.md` — lo que quedó vivo, medido y con su motivo; las entradas
+31 a 38 salieron de este ciclo.
 
 
 ---
@@ -252,8 +343,8 @@ vez (2026-09-07) el documento decía 221 tests en 36 ficheros cuando eran 245 en
 37, y la guarda que debía impedirlo daba verde sobre un documento con cifras
 inventadas.
 
-- Ficheros de prueba unitaria: 51
-- Ficheros de prueba de navegador: 15
+- Ficheros de prueba unitaria: 61
+- Ficheros de prueba de navegador: 16
 
 
 ---
@@ -356,3 +447,65 @@ Medido el 2026-09-08, con `.next` borrado antes del build:
 - **`details` en producción.** La medida de que el `23514` de `create_group`
   llega con `details` poblado —UUID del grupo y fila entera— se tomó contra el
   stack **local**. No se ha comprobado contra el proyecto hospedado.
+
+---
+
+# Verificación del ciclo de la app sin conexión (2026-09-09)
+
+## Terminal
+
+Leída **por su código de salida**, no por el recuento impreso. Ése fue el defecto
+de la cuarta vuelta (2026-09-09): la suite decía «passed» y el proceso salía con
+1, por una promesa sin dueño en el banco del service worker.
+
+2026-09-09 — `pnpm typecheck && pnpm lint && pnpm test && pnpm build` → **EXIT=0**.
+
+2026-09-09 — 1.349 casos en 61 ficheros unitarios y 16 de navegador; al empezar el
+ciclo (2026-09-08) eran 1.204 en 51 y 16.
+
+2026-09-09 — coste medido sobre el diff sin commitear: producto 639 líneas nuevas
+en 9 ficheros y +485/−29 sobre 8 existentes; pruebas 2.067 nuevas en 11 ficheros y
++88/−23 sobre 10. Razón pruebas:producto **1,9:1**, frente a 5,4:1 (2026-09-08).
+
+## Runtime — qué se ejercitó y contra qué build
+
+2026-09-09 — `pnpm test:e2e` **tres veces desde frío** contra un artefacto recién
+construido, con `.next` borrado y Playwright levantando su propio `next start`:
+EXIT=0 las tres (2026-09-09), 81/81. Antes de la primera pasada se mató un `next-server`
+huérfano del puerto 3000 que servía un build anterior — el fallo que el propio
+ciclo advierte de no cometer.
+
+2026-09-09 — **Chrome real, a mano, con la app apagada** (sesión real sembrada,
+`next start` detenido a propósito):
+
+- arranque en frío en `/g/<id>` → el shell pinta «aceitunas · 1 bote» y «pan»;
+- borrada la cookie de sesión, los datos **siguen** en IndexedDB y no se pinta
+  ninguna fila: sale «Necesitas conexión para ver este grupo por primera vez»;
+- en `/` → «Necesitas conexión para entrar y ver tus grupos»;
+- instalación del worker entrando **anónimo por la portada**: `super-v2` con el
+  shell dentro.
+
+2026-09-09 — coste de sesión por render, contando peticiones a `/auth/v1/user` en
+el contenedor de auth sobre el mismo camino autenticado: **15 → 11**, determinista
+en dos vueltas de cada variante.
+
+## Qué NO se verificó, y qué se hizo en su lugar
+
+- **La cola sin red, a mano en Chrome.** Apagar el servidor no pone al navegador
+  sin red: `navigator.onLine` sigue en `true` y la sonda de `useOffline` no
+  dispara con la pestaña quieta. Eso es «servidor caído», que es otro estado. En
+  su lugar (2026-09-09): los casos de `e2e/sin-red.spec.ts` usan
+  `context.setOffline(true)`, que es un navegador realmente desconectado.
+- **El viewport de 390 px en Chrome real.** La herramienta de redimensionar
+  informa éxito y la anchura de ventana no cambia. En su lugar (2026-09-09): la
+  suite de Playwright corre **todos** sus casos a 390×844 con `isMobile`.
+- **El proyecto hospedado.** Todo se midió contra la instancia local de Supabase.
+  La pausa del plan gratuito —el escenario que R2 nombra— se reprodujo apagando
+  el contenedor, no esperando una semana.
+- **Que el navegador reintente un `install` que rechaza.** Está inferido de la
+  especificación de service workers, no medido en navegador. Anotado en la deuda
+  33 junto con el único reintento que sí está medido: uno por carga de página,
+  desde `app/RegistrarSW.tsx`.
+- **Un despliegue real.** `public/sw.js` no se ha desplegado nunca, así que el
+  comportamiento entre versiones —lo que las deudas 31 y 32 describen— no se ha
+  observado; se dedujo del código y se midió en banco.

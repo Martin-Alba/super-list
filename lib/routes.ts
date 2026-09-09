@@ -5,7 +5,17 @@
  * sitio) y las demás casan exactas o como segmento completo, nunca como
  * subcadena: '/loginx' no es '/login'.
  */
-export const PUBLIC_ROUTES = ['/', '/login', '/auth/callback', '/invite'] as const
+/**
+ * J2 — `/sin-conexion` entra aquí porque el service worker la precachea **sin
+ * sesión**: la primera visita de cualquiera es anónima, y ahí es donde se
+ * instala. Sin esto el proxy la redirigía a `/login` y lo que se guardaba bajo la
+ * clave del shell era la redirección — medido: arranque en frío sin red con
+ * `ERR_FAILED` para todo usuario real, y verde en la suite sólo porque sus
+ * caminos entran por `/auth/callback`, que no renderiza layout.
+ *
+ * No enseña nada de nadie: es una página estática que lee el almacén local.
+ */
+export const PUBLIC_ROUTES = ['/', '/login', '/auth/callback', '/invite', '/sin-conexion'] as const
 
 export function isPublicRoute(pathname: string): boolean {
   for (const route of PUBLIC_ROUTES) {

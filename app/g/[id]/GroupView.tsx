@@ -1,12 +1,16 @@
 'use client'
 
-import { useEffect, useRef, useState, useTransition } from 'react'
+import { useCallback, useEffect, useRef, useState, useTransition } from 'react'
 import { useRouter } from 'next/navigation'
+import { useSinRed } from '@/lib/useSinRed'
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
 import { activeItems, addItem, mergeItems, mismoProducto, softDeleteItem, updateItem, type Item } from '@/lib/items'
-import { ESCRIBE_NOMBRE, GONE, LISTA_EN_VIVO, mensajeDe, refinarSinSesion, RELECTURA,
-  SIN_CONEXION_LISTA, type Clase } from '@/lib/errors'
+import { caducados, ESCRIBE_NOMBRE, esperasDeReintento, GONE, LISTA_EN_VIVO, mensajeDe,
+  PENDIENTE, refinarSinRed, refinarSinSesion, RELECTURA, SIN_ALMACEN, SIN_CONEXION_LISTA, SIN_RED,
+  SIN_RED_ACCION, type Clase } from '@/lib/errors'
+import { encolar, guardarLista, leerCola, leerLista, quitarDeCola, reparte, siguienteEnCola,
+  type Pendiente } from '@/lib/local'
 import { useGroupChannel } from '@/lib/useGroupChannel'
 import { createInviteAction, decideMemberAction, leaveGroupAction } from '@/app/actions'
 
@@ -30,7 +34,15 @@ export function GroupView({
   /** S10 — sin el código, el único error de servidor que se pinta decide por texto. */
 }) {
   const router = useRouter()
+  /**
+   * R1 — Mide **la red de quien usa la app**, no la base: por eso sirve para
+   * distinguir «tu red está caída» de «la base no contesta», que son dos fallos
+   * distintos con dos salidas distintas para el usuario.
+   */
+  const sinRed = useSinRed()
   const [items, setItems] = useState<Item[]>(initialItems)
+  /** R3 — Lo apuntado sin red, aún sin llegar al servidor. */
+  const [pendientes, setPendientes] = useState<Pendiente[]>([])
   const [name, setName] = useState('')
   const [quantity, setQuantity] = useState('')
   const [invite, setInvite] = useState<string | null>(null)
@@ -106,7 +118,27 @@ export function GroupView({
   // U6 / AD3 — Del servidor llega la **clase**, no un mensaje: el texto crudo de
   // Postgres ya no existe fuera de `lib/errors.ts`, así que no hay nada que
   // traducir aquí ni nada que reclasificar a partir del código.
-  const avisoVisible = notice ?? (loadClase
+  /**
+   * I6 — `loadClase` es una **prop**: `limpiarAviso()` vacía el estado y el aviso
+   * derivado seguía en pantalla para siempre. Lo cazó el test del reintento: la
+   * app se recuperaba, traía la lista, y el usuario seguía leyendo que el
+   * servicio estaba despertando. Cuando el reintento sale bien, la carga deja de
+   * estar fallida.
+   */
+  /**
+   * J7 — Se recuerda **qué** carga se resolvió, no que alguna se resolvió. Con un
+   * booleano, el primer reintento con éxito silenciaba el aviso derivado para el
+   * resto de la vida de la pestaña: una segunda carga fallida —otra clase, un
+   * acceso perdido— no se anunciaba, y el usuario leía una lista vieja sin que
+   * nadie le dijera que ya no la estaba trayendo nadie.
+   *
+   * Límite conocido, escrito porque es el borde: la **misma** clase llegando otra
+   * vez tras un refresco no se distingue de la que ya se resolvió —la página no
+   * manda identidad por carga— y sigue callada. Anunciarla exigiría esa identidad
+   * y no la vale.
+   */
+  const [resueltaPara, setResueltaPara] = useState<Clase | null>(null)
+  const avisoVisible = notice ?? (loadClase && loadClase !== resueltaPara
     ? { texto: mensajeDe(loadClase) ?? '', clase: loadClase }
     : null)
 
@@ -150,7 +182,17 @@ export function GroupView({
      */
     secuencia.current++
     if (!clase) return
-    setNotice({ texto: mensajeDe(clase) ?? '', clase })
+    /**
+     * R1 — `lib/items.ts` no puede leer un hook, así que devuelve `servidor` para
+     * todo lo que llega sin código. Aquí, que sí se sabe el estado de la red, se
+     * refina: si la red del usuario está caída, el fallo es suyo y no del
+     * servidor. Es la misma forma que el afinado por sesión de más abajo.
+     */
+    const real = refinarSinRed(clase, !sinRed) ?? clase
+    setNotice({ texto: mensajeDe(real) ?? '', clase: real })
+
+    // R2 — el servicio pausado despierta solo: se reintenta sin que nadie pulse.
+    if (real === 'servidor') { void reintentar(++secuencia.current); return }
 
     // Sólo `42501` cambia de significado según haya sesión o no: es el único
     // código que la base reutiliza para las dos cosas.
@@ -170,10 +212,106 @@ export function GroupView({
       if (data.session || mio !== secuencia.current) return
       // AD1 — el afinado es una regla sobre la clase, no una segunda
       // clasificación: sin sesión, «no tienes acceso» es «se te ha caducado».
-      const afinada = refinarSinSesion(clase)
+      const afinada = refinarSinSesion(real)
       if (afinada) setNotice({ texto: mensajeDe(afinada) ?? '', clase: afinada })
     } catch { /* se queda el aviso ya pintado: menos preciso, pero visible */
     } finally { if (reloj) clearTimeout(reloj) }
+  }
+
+  /**
+   * R2 / D.6 — El plan gratuito pausa el proyecto tras una semana sin uso, que es
+   * justo la frecuencia con que se abre una lista de la compra. Despierta solo en
+   * unos segundos, así que la app espera por el usuario en vez de pedirle que
+   * recargue. Las esperas viven en el traductor porque son la cota que D.6 exige,
+   * y una cota dentro de un componente no la puede afirmar nadie.
+   *
+   * Se sella con la misma secuencia que el resto de avisos: si mientras se espera
+   * pasa cualquier otra cosa, este reintento ya no tiene nada que decir.
+   */
+  const reintentar = async (mio: number) => {
+    for (const espera of esperasDeReintento()) {
+      await new Promise(r => setTimeout(r, espera))
+      if (mio !== secuencia.current) return
+      const r = await activeItems(createClient(), group.id)
+      if (mio !== secuencia.current) return
+      if (!r.clase) {
+        setItems(prev => mergeItems(r.data, prev))
+        setResueltaPara(loadClase ?? null)
+        // U3 — se limpia por la única puerta que sella. Un `setNotice(null)`
+        // suelto deja que el afinado en vuelo reaparezca encima.
+        limpiarAviso()
+        return
+      }
+    }
+  }
+
+  /**
+   * R4 — Drena la cola: el más antiguo primero y **uno cada vez**. Dos envíos
+   * simultáneos sobre el mismo grupo son la carrera que D.2 prohíbe resolver en
+   * memoria del proceso.
+   *
+   * La idempotencia no la pone este bucle: la pone la base. Reenviar un alta que
+   * ya entró devuelve `23505` por el índice único de nombre normalizado, y eso es
+   * éxito — el producto está, que es lo que se quería. Sin esa constraint habría
+   * que inventar aquí una clave de deduplicación, y sería peor.
+   */
+  const drenarUnaVez = useCallback(async () => {
+    let cola = await leerCola(me.id)
+    for (;;) {
+      const p = siguienteEnCola(cola, group.id)
+      if (!p) return
+      const r = await addItem(createClient(), group.id, me.id, p.nombre, p.cantidad)
+      // Cualquier otro fallo deja la cola como está: se reintentará. Parar en el
+      // primero conserva el orden, que es lo que el usuario apuntó.
+      if (r.clase && r.code !== '23505') return
+      await quitarDeCola(p.id)
+      cola = cola.filter(x => x.id !== p.id)
+      setPendientes(prev => prev.filter(x => x.id !== p.id))
+      if (r.data) setItems(prev => mergeItems([r.data as Item], prev))
+    }
+  }, [group.id, me.id])
+
+  const drenando = useRef(false)
+  const pedido = useRef(false)
+  /**
+   * I7/J3 — El cerrojo evita el **solape**, no el trabajo. `sinRed` parpadea por
+   * diseño, y dos drenados a la vez invierten el orden que R4 promete; pero la
+   * primera versión descartaba el segundo en silencio, y como el bucle trabaja
+   * sobre la cola leída al principio, lo apuntado durante un envío en vuelo no se
+   * mandaba nunca — se quedaba hasta el siguiente cambio de red, y a las 24 h se
+   * descartaba con aviso. Se cambió un defecto por otro.
+   *
+   * Ahora el que llega tarde deja constancia, y quien tiene el cerrojo vuelve a
+   * mirar la cola antes de soltarlo.
+   */
+  const drenar = useCallback(async () => {
+    if (drenando.current) { pedido.current = true; return }
+    drenando.current = true
+    try {
+      do {
+        pedido.current = false
+        await drenarUnaVez()
+      } while (pedido.current)
+    } finally { drenando.current = false }
+  }, [drenarUnaVez])
+
+
+  /**
+   * K2/L4 — Devuelve al campo el alta que no llegó a entrar, **sólo si nadie ha
+   * tecleado desde que salió**.
+   *
+   * El campo se vacía antes del `await` para que apuntar dos cosas seguidas no
+   * obligue a esperar —es el gesto normal en un pasillo—, así que entre el vaciado
+   * y la vuelta hay tiempo de sobra para escribir otra cosa. La primera versión
+   * pisaba lo tecleado (I4: de seis altas seguidas entraban tres). La segunda miró
+   * cada campo por su cuenta y cruzó dos productos: se pedía «pan» y salía
+   * «pan, 2». Nombre y cantidad son **un** alta, así que la pregunta es una sola,
+   * y se hace sobre el gesto —¿ha tecleado alguien?— y no sobre el contenido.
+   */
+  const tecleado = useRef(0)
+  const devolver = (nombre: string, cantidad: string | null, desde: number) => {
+    if (tecleado.current !== desde) return
+    setName(nombre); setQuantity(cantidad ?? '')
   }
 
   const avisarTexto = (texto: string, clase: Clase = 'generico') => {
@@ -187,6 +325,69 @@ export function GroupView({
    * `setNotice(null)` suelto.
    */
   const limpiarAviso = () => { secuencia.current++; setNotice(null) }
+
+  /**
+   * R5/R6 — Al abrir: se descarta lo que lleva más de un día en la cola y se dice
+   * cuánto, y si no hay red se pinta la última lista conocida. La instantánea sólo
+   * se lee cuando hace falta: con red manda el servidor, siempre.
+   */
+  useEffect(() => {
+    void (async () => {
+      // I3/K7 — quién está dentro lo registra `RecordarUsuario`, que corre en
+      // **toda** página desde el layout: un segundo usuario del mismo dispositivo
+      // entra por la portada o por una invitación, no por aquí. Por eso este
+      // efecto no comprueba el cambio de usuario: cuando llega, ya está hecho.
+      const cola = await leerCola(me.id)
+      const { vivos, caducados: viejos } = reparte(cola, Date.now())
+      await Promise.all(viejos.map(x => quitarDeCola(x.id)))
+      setPendientes(vivos.filter(x => x.grupo === group.id))
+      if (viejos.length) avisarTexto(caducados(viejos.length), 'texto')
+      const guardada = await leerLista(me.id, group.id)
+      if (guardada?.length) setItems(prev => (prev.length ? prev : guardada))
+    })()
+    // Sólo al montar: lo que pase después lo llevan los otros dos efectos.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  /**
+   * R6 — La instantánea guarda lo que **el servidor** dijo, así que sólo se
+   * escribe con red. Si se escribiera sin ella, un arranque en frío con la lista
+   * aún vacía la borraría justo cuando hace falta.
+   */
+  /**
+   * I5 — Sólo cuando el servidor **contestó**. Medido en la revisión: con la base
+   * pausada, `loadGroupPayload` devuelve la lista vacía junto a su clase de error,
+   * y guardar eso borraba la instantánea justo en el escenario para el que existe.
+   */
+  useEffect(() => {
+    if (sinRed || loadClase) return
+    void guardarLista(me.id, group.id, items)
+  }, [items, sinRed, loadClase, group.id, me.id])
+
+  /**
+   * I6 — El camino que R2 nombra por su nombre: **el primer acceso** tras la
+   * pausa. El aviso decía «lo reintentamos solo» y no lo reintentaba nadie —
+   * `reintentar` sólo era alcanzable desde una mutación fallida, así que quien
+   * abría la app con el servicio dormido leía una frase que no se cumplía.
+   */
+  useEffect(() => {
+    if (loadClase !== 'servidor' || sinRed) return
+    void reintentar(++secuencia.current)
+    // Una vez por carga fallida: `reintentar` ya lleva su propia cota.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadClase, sinRed])
+
+  /**
+   * R4 — Al volver la red se drena. También al montar, por lo que quedó de ayer.
+   *
+   * Va dentro de una función asíncrona a propósito: llamar a `drenar()` en el
+   * cuerpo del efecto pone estado de forma síncrona y encadena renders — lo dice
+   * el linter, y tiene razón.
+   */
+  useEffect(() => {
+    if (sinRed) return
+    void (async () => { await drenar() })()
+  }, [sinRed, drenar])
 
   // R9 — el borrado viaja como UPDATE (deleted_at), por eso va autorizado por
   // RLS. Un DELETE físico no lo estaría: los eventos DELETE están exentos.
@@ -289,6 +490,16 @@ export function GroupView({
     if (campo === 'nombre' && !limpio) { soltar(item.id, campo); return }
     if (limpio === actual) { soltar(item.id, campo); return }
 
+    /**
+     * R7 — Alcance declarado: sin red se apunta, no se corrige. Son las dos
+     * operaciones que abren conflicto entre dos personas a ciegas.
+     *
+     * **El borrador se queda.** La primera versión soltaba el campo aquí y R5 se
+     * puso rojo con razón: «un guardado fallido no se lleva lo escrito» sigue en
+     * vigor, y quedarse sin red es un guardado fallido como cualquier otro. Lo
+     * tecleado espera a que vuelva la red.
+     */
+    if (sinRed) { avisarTexto(SIN_RED_ACCION, 'red'); return }
     limpiarAviso()
     const patch = campo === 'nombre' ? { name: limpio } : { quantity: limpio || null }
     const { data: fila, clase, code } = await updateItem(createClient(), item.id, patch)
@@ -332,11 +543,83 @@ export function GroupView({
     // R2 — esto era un `return` mudo. El usuario pulsaba y no pasaba nada: ni
     // ítem, ni explicación. Medido en el navegador: "NADA CAMBIO".
     if (!trimmed) { avisarTexto(ESCRIBE_NOMBRE, 'texto'); return }
-    limpiarAviso(); setBusy(true)
+    /**
+     * R3 — Sin red, lo apuntado entra en cola y se ve. El campo se vacía para
+     * poder seguir apuntando, que es el gesto real en un lineal: se apuntan tres
+     * cosas seguidas, no una.
+     *
+     * El duplicado se mira aquí contra lo que hay en pantalla, y es una excepción
+     * declarada a la regla de que lo decide la base: sin red no hay base a la que
+     * preguntar. Cuando la haya, el índice único vuelve a mandar.
+     */
+    /**
+     * M1 — La marca se toma **antes de cualquier rama**: los dos caminos esperan,
+     * y en los dos manda lo que el usuario teclee mientras tanto. Estuvo sólo en
+     * la rama sin red durante tres iteraciones, y el camino con red —el que usa
+     * todo el mundo— seguía borrando lo tecleado al volver de la base.
+     */
+    const desde = tecleado.current
+    if (sinRed) {
+      /**
+       * I4 — El campo se vacía **antes** de esperar al almacén, y la guarda
+       * `busy` vale también aquí. Medido en la revisión: apuntando seis productos
+       * seguidos entraban tres, porque lo tecleado entre el `await` y el vaciado
+       * se iba con él.
+       *
+       * Y el duplicado se mira contra el almacén, no contra la copia en memoria
+       * del cierre: entre dos altas seguidas, `pendientes` es la de antes.
+       */
+      const cantidadAhora = quantity.trim() || null
+      setName(''); setQuantity(''); setBusy(true)
+      try {
+        const cola = await leerCola(me.id)
+        const repetido = items.some(i => mismoProducto(i.name, trimmed))
+          || cola.some(p => p.grupo === group.id && mismoProducto(p.nombre, trimmed))
+        // J8 — con red, un duplicado conserva lo tecleado; sin red se lo tragaba.
+        // Es el mismo gesto para quien lo hace: se comporta igual.
+        if (repetido) { devolver(trimmed, cantidadAhora, desde); void avisar('duplicado', '23505'); return }
+        const p: Pendiente = {
+          id: crypto.randomUUID(), usuario: me.id, grupo: group.id,
+          nombre: trimmed, cantidad: cantidadAhora, creado: Date.now(),
+        }
+        /**
+         * J6 — Si el almacén no admite la escritura —sin cuota, modo privado,
+         * IndexedDB no disponible— no se pinta la ficha. Pintarla sería el «éxito
+         * falso» que este proyecto lleva dos ciclos quitando: el usuario ve su
+         * producto, recarga, y no está.
+         */
+        if (!(await encolar(p))) {
+          devolver(trimmed, cantidadAhora, desde)
+          avisarTexto(SIN_ALMACEN, 'generico')
+          return
+        }
+        setPendientes(prev => [...prev, p])
+        limpiarAviso()
+      } finally { setBusy(false) }
+      return
+    }
+    limpiarAviso()
+    /**
+     * M3 — Con red se vacía **antes** de esperar, igual que sin red, y lo que
+     * falla vuelve por `devolver`.
+     *
+     * I12 dejó escrito lo contrario —«vaciar antes de confirmar pierde lo
+     * tecleado si el alta falla»— y era cierto **entonces**: no existía forma de
+     * devolverlo sin pisar. M1 puso la guarda del gesto y con ella la razón de
+     * I12 desaparece; lo que quedaba era el defecto simétrico, medido: como el
+     * campo seguía lleno durante el viaje, cada tecla se **añadía** al producto en
+     * vuelo, y el siguiente «+» metía `lentejasgarbanzos` en la lista que ve toda
+     * la familia. Se cambió perder texto por escribir texto pegado, que es peor.
+     *
+     * Ahora los dos caminos tienen una sola forma: vaciar, esperar, devolver si
+     * falló y nadie ha tecleado.
+     */
+    const cantidadAhora = quantity.trim() || null
+    setName(''); setQuantity(''); setBusy(true)
     try {
-      // I12 — vaciar antes de confirmar pierde lo tecleado si el alta falla.
-      const { clase, code } = await addItem(createClient(), group.id, me.id, trimmed, quantity.trim() || null)
+      const { clase, code } = await addItem(createClient(), group.id, me.id, trimmed, cantidadAhora)
       if (clase) {
+        devolver(trimmed, cantidadAhora, desde)
         // T7 — no se espera al afinado: hacerlo dejaba el botón deshabilitado
         // hasta 2 s tras un 42501, que es lo contrario de lo que S4 buscaba.
         void avisar(clase, code)
@@ -365,7 +648,6 @@ export function GroupView({
         }
         return
       }
-      setName(''); setQuantity('')
     } finally {
       setBusy(false)
     }
@@ -401,7 +683,19 @@ export function GroupView({
       )}
       <span data-testid="eventos-membresia-peligrosos" data-n={eventosPeligrosos} className="sr-only" />
 
-      {channelState === 'degraded' && (
+      {/**
+        * R1 — El estado de la red se nombra mientras dura, no sólo cuando algo
+        * falla. Va antes que el aviso del canal porque sin red el canal está
+        * caído por definición, y decir las dos cosas confunde.
+        */}
+      {sinRed && (
+        <p role="status" data-testid="sin-red"
+           className="rounded-xl bg-amber-50 p-3 text-sm text-amber-800">
+          {SIN_RED}
+        </p>
+      )}
+
+      {!sinRed && channelState === 'degraded' && (
         <p role="status" data-testid="channel-degraded"
            className="rounded-xl bg-amber-50 p-3 text-sm text-amber-800">
           {SIN_CONEXION_LISTA}
@@ -426,9 +720,9 @@ export function GroupView({
       )}
 
       <form onSubmit={onAdd} className="flex gap-2">
-        <input value={name} onChange={e => setName(e.target.value)} placeholder="Producto"
+        <input value={name} onChange={e => { tecleado.current++; setName(e.target.value) }} placeholder="Producto"
           data-testid="item-name" className="min-h-[44px] w-full min-w-0 rounded-xl border border-neutral-300 px-4" />
-        <input value={quantity} onChange={e => setQuantity(e.target.value)} placeholder="Cantidad"
+        <input value={quantity} onChange={e => { tecleado.current++; setQuantity(e.target.value) }} placeholder="Cantidad"
           data-testid="item-qty" className="min-h-[44px] w-24 shrink-0 rounded-xl border border-neutral-300 px-3" />
         <button data-testid="add-item" disabled={busy}
           /* R9 — medido 41x44: declaraba alto mínimo pero no ancho. */
@@ -436,6 +730,20 @@ export function GroupView({
       </form>
 
       <ul className="flex flex-col gap-2" data-testid="items">
+        {/**
+          * R3 — Los pendientes van arriba y no se pueden editar: no existen aún
+          * en el servidor, así que no hay fila que corregir. Se ven porque lo
+          * contrario —apuntar algo y que no aparezca— es el silencio que este
+          * proyecto lleva un ciclo entero quitando.
+          */}
+        {pendientes.map(p => (
+          <li key={p.id} data-testid="item-pendiente"
+              className="flex items-center gap-2 rounded-xl border border-dashed border-amber-300 bg-amber-50 p-3">
+            <span className="min-w-0 flex-1 truncate text-neutral-700">{p.nombre}</span>
+            {p.cantidad && <span className="shrink-0 text-neutral-500">{p.cantidad}</span>}
+            <span className="shrink-0 text-xs text-amber-700">{PENDIENTE}</span>
+          </li>
+        ))}
         {items.map(item => (
           <li key={item.id} data-testid="item"
               className="flex items-center gap-2 rounded-xl border border-neutral-200 p-3">
@@ -460,6 +768,8 @@ export function GroupView({
               disabled={deleting.has(item.id)}
               onClick={() => {
                 if (deleting.has(item.id)) return
+                // R7 — igual que editar: sin red no se tacha.
+                if (sinRed) { avisarTexto(SIN_RED_ACCION, 'red'); return }
                 limpiarAviso()
                 setDeleting(prev => new Set(prev).add(item.id))
                 void softDeleteItem(createClient(), item.id)

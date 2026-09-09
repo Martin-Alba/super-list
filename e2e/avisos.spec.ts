@@ -431,7 +431,14 @@ test('DoD 42: fallo en A, otro borra A, tecleas en B: A desaparece y B conserva'
   })
   await campoA.fill('uno editado')
   await campoA.blur()
-  await expect(page.getByTestId('notice')).toContainText(/conexión/i)
+  /**
+   * R1 — Aquí se abortaba la petición y se esperaba «conexión». La red del
+   * navegador está intacta: lo que no contesta es el servidor de datos, y desde
+   * esta entrega la app lo dice así en vez de culpar a quien no tiene la culpa.
+   * Lo que este caso vigila no es el texto del aviso, sino que A no se quede
+   * colgada y que el borrador de B sobreviva.
+   */
+  await expect(page.getByTestId('notice')).toContainText(/despertando/i)
   await page.unroute(/\/rest\/v1\/items/)
 
   // 2) otro borra A

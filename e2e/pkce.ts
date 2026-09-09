@@ -23,7 +23,7 @@ export const CLAVE_COOKIE = `sb-${new URL(URL_).hostname.split('.')[0]}-auth-tok
 
 export type Cookie = { name: string; value: string }
 export type Tarro = Cookie[]
-export type FlujoPkce = { callbackUrl: string; code: string; flowId: string | null; email: string }
+export type FlujoPkce = { callbackUrl: string; code: string; flowId: string | null; email: string; id: string }
 
 export const nuevoTarro = (): Tarro => []
 
@@ -55,7 +55,10 @@ async function esperarEnlace(email: string, plazoMs = 20_000): Promise<string> {
  */
 export async function nuevoFlujoPkce(label = 'pkce', tarro: Tarro = nuevoTarro()): Promise<FlujoPkce> {
   const email = `${label}-${Date.now()}-${Math.floor(Math.random() * 1e6)}@example.test`
-  await admin.auth.admin.createUser({ email, email_confirm: true, user_metadata: { full_name: `Test ${label}` } })
+  const creado = await admin.auth.admin.createUser({
+    email, email_confirm: true, user_metadata: { full_name: `Test ${label}` } })
+  if (creado.error) throw creado.error
+  const id = creado.data.user!.id
 
   const client = createServerClient(URL_, ANON, {
     cookieOptions: { name: CLAVE_COOKIE },
@@ -87,5 +90,5 @@ export async function nuevoFlujoPkce(label = 'pkce', tarro: Tarro = nuevoTarro()
   const code = url.searchParams.get('code')
   if (!code) throw new Error(`verify no devolvió code. Location: ${location || '(vacío)'}`)
 
-  return { callbackUrl: url.toString(), code, flowId: url.searchParams.get('sb_flow_id'), email }
+  return { callbackUrl: url.toString(), code, flowId: url.searchParams.get('sb_flow_id'), email, id }
 }

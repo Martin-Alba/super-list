@@ -48,7 +48,7 @@ describe('T8 los códigos salen de la base, no de la memoria', () => {
       // único test cuyas entradas vienen del entorno autoritativo atacaba una
       // función muerta. `claseDe` es la que `lib/items.ts` llama, y recibe el
       // OBJETO de error real, no dos campos elegidos a mano.
-      const clase = claseDe(error, true)
+      const clase = claseDe(error, { haySesion: true })
       observado.push(`${etiqueta}: ${error!.code} → ${clase}`)
       expect(clase, `"${etiqueta}" da ${error!.code}/"${error!.message}"`).toBe(esperado)
     }

@@ -55,9 +55,11 @@ límite de error en lugar de por el aviso de la vista. Next enmascaraba el mensa
 con un digest y no hay `error.tsx` en la app, así que el usuario veía una pantalla
 de error. Ahora devuelve `ActionState` como las otras tres y la vista lo pinta.
 
-### 7. `text.includes('abort')` casa de más
-`lib/errors.ts` — atrapa `current transaction is aborted` de Postgres y lo
-anuncia como "No hay conexión". Mensaje equivocado en un camino raro.
+### 7. `text.includes('abort')` casa de más — RESUELTO (2026-09-09)
+`lib/errors.ts` — atrapaba `current transaction is aborted` de Postgres y lo
+anunciaba como "No hay conexión". Resuelto por partida doble: el token salió de la
+lista, y `claseDe` pasó a decidir **por el código primero**, así que un error que
+la base contesta ya no llega nunca a la rama de texto.
 
 ### 8. `groups.owner_id` es una columna muerta
 Confirmado contra el catálogo, no por `grep`: sólo la escribe `create_group` y
@@ -220,7 +222,7 @@ guardas —barrido AST el 2026-09-07 sobre los 92 ficheros, y catálogo de la ba
 **ninguno afecta a corrección, seguridad ni rendimiento del producto**. El ciclo
 se cerró por la regla de impacto, no por haberse quedado sin trabajo.
 
-### 20. El fallo cerrado marcará código correcto que aún no existe — MORDERÁ PRIMERO
+### 20. El fallo cerrado marcará código correcto que aún no existe — CUMPLIDO (2026-09-09)
 `unit/borradoFisico.ts` — La guarda marca todo `.delete()` cuyo receptor no pueda
 demostrar inofensivo. Se eximieron los accesores de plataforma medidos
 (`searchParams`, `cookies`, `headers`, `formData`, almacenamiento) y los `Set`/`Map`
@@ -230,6 +232,12 @@ y cualquier accesor nuevo de Next.
 **Qué hacer cuando pase:** añadir el accesor a `ACCESORES_SEGUROS` con una muestra
 en `unit/muestras/borrados.ts`, no desactivar la guarda. Es el primer sitio donde
 la spec de funcionalidad chocará, porque toca cookies y `searchParams`.
+
+**Pasó, y se hizo lo escrito (2026-09-09).** El primer almacén local —la cola sin
+red— trajo un `store.delete(clave)` de IndexedDB y la guarda lo marcó. Se añadió
+`IDBObjectStore` a los tipos de colección reconocidos, con las **dos** mitades en
+el banco: tipada exime, sin tipar sigue marcándose. La predicción era correcta
+hasta en el fichero.
 
 ### 21. Formas de borrado que aún escapan a la guarda
 - Acceso por corchetes con constante: `const m='delete'; admin.from('items')[m]()`
@@ -343,3 +351,117 @@ reconocería nadie.
 
 *Contención:* hoy no existe otro traductor, y `unit/texto-crudo.test.ts` exige
 que toda función exportada del traductor la llame alguien.
+
+### 31. `VERSION` del service worker no va atada al build
+`public/sw.js:20` — `const VERSION = 'super-v2'` es un literal escrito a mano, y
+`sw.js` no se regenera en cada build, así que sus bytes son idénticos entre
+despliegues. Dos consecuencias medidas (2026-09-09):
+
+- **El shell se congela en el build de la primera instalación.** El navegador no
+  reinstala si los bytes no cambian, y `activate` sólo purga cachés `super-*`
+  distintas de la actual, que nunca las hay. Un arreglo en `/sin-conexion` no le
+  llega nunca a quien ya lo tiene instalado.
+- **La purga de M4 puede llevarse la caché del worker vivo.** Como un instalador
+  nuevo abre la **misma** caché que sirve el worker activo, una actualización
+  cuyo precacheado falla acaba en `(sin cachés)`: quien tenía modo sin red lo
+  pierde. Disparador exacto: cambiar los bytes de `sw.js` sin subir `VERSION`.
+
+*Contención:* `sw.js` no se ha desplegado nunca, así que hoy no hay worker activo
+que perder; y subir `VERSION` en el mismo cambio hace que la purga caiga sobre la
+caché nueva y la vieja sobreviva.
+*Si se retoma:* derivar `VERSION` del `buildId` —sirviendo `sw.js` desde un
+manejador de ruta, o inyectando un hash al construir— y atarla con un test al
+artefacto. Es también lo que arregla el punto primero.
+
+### 32. La justificación escrita de DoD 66 no se corresponde con el código
+`docs/CHECKPOINT.md` y el comentario de `public/sw.js` dicen que un reintento
+«sólo pedía los chunks que faltaban». Medido: el `install` **siempre** vuelve a
+pedirlo todo; no hay ninguna rama que salte lo ya cacheado. La cadena de
+envenenamiento la cierra la comprobación de `content-type` (DoD 67), no la purga
+(DoD 66) — quitando sólo la purga, el chunk sigue limpio.
+
+*Contención:* la purga sigue siendo correcta y su test se pone rojo al quitarla;
+lo que sobra es la explicación.
+*Coste si se deja:* la próxima revisión da por bueno un mecanismo que no existe, y
+alguien podría quitar la guarda que sí cierra la cadena creyendo que es la otra.
+
+### 33. La instalación del service worker es todo-o-nada sobre 11 recursos
+`public/sw.js` — el `Promise.all` exige los 11 `/_next/static/` que el HTML del
+shell referencia (medido sobre `.next/server/app/sin-conexion.html`, 7.878 B). Un
+solo 404 o un corte de red durante `install` deja el dispositivo **sin** service
+worker, y el reintento sale sólo de `app/RegistrarSW.tsx` (`useEffect([])`): uno
+por carga completa de página.
+
+*Contención:* es la decisión de K3/M2 y es la correcta frente a la alternativa —un
+worker instalado que no hidrata—, porque este estado se autorrepara con la primera
+instalación entera que salga bien.
+*No medido:* que el navegador no reintente por su cuenta un `install` que rechaza
+está inferido de la especificación, no comprobado en navegador.
+
+### 34. Con red, un alta que falla mientras se teclea se pierde
+`app/g/[id]/GroupView.tsx` — decisión de M3, afirmada en
+`unit/drenado.test.tsx`: si el alta con red falla y el usuario ha tecleado
+mientras tanto, lo enviado no vuelve al campo **ni entra en cola**; se pierde con
+su aviso. Es la única pérdida de datos que queda en el camino principal.
+
+*Contención:* es el mal menor frente a lo que sustituye —pisar lo que se está
+tecleando, o pegarle el texto delante y meter `lentejasgarbanzos` en la lista
+compartida—, y el aviso se ve.
+*Si se retoma:* la salida natural ya existe: encolar. Hoy la cola sólo se activa
+si `sinRed` era cierto **al pulsar**; encolar también cuando el alta falla por red
+cerraría el caso.
+
+### 35. El banco del service worker acepta lo que el producto ya no usa
+`unit/sw.test.ts` — el doble de caché conserva `add` y `addAll`, que el producto
+dejó de llamar en M4, y son permisivos: ignoran `redirected` y el `content-type`.
+Además `match` indexa un `Map` por cadena, pero el manejador `fetch` le pasa el
+**objeto** `request`, así que ninguna prueba unitaria puede observar hoy que el
+worker **sirva** una entrada envenenada; sólo se observan las escrituras.
+
+*Contención:* medido que el producto no llama a `add`/`addAll`, y las escrituras
+sí se afirman.
+*Coste si se deja:* es el hueco que dejó pasar el envenenamiento de chunks hasta
+que una sonda externa lo midió. Clavear por URL absoluta aceptando cadena u objeto
+es el arreglo.
+
+### 36. Las peticiones de la instalación no llevan cota
+`public/sw.js` — los 12 `fetch` del `install` no tienen timeout explícito, contra
+D.6. Un portal que acepta la conexión y no contesta cuelga la instalación hasta el
+límite del navegador.
+
+*Contención:* no rompe nada; retrasa la instalación, y el shell viejo —si lo
+hay— sigue sirviendo.
+
+### 37. `haySesionLocal` no deriva el nombre de la cookie del SDK
+`lib/sesionLocal.ts` — la expresión acepta cualquier cookie con la forma
+`sb-…-auth-token`, sin atarla a `NEXT_PUBLIC_SUPABASE_URL` ni a
+`cookieOptions.name`. Probadas 17 formas de tarro (referencia hospedada, trozos
+`.0`/`.1`/`.10`, `localhost`, dominio propio, con `-code-verifier` delante): hoy
+**no hay falso negativo**, y `@supabase/ssr` no usa prefijos `__Secure-`.
+
+*Coste si se deja:* si alguien fija `cookieOptions.name`, la función devuelve
+`false` en silencio y el shell no vuelve a pintar ninguna instantánea.
+
+### 38. `if (busy) return` es un retorno mudo
+`app/g/[id]/GroupView.tsx` — justo lo que R2 prohíbe en la línea de al lado, pero
+hoy inalcanzable: el botón es `disabled={busy}` y el envío con Enter tampoco
+dispara. Queda como defensa sin salida visible; si algún día se quita el
+`disabled`, vuelve el silencio.
+
+### 39. Las marcas de ronda de este ciclo chocan con las del primero
+El cuarto ciclo etiquetó sus rondas `I`–`M` en el código, y esas letras ya las
+había usado el primer ciclo: medido al cerrar, **242 ocurrencias** repartidas
+(`I` 62, `J` 77, `K` 52, `L` 31, `M` 20) con los rangos numéricos solapados —
+`I10` significa «la conexión de IndexedDB se reutiliza» en `lib/local.ts` y «las
+tres consultas van a la vez» en otro fichero. No se puede renombrar con una
+expresión regular sin leer cada sitio.
+
+Lo cazó `unit/trayectoria.ts`, que exige que el código de la última fila de la
+trayectoria sea monótono: al escribir la fila `(M)` el ancla retrocedió por debajo
+de `N1`, que ya existía, y se puso roja.
+
+*Contención:* la tabla del checkpoint lleva el **código global** (`AK`–`AO`) y
+dice en cada fila qué marca buscar en el código, con un aviso encima.
+*Si se retoma:* renombrar leyendo cada ocurrencia, o —más barato— dejar de reusar
+letras: el siguiente ciclo empieza en `AP`.
+
