@@ -45,7 +45,8 @@ el primer corte, no un olvido.
 ## Dos avisos operativos
 
 - **Plan gratuito de Supabase: los proyectos se pausan tras una semana de
-  inactividad.** Para una lista de la compra familiar el uso es semanal, así que
+  inactividad.** Desde el 2026-09-12, un alta hecha contra el proyecto dormido
+  **no se pierde**: entra en la cola local y se envía sola al despertar. Para una lista de la compra familiar el uso es semanal, así que
   el primer acceso tras un parón puede fallar hasta reactivar.
 - **Plan Hobby de Vercel: uso personal, no comercial** (*"restricts users to
   non-commercial, personal use only"*). Válido para uso familiar; deja de serlo

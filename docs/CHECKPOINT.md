@@ -509,3 +509,83 @@ en dos vueltas de cada variante.
 - **Un despliegue real.** `public/sw.js` no se ha desplegado nunca, así que el
   comportamiento entre versiones —lo que las deudas 31 y 32 describen— no se ha
   observado; se dedujo del código y se midió en banco.
+
+---
+
+# Verificación del ciclo de la deuda 34 (2026-09-12)
+
+**Qué se construyó.** Un alta que falla porque no contestó nadie —clase
+`servidor`, que es lo que `claseDe` devuelve para todo error sin código: red
+caída, pasarela, o el proyecto pausado del plan gratuito— entra en la cola en vez
+de perderse, y un reintento acotado la envía sin esperar a que cambie `sinRed`.
+Era la única pérdida de datos del camino principal.
+
+**Contrato cambiado a propósito.** Lo fallido ya **no** vuelve al campo: va a la
+cola y se envía solo. Invierte la aserción de `unit/drenado.test.tsx` que fijaba
+lo contrario, y está declarado en la spec y en la deuda 34.
+
+## Terminal
+
+Leída por código de salida **y por su salida impresa** — ver la cicatriz de abajo.
+
+2026-09-12 — `pnpm typecheck && pnpm lint && pnpm test && pnpm build` → **EXIT=0**,
+y `pnpm lint` con **0 avisos**.
+
+2026-09-12 — **1.369 casos en 61 ficheros**; al empezar el ciclo (2026-09-09) eran
+1.349 en 61. Producto: 1 fichero, +619/−43 contando pruebas y documentos.
+
+## Runtime — qué se ejercitó y contra qué build
+
+Contra `next start` sobre build fresco con `.next` borrado antes; nunca contra
+`pnpm dev`.
+
+- **El caso de la deuda, con gesto y no por API:** `e2e/sin-red.spec.ts`, «la red
+  cae entre pulsar y responder». **No** usa `setOffline` a propósito: eso prueba
+  «sin red al pulsar», que ya funcionaba. Corta la petición dejando al navegador
+  creyéndose conectado —el caso afirma que el banner de sin red *no* aparece—,
+  teclea con `pressSequentially` y pulsa el botón. **Verde con el arreglo y rojo
+  al revertirlo**, comprobado.
+- **El camino clásico siguió intacto:** el 2026-09-12, los 22 casos de
+  `sin-red.spec.ts` —que cortan y restauran la red del navegador de verdad—
+  pasaron tras extraer la puerta común de la cola.
+- **Sondas de mutación, una por requisito**, todas reproducidas por el revisor de
+  forma independiente con los recuentos exactos.
+
+## Qué NO se verificó, y qué se hizo en su lugar
+
+- **La suite e2e completa.** El 2026-09-12 tardaba más de 15 minutos y colgó a
+  dos revisores. Se ejercitó `sin-red.spec.ts` entero, que es el fichero que esta
+  deuda toca.
+- **El proyecto hospedado.** Todo contra la instancia local, como en los ciclos
+  anteriores. La pausa del plan gratuito se reprodujo cortando la petición.
+- **Verificación manual a 390 px.** Según `playwright.config.ts` del 2026-09-12,
+  la suite corría todos sus casos a 390×844 con `isMobile` y `hasTouch`, pero
+  nadie lo miró a mano en esta vuelta.
+
+## Cicatriz del ciclo — la puerta verde que escondía el defecto
+
+Durante cuatro iteraciones se reportó `pnpm lint` como «EXIT=0» sin leer su
+salida. El linter llevaba desde la iteración 4 nombrando el defecto que la quinta
+vino a arreglar —`react-hooks/exhaustive-deps: missing dependency 'loadClase'`—
+y la verja pasaba igual, porque un *warning* de eslint no cambia el código de
+salida y este proyecto no fija `--max-warnings`.
+
+La regla de leer una puerta por su código de salida nació del caso opuesto: una
+suite que imprimía «passed» y salía con 1. Aplicada a una herramienta cuyo código
+es optimista por diseño, dice lo contrario de lo que hace falta. **El código de
+salida es el suelo, no el techo:** dice si terminó bien, no qué encontró.
+
+## Trayectoria
+
+| Vuelta | Qué encontró la revisión | Qué cambió el build |
+|---|---|---|
+| 1 | `clase === 'red'` era rama inalcanzable: cuatro de los ocho ítems quedaban verdes con un producto que no encolaba nada. Y el reintento sellado con la secuencia de los **avisos** | Condición a `'servidor'`, pruebas atacando por `claseDe`, ref propia del envío |
+| 2 | Dos bucles de recuperación donde antes había uno; el aviso podía quedarse mintiendo por otra vía | Un solo bucle; el drenado retira el aviso |
+| 3 | Quitar `avisar` dejó sin alcanzar el único sitio que re-armaba `reintentar`: aviso derivado permanente | Limpieza por identidad (`deCola`), refinado por red con la red **viva** |
+| 4 | Dos regresiones respecto a HEAD: la lista no se releía nunca, y el drenado leía un `loadClase` caduco | Una relectura al vaciar la cola; `loadClase` en las dependencias |
+| 5 | Cinco ítems PASS, ninguna regresión que sufra un usuario | Comentario obsoleto que argumentaba a favor del defecto, borrado |
+
+El ciclo se detuvo en la cuarta vuelta por la **regla del techo** y se escaló al
+usuario: cuatro iteraciones seguidas habían introducido una regresión en el mismo
+sitio. El diagnóstico —y la decisión del usuario— fue acotar la quinta a las dos
+regresiones y llevar el problema real a una spec aparte.

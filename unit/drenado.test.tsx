@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, waitFor, cleanup, act, fireEvent } from '@testing-library/react'
 import type { Item } from '@/lib/items'
 import type { Pendiente } from '@/lib/local'
-import { mensajeDe, SIN_ALMACEN, type Clase } from '@/lib/errors'
+import { claseDe, mensajeDe, SIN_ALMACEN, type Clase } from '@/lib/errors'
 
 /**
  * I7/I9 — El drenado, atacado en la capa donde vive: montado dentro de la vista.
@@ -16,6 +16,7 @@ const leerCola = vi.fn()
 const quitarDeCola = vi.fn()
 const encolar = vi.fn()
 const guardarLista = vi.fn()
+const softDeleteItem = vi.fn()
 
 /**
  * J3/DoD 38 — `sinRed` mandable desde el test. Es lo que hace observable el
@@ -49,7 +50,7 @@ vi.mock('@/lib/items', async (orig) => ({
   activeItems: (...a: unknown[]) => activeItems(...a),
   addItem: (...a: unknown[]) => addItem(...a),
   updateItem: vi.fn(),
-  softDeleteItem: vi.fn(),
+  softDeleteItem: (...a: unknown[]) => softDeleteItem(...a),
 }))
 vi.mock('@/lib/local', async (orig) => ({
   ...(await orig<typeof import('@/lib/local')>()),
@@ -77,8 +78,8 @@ const fila = (nombre: string): Item => ({
 const pendiente = (nombre: string, hace: number) =>
   ({ id: `p-${nombre}`, usuario: 'u1', grupo: 'g1', nombre, cantidad: null, creado: Date.now() - hace })
 
-const vista = (loadClase: Clase | null = null) => (
-  <GroupView group={{ id: 'g1', name: 'Familia' }} initialItems={[]}
+const vista = (loadClase: Clase | null = null, iniciales: Item[] = []) => (
+  <GroupView group={{ id: 'g1', name: 'Familia' }} initialItems={iniciales}
     members={[{ user_id: 'u1', status: 'active', role: 'owner' }]}
     profiles={[{ id: 'u1', display_name: 'Yo' }]}
     me={{ id: 'u1', role: 'owner' }} loadClase={loadClase} />
@@ -120,6 +121,7 @@ beforeEach(() => {
   quitarDeCola.mockResolvedValue(undefined)
   addItem.mockResolvedValue({ data: fila('x'), clase: null, code: null })
   activeItems.mockResolvedValue({ data: [], clase: null, code: null })
+  softDeleteItem.mockResolvedValue({ data: 1, clase: null, code: null })
 })
 afterEach(() => cleanup())
 
@@ -429,9 +431,17 @@ describe('M1/M3 con red, el campo se comporta como sin red', () => {
     fireEvent.change(r.getByTestId('item-qty'), { target: { value: '2' } })
     await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
     await alta.mal()
+    /**
+     * N1 — Contrato cambiado a propósito (deuda 34). Antes volvía al campo y
+     * había que pulsar otra vez; ahora un fallo de «no contestó nadie» entra en
+     * la cola y se envía solo. La aserción se invierte porque el comportamiento
+     * se invirtió, no porque la prueba se debilite: lo que antes comprobaba el
+     * campo ahora lo comprueba la cola, más abajo.
+     */
     expect((r.getByTestId('item-name') as HTMLInputElement).value,
-      'un alta que falló se llevó lo tecleado por delante').toBe('lentejas')
-    expect((r.getByTestId('item-qty') as HTMLInputElement).value).toBe('2')
+      'lo fallido ya no vuelve al campo: va a la cola').toBe('')
+    expect(encolar).toHaveBeenCalledWith(expect.objectContaining(
+      { nombre: 'lentejas', cantidad: '2', grupo: 'g1', usuario: 'u1' }))
   })
 
   it('DoD 64: pero no si mientras tanto se ha tecleado otra cosa', async () => {
@@ -441,6 +451,383 @@ describe('M1/M3 con red, el campo se comporta como sin red', () => {
     await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
     fireEvent.change(r.getByTestId('item-name'), { target: { value: 'garbanzos' } })
     await alta.mal()
+    // N1 — Sigue siendo cierto: lo tecleado manda en el campo.
     expect((r.getByTestId('item-name') as HTMLInputElement).value).toBe('garbanzos')
+    // N1 — Y lo que antes se perdía ahora está en la cola. Ésta es la mitad nueva.
+    expect(encolar).toHaveBeenCalledWith(expect.objectContaining({ nombre: 'lentejas' }))
+  })
+})
+
+/**
+ * N1 — Deuda 34: un alta que falla porque **no contestó nadie** entra en la cola
+ * en vez de perderse. Atacado en la vista, que es la capa que el requisito nombra.
+ */
+describe('N1 un alta fallida por red se encola', () => {
+  const falloCon = (clase: Clase, code: string | null = null) =>
+    addItem.mockResolvedValue({ data: null, clase, code })
+  /**
+   * N3 — Lo que `addItem` devuelve **de verdad** ante una red caída, no una clase
+   * sembrada: `claseDe` sobre un error sin código. Medido: `claseDe` devuelve
+   * `'servidor'` para todo lo que no trae código, y `clasificar` —lo único que
+   * produce `'red'`— sólo se alcanza con código. Sembrar `'red'` dejaba cuatro
+   * ítems verdes con un producto que no encolaba nada.
+   */
+  const falloDeRed = () => {
+    const r = { data: null, clase: claseDe({ message: 'TypeError: Failed to fetch' } as never), code: '' }
+    addItem.mockResolvedValue(r)
+    return r
+  }
+  const apuntar = async (r: ReturnType<typeof montar>, nombre: string, cantidad = '') => {
+    fireEvent.change(r.getByTestId('item-name'), { target: { value: nombre } })
+    if (cantidad) fireEvent.change(r.getByTestId('item-qty'), { target: { value: cantidad } })
+    await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
+  }
+
+  it('DoD 1: un fallo de red deja la entrada en la cola, con nombre y cantidad', async () => {
+    falloDeRed()
+    const r = montar()
+    await apuntar(r, 'lentejas', '2')
+    expect(encolar).toHaveBeenCalledWith(expect.objectContaining(
+      { nombre: 'lentejas', cantidad: '2', grupo: 'g1', usuario: 'u1' }))
+    expect(r.getAllByTestId('item-pendiente')).toHaveLength(1)
+  })
+
+  it('DoD 6: un fallo de servidor —proyecto pausado— encola igual', async () => {
+    falloCon('servidor')
+    const r = montar()
+    await apuntar(r, 'lentejas')
+    expect(encolar).toHaveBeenCalledWith(expect.objectContaining({ nombre: 'lentejas' }))
+  })
+
+  it('DoD 2: un fallo CON código no encola, y la sonda: sin código sí', async () => {
+    falloCon('duplicado', '23505')
+    const r = montar()
+    await apuntar(r, 'lentejas')
+    expect(encolar, 'un 23505 es un rechazo real de la base, no una red caída')
+      .not.toHaveBeenCalled()
+    expect(r.queryAllByTestId('item-pendiente')).toHaveLength(0)
+  })
+
+  it('DoD 2: una sesión caducada tampoco encola', async () => {
+    falloCon('sesion', null)
+    const r = montar()
+    await apuntar(r, 'lentejas')
+    expect(encolar).not.toHaveBeenCalled()
+  })
+
+  it('DoD 5: si el almacén rechaza, vuelve al campo, se avisa y no hay ficha', async () => {
+    falloDeRed()
+    encolar.mockResolvedValue(false)
+    const r = montar()
+    await apuntar(r, 'lentejas', '3')
+    expect((r.getByTestId('item-name') as HTMLInputElement).value).toBe('lentejas')
+    expect((r.getByTestId('item-qty') as HTMLInputElement).value).toBe('3')
+    expect(r.getByTestId('notice').textContent).toContain(SIN_ALMACEN)
+    expect(r.queryAllByTestId('item-pendiente')).toHaveLength(0)
+  })
+
+  it('DoD 8: dos altas fallidas seguidas se encolan en el orden apuntado', async () => {
+    falloDeRed()
+    const r = montar()
+    await apuntar(r, 'lentejas')
+    await apuntar(r, 'garbanzos')
+    const nombres = encolar.mock.calls.map(c => (c[0] as Pendiente).nombre)
+    expect(nombres).toEqual(['lentejas', 'garbanzos'])
+    expect(r.getAllByTestId('item-pendiente').map(n => n.textContent))
+      .toEqual([expect.stringContaining('lentejas'), expect.stringContaining('garbanzos')])
+  })
+
+  it('DoD 7: lo encolado se envía sin que la red cambie nunca', async () => {
+    vi.useFakeTimers()
+    try {
+      colaViva()
+      addItem.mockResolvedValueOnce({ data: null, clase: claseDe({ message: 'Failed to fetch' } as never), code: null })
+      const r = montar()
+      await apuntar(r, 'lentejas')
+      cola = [...cola, (encolar.mock.calls[0][0] as Pendiente)]
+      addItem.mockResolvedValue({ data: fila('lentejas'), clase: null, code: null })
+      const antes = addItem.mock.calls.length
+      // La cota ya existe: esperasDeReintento() = [1s, 2s, 4s, 8s, 8s].
+      await act(async () => { await vi.advanceTimersByTimeAsync(1500) })
+      expect(addItem.mock.calls.length,
+        'nadie volvió a intentarlo: sin cambio de red no se drena').toBeGreaterThan(antes)
+      expect(sinRedAhora, 'la red no cambió en ningún momento').toBe(false)
+    } finally { vi.useRealTimers() }
+  })
+})
+
+/**
+ * N3 — Los tres casos de al lado que la iteración 1 no cubría: la segunda alta,
+ * el aviso que se queda mintiendo, y el desmontaje.
+ */
+describe('N3 el reintento del envío es del envío, no de los avisos', () => {
+  const apuntar2 = async (r: ReturnType<typeof montar>, nombre: string) => {
+    fireEvent.change(r.getByTestId('item-name'), { target: { value: nombre } })
+    await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
+  }
+  // R16 — postgrest devuelve `code: ''` ante un fetch caído, no `null`, y
+  // `addItem` lo propaga tal cual: `error?.code ?? null` no sustituye la cadena
+  // vacía. Es el campo que enruta el aviso, así que la prueba usa la forma real.
+  const falloReal = () => ({ data: null, clase: claseDe({ message: 'Failed to fetch' } as never), code: '' })
+
+  it('DoD 12: un alta posterior que va bien no mata el reintento de la anterior', async () => {
+    vi.useFakeTimers()
+    try {
+      colaViva()
+      addItem.mockResolvedValueOnce(falloReal())
+      const r = montar()
+      await apuntar2(r, 'lentejas')
+      cola = [...cola, encolar.mock.calls[0][0] as Pendiente]
+      addItem.mockResolvedValue({ data: fila('garbanzos'), clase: null, code: null })
+      await apuntar2(r, 'garbanzos')          // pasa por limpiarAviso()
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000) })
+      expect(cola.some(p => p.nombre === 'lentejas'),
+        'la segunda alta mató el reintento de la primera: quedó varada').toBe(false)
+    } finally { vi.useRealTimers() }
+  })
+
+  it('DoD 13: tras drenar no queda aviso mintiendo en pantalla', async () => {
+    vi.useFakeTimers()
+    try {
+      colaViva()
+      addItem.mockResolvedValueOnce(falloReal())
+      const r = montar()
+      await apuntar2(r, 'lentejas')
+      cola = [...cola, encolar.mock.calls[0][0] as Pendiente]
+      addItem.mockResolvedValue({ data: fila('lentejas'), clase: null, code: null })
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000) })
+      expect(r.queryAllByTestId('item-pendiente')).toHaveLength(0)
+      expect(r.queryByTestId('notice'),
+        'el producto está en la lista y la app sigue diciendo que el servidor no contesta').toBeNull()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('DoD 14: el mismo nombre dos veces con el servidor caído deja una entrada', async () => {
+    // La cola tiene que RECORDAR: el duplicado se mira contra el almacén, no
+    // contra la copia en memoria. Con un `encolar` que no guarda, la segunda
+    // lectura ve la cola vacía y el test mediría su propio mock.
+    colaViva()
+    encolar.mockImplementation(async (pe: Pendiente) => { cola = [...cola, pe]; return true })
+    addItem.mockResolvedValue(falloReal())
+    const r = montar()
+    await apuntar2(r, 'lentejas')
+    await apuntar2(r, 'lentejas')
+    expect(encolar.mock.calls.filter(c => (c[0] as Pendiente).nombre === 'lentejas'),
+      'las dos puertas a la cola no se comportan igual').toHaveLength(1)
+    expect(r.getAllByTestId('item-pendiente')).toHaveLength(1)
+  })
+
+  it('DoD 15: tras desmontar, el reintento no sigue llamando', async () => {
+    vi.useFakeTimers()
+    try {
+      colaViva()
+      addItem.mockResolvedValue(falloReal())
+      const r = montar()
+      await apuntar2(r, 'lentejas')
+      cola = [...cola, encolar.mock.calls[0][0] as Pendiente]
+      r.unmount()
+      const antes = addItem.mock.calls.length
+      await act(async () => { await vi.advanceTimersByTimeAsync(25_000) })
+      expect(addItem.mock.calls.length,
+        'el bucle siguió corriendo sobre un árbol muerto').toBe(antes)
+    } finally { vi.useRealTimers() }
+  })
+})
+
+/**
+ * N4 — La iteración 2 dejó DOS bucles de recuperación donde antes había uno, y
+ * con ellos una segunda vía al mismo síntoma: el aviso sólo lo retiraba una
+ * relectura con éxito.
+ */
+describe('N4 un solo bucle, y quien vacía la cola retira el aviso', () => {
+  const falloReal = () => ({ data: null, clase: claseDe({ message: 'Failed to fetch' } as never), code: '' })
+  const apuntar3 = async (r: ReturnType<typeof montar>, nombre: string) => {
+    fireEvent.change(r.getByTestId('item-name'), { target: { value: nombre } })
+    await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
+  }
+
+  it('DoD 17: el envío se recupera y la relectura sigue fallando: no queda aviso', async () => {
+    vi.useFakeTimers()
+    try {
+      colaViva()
+      // El GET nunca se recupera. El POST sí. Es el caso medido.
+      activeItems.mockResolvedValue({ data: [], clase: 'servidor', code: '' })
+      addItem.mockResolvedValueOnce(falloReal())
+      const r = montar()
+      await apuntar3(r, 'lentejas')
+      cola = [...cola, encolar.mock.calls[0][0] as Pendiente]
+      addItem.mockResolvedValue({ data: fila('lentejas'), clase: null, code: null })
+      await act(async () => { await vi.advanceTimersByTimeAsync(25_000) })
+      expect(r.queryAllByTestId('item-pendiente')).toHaveLength(0)
+      expect(r.queryByTestId('notice'),
+        'el producto está en la lista y la alerta sigue diciendo que el servidor no contesta').toBeNull()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('DoD 18: un alta fallida no dispara relecturas de lista', async () => {
+    vi.useFakeTimers()
+    try {
+      colaViva()
+      addItem.mockResolvedValue(falloReal())
+      const r = montar()
+      activeItems.mockClear()
+      await apuntar3(r, 'lentejas')
+      cola = [...cola, encolar.mock.calls[0][0] as Pendiente]
+      await act(async () => { await vi.advanceTimersByTimeAsync(25_000) })
+      expect(activeItems.mock.calls.length,
+        'dos bucles de recuperación sobre un servidor que no contesta').toBe(0)
+    } finally { vi.useRealTimers() }
+  })
+
+  it('DoD 19: desmontar con el drenado en vuelo no deja llamadas', async () => {
+    vi.useFakeTimers()
+    try {
+      colaViva()
+      cola = [pendiente('a', 10), pendiente('b', 5), pendiente('c', 1)]
+      let sueltaAdd!: () => void
+      addItem.mockImplementation(() => new Promise(res => {
+        sueltaAdd = () => res({ data: fila('x'), clase: null, code: null })
+      }))
+      const r = montar()
+      await act(async () => { await vi.advanceTimersByTimeAsync(50) })
+      r.unmount()
+      const antes = addItem.mock.calls.length
+      await act(async () => { sueltaAdd?.(); await vi.advanceTimersByTimeAsync(5_000) })
+      expect(addItem.mock.calls.length,
+        'el drenado siguió vaciando la cola sobre un árbol muerto').toBe(antes)
+    } finally { vi.useRealTimers() }
+  })
+})
+
+/**
+ * N5 — El aviso de la cola se identificaba por su CLASE, que comparte con otros
+ * tres, y su vida tiene dos capas —el estado y el derivado de `loadClase`— de las
+ * que sólo se tocaba una. Tres iteraciones tocaron este sitio; ésta lo cierra.
+ */
+describe('N5 el aviso de la cola es suyo, se refina, y resuelve la carga', () => {
+  const falloReal = () => ({ data: null, clase: claseDe({ message: 'Failed to fetch' } as never), code: '' })
+  const apuntar4 = async (r: ReturnType<typeof montar>, nombre: string) => {
+    fireEvent.change(r.getByTestId('item-name'), { target: { value: nombre } })
+    await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
+  }
+  /** Encola una entrada por el camino real y deja la cola lista para drenar. */
+  const encolarFallando = async (r: ReturnType<typeof montar>, nombre: string) => {
+    addItem.mockResolvedValueOnce(falloReal())
+    await apuntar4(r, nombre)
+    cola = [...cola, encolar.mock.calls.at(-1)![0] as Pendiente]
+    addItem.mockResolvedValue({ data: fila(nombre), clase: null, code: null })
+  }
+
+  it('DoD 22: con la carga fallida, tras drenar no queda aviso', async () => {
+    vi.useFakeTimers()
+    try {
+      colaViva()
+      // El caso canónico del plan gratuito: la página carga con el servicio
+      // dormido. Es el montaje que faltaba, y por el que M1 pasó verde.
+      const r = montarCon('servidor')
+      await encolarFallando(r, 'lentejas')
+      await act(async () => { await vi.advanceTimersByTimeAsync(25_000) })
+      expect(r.queryAllByTestId('item-pendiente')).toHaveLength(0)
+      expect(r.queryByTestId('notice'),
+        'el envío llegó y el aviso derivado de la carga sigue ahí para siempre').toBeNull()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('DoD 21: un aviso de otro origen sobrevive a un drenado con éxito', async () => {
+    vi.useFakeTimers()
+    try {
+      colaViva()
+      // Una fila real de partida, para poder fallar un borrado sobre ella.
+      const r = render(vista(null, [fila('arroz')]))
+      await encolarFallando(r, 'lentejas')
+      // Aviso AJENO, de la misma clase `servidor`, puesto por otro camino.
+      // La relectura tiene que seguir fallando: si acierta, `reintentar` limpia
+      // el aviso por su cuenta y el test mediría esa cura, no la del drenado.
+      activeItems.mockResolvedValue({ data: [], clase: 'servidor', code: '' })
+      softDeleteItem.mockResolvedValue({ data: null, clase: 'servidor', code: '' })
+      await act(async () => { fireEvent.click(r.getAllByTestId('delete-item')[0]) })
+      expect(r.getByTestId('notice'), 'el aviso ajeno no llegó a pintarse').toBeTruthy()
+      const ajeno = r.getByTestId('notice').textContent
+      // Y ahora el drenado termina con éxito.
+      await act(async () => { await vi.advanceTimersByTimeAsync(25_000) })
+      expect(r.queryAllByTestId('item-pendiente'), 'la cola no se vació').toHaveLength(0)
+      expect(r.queryByTestId('notice')?.textContent,
+        'un drenado con éxito borró el aviso de un borrado fallido').toBe(ajeno)
+    } finally { vi.useRealTimers() }
+  })
+
+  it('DoD 23: si la red cae mientras el alta viaja, no se culpa al servidor', async () => {
+    colaViva()
+    let acabar!: (r: unknown) => void
+    addItem.mockImplementation(() => new Promise(res => { acabar = res }))
+    const r = montar()
+    // Se pulsa CON red: entra por la rama de red, no por la de sin red.
+    fireEvent.change(r.getByTestId('item-name'), { target: { value: 'lentejas' } })
+    await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
+    // La red cae mientras el alta viaja.
+    await ponerSinRed(true)
+    await act(async () => { acabar({ data: null, clase: 'servidor', code: '' }) })
+    expect(r.getByTestId('notice').textContent,
+      'se le enseña «el servicio está despertando» a quien se ha quedado sin red')
+      .toBe(mensajeDe('red'))
+  })
+})
+
+/**
+ * N6 — Las dos regresiones que este ciclo introdujo respecto a HEAD.
+ */
+describe('N6 vaciar la cola relee la lista, y el loadClase es el vivo', () => {
+  const falloReal = () => ({ data: null, clase: claseDe({ message: 'Failed to fetch' } as never), code: '' })
+  const encolarFallando = async (r: ReturnType<typeof montar>, nombre: string) => {
+    addItem.mockResolvedValueOnce(falloReal())
+    fireEvent.change(r.getByTestId('item-name'), { target: { value: nombre } })
+    await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
+    cola = [...cola, encolar.mock.calls.at(-1)![0] as Pendiente]
+    addItem.mockResolvedValue({ data: fila(nombre), clase: null, code: null })
+  }
+
+  it('DoD 25: tras vaciar la cola, la lista se relee una vez', async () => {
+    vi.useFakeTimers()
+    try {
+      colaViva()
+      const r = montarCon('servidor')
+      await encolarFallando(r, 'lentejas')
+      activeItems.mockClear()
+      activeItems.mockResolvedValue({ data: [fila('arroz')], clase: null, code: null })
+      await act(async () => { await vi.advanceTimersByTimeAsync(25_000) })
+      expect(activeItems.mock.calls.length,
+        'se dio la carga por resuelta sin haber leído nada: la lista se queda rancia').toBe(1)
+      expect(r.queryByTestId('notice')).toBeNull()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('DoD 26: si esa relectura falla, el aviso NO se retira', async () => {
+    vi.useFakeTimers()
+    try {
+      colaViva()
+      const r = montarCon('servidor')
+      await encolarFallando(r, 'lentejas')
+      activeItems.mockResolvedValue({ data: [], clase: 'servidor', code: '' })
+      await act(async () => { await vi.advanceTimersByTimeAsync(25_000) })
+      expect(r.queryAllByTestId('item-pendiente'), 'la cola no se vació').toHaveLength(0)
+      expect(r.queryByTestId('notice'),
+        'se fingió resuelto lo que no se pudo leer: fallar abierto').not.toBeNull()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('DoD 27: un loadClase que llega tras el montaje se respeta', async () => {
+    vi.useFakeTimers()
+    try {
+      colaViva()
+      // Monta con la carga BUENA. El servidor re-renderiza después con la mala,
+      // que es lo que hace `router.refresh()` y ocurre sin desmontar.
+      const r = render(vista(null))
+      await act(async () => { r.rerender(vista('servidor')) })
+      await encolarFallando(r, 'lentejas')
+      activeItems.mockResolvedValue({ data: [], clase: null, code: null })
+      await act(async () => { await vi.advanceTimersByTimeAsync(25_000) })
+      expect(r.queryByTestId('notice'),
+        'el drenado resolvió con el loadClase capturado al montar, no el vivo').toBeNull()
+    } finally { vi.useRealTimers() }
   })
 })

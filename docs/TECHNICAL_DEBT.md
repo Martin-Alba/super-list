@@ -398,18 +398,33 @@ instalación entera que salga bien.
 *No medido:* que el navegador no reintente por su cuenta un `install` que rechaza
 está inferido de la especificación, no comprobado en navegador.
 
-### 34. Con red, un alta que falla mientras se teclea se pierde
-`app/g/[id]/GroupView.tsx` — decisión de M3, afirmada en
-`unit/drenado.test.tsx`: si el alta con red falla y el usuario ha tecleado
-mientras tanto, lo enviado no vuelve al campo **ni entra en cola**; se pierde con
-su aviso. Es la única pérdida de datos que queda en el camino principal.
+### 34. Con red, un alta que falla mientras se teclea se pierde — RESUELTO (2026-09-12)
+`app/g/[id]/GroupView.tsx` — era la única pérdida de datos del camino principal:
+si el alta con red fallaba y el usuario había tecleado mientras tanto, lo enviado
+no volvía al campo ni entraba en cola.
 
-*Contención:* es el mal menor frente a lo que sustituye —pisar lo que se está
-tecleando, o pegarle el texto delante y meter `lentejasgarbanzos` en la lista
-compartida—, y el aviso se ve.
-*Si se retoma:* la salida natural ya existe: encolar. Hoy la cola sólo se activa
-si `sinRed` era cierto **al pulsar**; encolar también cuando el alta falla por red
-cerraría el caso.
+**Resuelto.** Un fallo de clase `servidor` —que es lo que `claseDe` devuelve para
+todo error sin código: red caída, pasarela, o el proyecto pausado del plan
+gratuito— encola el alta por la misma puerta que la rama sin red, y un reintento
+acotado (`esperasDeReintento()`) la drena sin esperar a que cambie `sinRed`. El
+contrato cambió a propósito: lo fallido ya **no** vuelve al campo, va a la cola y
+se envía solo.
+
+**Medido al construirlo, y conviene que quede:** `'red'` no es alcanzable en este
+camino. `addItem` traduce con `claseDe`, que devuelve `'servidor'` para todo lo
+que no trae código; `clasificar` —lo único que produce `'red'`— sólo se alcanza
+con código. La primera versión aceptaba las dos clases y cuatro ítems del DoD
+seguían verdes con un producto que no encolaba nada. Es la segunda vez que este
+proyecto retira una rama `'red'` inalcanzable; la primera está en
+`lib/items.ts:62`.
+
+**Lo que sigue abierto,** anotado al cerrar: la regla de admisión y la de
+retención discrepan. `onAdd` se niega a encolar nada que traiga código, pero
+`drenarUnaVez` conserva en cola lo que falle al drenar con cualquier código que no
+sea `23505`, incluido un `42501`. Una entrada admitida por fallo de red que luego
+tope con un `42501` se reintenta en cada montaje y cada cambio de red hasta que
+`reparte` la descarte a las 24 h. Es preexistente; la puerta nueva lo hace más
+alcanzable.
 
 ### 35. El banco del service worker acepta lo que el producto ya no usa
 `unit/sw.test.ts` — el doble de caché conserva `add` y `addAll`, que el producto
@@ -465,3 +480,50 @@ dice en cada fila qué marca buscar en el código, con un aviso encima.
 *Si se retoma:* renombrar leyendo cada ocurrencia, o —más barato— dejar de reusar
 letras: el siguiente ciclo empieza en `AP`.
 
+## Del ciclo de la deuda 34 (cierre 2026-09-12)
+
+*Todo lo de esta sección sale de las cinco revisiones del ciclo. Ninguno bloquea
+el cierre: se midieron y se dejaron fuera por la regla de impacto o por decisión
+del usuario. Los cuatro primeros son **el mismo problema** y tienen spec propia
+pendiente: el ciclo de vida de aviso-y-recuperación.*
+
+### 40. El aviso de la cola se retira antes de saber si la relectura acierta
+`app/g/[id]/GroupView.tsx` — la limpieza del aviso `deCola` va **antes** de la
+relectura. Con `loadClase` nulo no hay aviso derivado que tome el relevo, así que
+una relectura fallida deja la pantalla sin ninguna señal.
+**Cota medida:** sin red aparece el banner de sin red; con el canal caído aparece
+el de canal degradado y `onResync` avisa. La ventana descubierta es «red arriba +
+canal vivo + sólo PostgREST cayendo», y ahí el canal sigue entregando los cambios
+ajenos, así que la lista no se queda rancia de verdad.
+
+### 41. `secuencia` sella dos cosas distintas a la vez
+Es la generación de los **avisos** y también la del reintento de **carga**. De ahí
+salieron tres de las cuatro regresiones de este ciclo: tocar el alta mataba el
+reintento, o al revés. Separarlas es el núcleo de la spec pendiente.
+
+### 42. `avisar` acopla «enseñar un mensaje» con «arrancar un bucle»
+Para clase `servidor` lanza además `reintentar`. Por eso quitarlo de un sitio se
+llevó por delante la recuperación de la lista, sin que nada lo dijera.
+
+### 43. El refinado por red no se aplicó a los gemelos
+`sinRedVivo` sólo lo usa la rama de la cola. `avisar` sigue refinando con el
+`sinRed` del render, así que la edición y el borrado siguen diciendo «el servicio
+está despertando» a quien acaba de quedarse sin conexión. Medido con dos sondas.
+
+### 44. `setNotice` suelto en el drenado
+`GroupView.tsx` — es el único sitio que limpia el aviso sin sellar `secuencia`,
+que U3 tiene escrito como regla. Hoy inalcanzable: la guarda `deCola` impide
+limpiar justo los avisos sobre los que puede haber un afinado en vuelo. Si alguien
+quita esa guarda, el defecto de U3 vuelve y no hay prueba encima.
+
+### 45. La prueba del DoD 26 es menos específica que su nombre
+`unit/drenado.test.tsx` — afirma que hay aviso, y monta con `loadClase='servidor'`,
+así que la satisface el aviso **derivado** tomando el relevo. No distingue «el
+aviso de la cola sobrevivió» de «otro lo sustituyó». Es válida —su sonda la pone
+roja— pero para cerrar la 40 hace falta el gemelo con `loadClase` nulo.
+
+### 46. `eslint` corre sin `--max-warnings`
+Cualquier número de avisos sale con código 0, así que la puerta pasa mientras el
+linter nombra un defecto. Pasó en este ciclo durante cuatro iteraciones. El
+arreglo mecánico es `--max-warnings 0`; el de criterio, leer la salida y no sólo
+el código.

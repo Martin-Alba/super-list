@@ -40,6 +40,14 @@ export function GroupView({
    * distintos con dos salidas distintas para el usuario.
    */
   const sinRed = useSinRed()
+  /**
+   * N5 — La red **viva**. `onAdd` se cierra sobre el `sinRed` del render en que
+   * se pulsó, y entre pulsar y responder es justo cuando la red se cae: el
+   * refinado leía un valor caduco y le decía «el servicio está despertando» a
+   * quien acababa de quedarse sin conexión.
+   */
+  const sinRedVivo = useRef(sinRed)
+  sinRedVivo.current = sinRed
   const [items, setItems] = useState<Item[]>(initialItems)
   /** R3 — Lo apuntado sin red, aún sin llegar al servidor. */
   const [pendientes, setPendientes] = useState<Pendiente[]>([])
@@ -87,7 +95,13 @@ export function GroupView({
   // R4 — el aviso lleva su CLASE, no sólo su texto: es lo que decide si además
   // hay que ofrecer volver a entrar. Sin la clase, distinguir "sesión caducada"
   // de "sin acceso" se quedaría en el texto y nadie podría actuar sobre ello.
-  const [notice, setNotice] = useState<{ texto: string; clase: Clase } | null>(null)
+  /**
+   * N5 — `deCola` marca el aviso que pone la cola. Identificarlo por su CLASE no
+   * valía: `servidor` la comparten este aviso, una edición fallida, un borrado
+   * fallido y el «no se ha podido recargar la lista» del resync, y el drenado los
+   * borraba todos sin haber recuperado nada de eso.
+   */
+  const [notice, setNotice] = useState<{ texto: string; clase: Clase; deCola?: true } | null>(null)
   // K2 — el botón de borrar no tenía guarda en vuelo: un doble toque lo
   // disparaba dos veces y la segunda pasada, con 0 filas, acusaba a otro
   // usuario del segundo toque del propio.
@@ -246,6 +260,61 @@ export function GroupView({
   }
 
   /**
+   * N3 — Una sola puerta a la cola. Las dos ramas —sin red al pulsar, y fallo en
+   * vuelo— tenían el mismo bloque escrito dos veces, y ya habían divergido: sin
+   * red un duplicado no se encolaba, y con el servidor caído sí, con ficha doble.
+   * N4 — Y pone su propio aviso: dejarlo fuera obligaba a repetir el mapeo
+   * fallo→aviso en las dos ramas, escrito en distinto orden, que es justo la
+   * deriva que unificar la puerta venía a matar.
+   */
+  const meterEnCola = async (
+    nombre: string, cantidad: string | null, desde: number,
+  ): Promise<boolean> => {
+    const cola = await leerCola(me.id)
+    const repetido = items.some(i => mismoProducto(i.name, nombre))
+      || cola.some(p => p.grupo === group.id && mismoProducto(p.nombre, nombre))
+    if (repetido) { devolver(nombre, cantidad, desde); void avisar('duplicado', '23505'); return false }
+    const p: Pendiente = {
+      id: crypto.randomUUID(), usuario: me.id, grupo: group.id,
+      nombre, cantidad, creado: Date.now(),
+    }
+    // J6 — si el almacén no admite la escritura no se pinta ficha: el usuario
+    // vería su producto, recargaría, y no estaría.
+    if (!(await encolar(p))) {
+      devolver(nombre, cantidad, desde); avisarTexto(SIN_ALMACEN, 'generico'); return false
+    }
+    setPendientes(prev => [...prev, p])
+    return true
+  }
+
+  /**
+   * N2/N3 — El gemelo de `reintentar` para el envío. `reintentar` recupera una
+   * **carga** fallida; éste empuja una **cola** que nadie va a drenar, porque el
+   * único disparador del drenado es el cambio de `sinRed` o el montaje.
+   *
+   * N3 — Y lleva su propia generación, no la de los avisos. Sellarlo con
+   * `secuencia` lo mataba dos veces: `limpiarAviso()` corre al principio de cada
+   * alta, así que la segunda cosa que apuntabas dejaba varada la primera; y el
+   * incremento mataba también el `reintentar` que `avisar` acababa de lanzar, con
+   * lo que el producto aparecía en la lista mientras la alerta seguía diciendo
+   * que el servidor no contesta.
+   */
+  const envio = useRef(0)
+  const reintentarEnvio = async (mio: number) => {
+    for (const espera of esperasDeReintento()) {
+      await new Promise(r => setTimeout(r, espera))
+      if (mio !== envio.current) return
+      await drenar()
+      if (mio !== envio.current) return
+      if (!(await leerCola(me.id)).some(p => p.grupo === group.id)) return
+    }
+  }
+  // N3 — Y no sobrevive al desmontaje: el bucle dura hasta 23 s, y remontar
+  // dentro de esa ventana dejaba dos drenados sobre una sola cola, que es el
+  // solape que el cerrojo de R4 existe para impedir (D.2).
+  useEffect(() => () => { envio.current++ }, [])
+
+  /**
    * R4 — Drena la cola: el más antiguo primero y **uno cada vez**. Dos envíos
    * simultáneos sobre el mismo grupo son la carrera que D.2 prohíbe resolver en
    * memoria del proceso.
@@ -256,20 +325,56 @@ export function GroupView({
    * que inventar aquí una clave de deduplicación, y sería peor.
    */
   const drenarUnaVez = useCallback(async () => {
+    // N4 — La generación se mira en CADA vuelta: desmontar con un envío en vuelo
+    // dejaba el bucle vaciando la cola entera sobre un árbol muerto.
+    const mio = envio.current
+    let envioHecho = false
     let cola = await leerCola(me.id)
     for (;;) {
+      if (mio !== envio.current) return
       const p = siguienteEnCola(cola, group.id)
-      if (!p) return
+      /**
+       * N4 — Quien **vacía** la cola retira el aviso, no quien la encuentra
+       * vacía: el drenado corre también al montar y en cada cambio de red, y
+       * limpiar ahí se llevaba por delante el aviso de una edición fallida.
+       * Medido: tres pruebas de `unit/avisos.test.tsx` en rojo.
+       */
+      if (!p) {
+        if (envioHecho) {
+          setNotice(n => (n?.deCola ? null : n))
+          /**
+           * N6 — Y se RELEE la lista. Marcarla resuelta sin leerla era fallar
+           * abierto: el envío llegaba, el aviso se iba, y el usuario se quedaba
+           * mirando la instantánea vieja de IndexedDB creyéndola fresca.
+           *
+           * Una relectura, no el bucle de cinco que R13 quitó: aquí el servidor
+           * acaba de contestar, así que no hay nada que reintentar. Y si aun así
+           * falla, el aviso **se queda**: dar por resuelto lo que no se pudo leer
+           * es exactamente lo que A.3 prohíbe.
+           */
+          const relectura = await activeItems(createClient(), group.id)
+          if (mio !== envio.current) return
+          if (!relectura.clase) {
+            setItems(prev => mergeItems(relectura.data, prev))
+            setResueltaPara(loadClase ?? null)
+          }
+        }
+        return
+      }
       const r = await addItem(createClient(), group.id, me.id, p.nombre, p.cantidad)
       // Cualquier otro fallo deja la cola como está: se reintentará. Parar en el
       // primero conserva el orden, que es lo que el usuario apuntó.
       if (r.clase && r.code !== '23505') return
+      envioHecho = true
       await quitarDeCola(p.id)
       cola = cola.filter(x => x.id !== p.id)
       setPendientes(prev => prev.filter(x => x.id !== p.id))
       if (r.data) setItems(prev => mergeItems([r.data as Item], prev))
     }
-  }, [group.id, me.id])
+    // N6 — `loadClase` es una PROP y cambia sin desmontar: este componente llama
+    // a `router.refresh()` en cuatro sitios. Capturado al montar, el drenado
+    // resolvía con un valor caduco. El linter lo venía avisando.
+  }, [group.id, me.id, loadClase])
 
   const drenando = useRef(false)
   const pedido = useRef(false)
@@ -572,28 +677,7 @@ export function GroupView({
       const cantidadAhora = quantity.trim() || null
       setName(''); setQuantity(''); setBusy(true)
       try {
-        const cola = await leerCola(me.id)
-        const repetido = items.some(i => mismoProducto(i.name, trimmed))
-          || cola.some(p => p.grupo === group.id && mismoProducto(p.nombre, trimmed))
-        // J8 — con red, un duplicado conserva lo tecleado; sin red se lo tragaba.
-        // Es el mismo gesto para quien lo hace: se comporta igual.
-        if (repetido) { devolver(trimmed, cantidadAhora, desde); void avisar('duplicado', '23505'); return }
-        const p: Pendiente = {
-          id: crypto.randomUUID(), usuario: me.id, grupo: group.id,
-          nombre: trimmed, cantidad: cantidadAhora, creado: Date.now(),
-        }
-        /**
-         * J6 — Si el almacén no admite la escritura —sin cuota, modo privado,
-         * IndexedDB no disponible— no se pinta la ficha. Pintarla sería el «éxito
-         * falso» que este proyecto lleva dos ciclos quitando: el usuario ve su
-         * producto, recarga, y no está.
-         */
-        if (!(await encolar(p))) {
-          devolver(trimmed, cantidadAhora, desde)
-          avisarTexto(SIN_ALMACEN, 'generico')
-          return
-        }
-        setPendientes(prev => [...prev, p])
+        if (!(await meterEnCola(trimmed, cantidadAhora, desde))) return
         limpiarAviso()
       } finally { setBusy(false) }
       return
@@ -619,6 +703,47 @@ export function GroupView({
     try {
       const { clase, code } = await addItem(createClient(), group.id, me.id, trimmed, cantidadAhora)
       if (clase) {
+        /**
+         * N1 — Deuda 34. `clasificar` devuelve `servidor` exactamente cuando el
+         * error **no trae código**, o sea cuando no contestó nadie que hable
+         * PostgREST: red caída, pasarela, o el proyecto pausado del plan
+         * gratuito. Un rechazo real de la base —23505, 42501— sí trae código y
+         * cae en otra clase, y ésos no se encolan: reintentarlos fallaría igual.
+         *
+         * Antes se devolvía al campo, y sólo si nadie había tecleado mientras
+         * tanto. Quien apunta tres cosas seguidas en un lineal teclea siempre, y
+         * ahí lo enviado se perdía: la única pérdida de datos del camino
+         * principal.
+         */
+        if (clase === 'servidor') {
+          /**
+           * N3 — `'servidor'` y no `'red'`. Medido: `addItem` traduce con
+           * `claseDe`, que devuelve `'servidor'` para TODO error sin código, y
+           * `clasificar` —lo único que produce `'red'`— sólo se alcanza con
+           * código. `'red'` aquí era una rama inalcanzable, igual que la que
+           * `lib/items.ts:62` ya retiró una vez.
+           */
+          if (!(await meterEnCola(trimmed, cantidadAhora, desde))) return
+          /**
+           * N4 — El aviso se pinta directo, sin `avisar`. `avisar` lanza además
+           * un `reintentar` de **carga**, y con `reintentarEnvio` ya en marcha
+           * eran dos bucles con el mismo calendario: 5 `addItem` + 5
+           * `activeItems` en 23 s contra un servidor que por definición no
+           * contesta. La relectura sobra: `drenarUnaVez` ya mezcla la fila que
+           * devuelve el propio `addItem`.
+           */
+          /**
+           * N5 — Refinado por red como todos. Sin esto, si la red del usuario cae
+           * entre pulsar y responder —el caso exacto que esta deuda cierra— se le
+           * enseñaba a la vez «Sin conexión» y «el servicio está despertando»,
+           * culpando al servidor de su propia red.
+           */
+          const suya = refinarSinRed('servidor', !sinRedVivo.current) ?? 'servidor'
+          secuencia.current++
+          setNotice({ texto: mensajeDe(suya) ?? '', clase: suya, deCola: true })
+          void reintentarEnvio(++envio.current)
+          return
+        }
         devolver(trimmed, cantidadAhora, desde)
         // T7 — no se espera al afinado: hacerlo dejaba el botón deshabilitado
         // hasta 2 s tras un 42501, que es lo contrario de lo que S4 buscaba.

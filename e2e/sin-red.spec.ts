@@ -684,3 +684,46 @@ test('DoD 49 y 50: sin sesión en el dispositivo, el shell no pinta la lista de 
       'la lista de alguien, servida sin red y sin sesión ninguna').not.toContain('anchoas')
     await ctx.close()
   })
+
+/**
+ * N1 / deuda 34 — El caso que la cola NO cubría: la red cae **entre el pulsar y
+ * la respuesta**. Aquí `setOffline` no vale, porque lo que se prueba es
+ * justamente que el navegador se sigue creyendo conectado: `sinRed` es falso
+ * todo el rato, el banner de sin red no aparece, y aun así lo apuntado no se
+ * pierde. Se corta la petición, no la interfaz.
+ */
+test('DoD 7: la red cae entre pulsar y responder, y lo apuntado no se pierde',
+  async ({ browser }) => {
+    const a = await entrar(browser, 'deuda34')
+    const gid = await grupoCon(a.page, 'Deuda34')
+    await expect(a.page.getByTestId('channel-live')).toHaveCount(1)
+
+    let cortado = true
+    await a.ctx.route('**/rest/v1/items**', async route => {
+      if (cortado && route.request().method() === 'POST') return route.abort('failed')
+      return route.continue()
+    })
+
+    // Gesto, no API: se teclea tecla a tecla y se pulsa el botón.
+    await a.page.getByTestId('item-name').click()
+    await a.page.getByTestId('item-name').pressSequentially('lentejas')
+    await a.page.getByTestId('add-item').click()
+
+    // La app NUNCA se creyó sin red: ése es el caso que la deuda describe.
+    await expect(a.page.getByTestId('sin-red')).toHaveCount(0)
+    await expect(a.page.getByTestId('item-pendiente')).toContainText('lentejas')
+    await expect(a.page.getByTestId('item-name')).toHaveValue('')
+
+    const antes = await admin.from('items').select('id', { count: 'exact', head: true })
+      .eq('group_id', gid).is('deleted_at', null)
+    expect(antes.count, 'se escribió en la base con la petición cortada').toBe(0)
+
+    // Vuelve la red. Nadie toca el estado de red del navegador ni recarga.
+    cortado = false
+    await expect(a.page.getByTestId('item-pendiente')).toHaveCount(0, { timeout: 40_000 })
+    await expect(a.page.getByTestId('item').first().getByLabel('Nombre')).toHaveValue('lentejas')
+    const despues = await admin.from('items').select('name')
+      .eq('group_id', gid).is('deleted_at', null)
+    expect(despues.data?.map(x => x.name)).toEqual(['lentejas'])
+    await a.ctx.close()
+  })
