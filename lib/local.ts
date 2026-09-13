@@ -60,6 +60,25 @@ const ULTIMO = 'ultimo-usuario'
 /** Clave de la instantánea: por usuario **y** por grupo (A.1). */
 const claveInstantanea = (usuario: string, grupo: string) => `${usuario}:${grupo}`
 
+/**
+ * Spec C / R5 — El nombre del grupo, en su **propia clave**, no como cuarto
+ * argumento de `guardarLista`: `unit/drenado.test.tsx:258` afirma esa llamada con
+ * tres, y ampliarla la pondría roja sin que el producto hubiera empeorado.
+ *
+ * El usuario va **delante** a propósito: `esClaveDe` barre por ese prefijo, y una
+ * clave `nombre:u1:g1` sobreviviría al cierre de sesión. Dos segmentos son una
+ * instantánea y tres un nombre, así que no colisionan.
+ */
+export const claveDelNombre = (usuario: string, grupo: string) => `${usuario}:${grupo}:nombre`
+
+/**
+ * Lo que `olvidarTodo` se lleva. Extraído para que la sonda pueda **ejercitarlo**
+ * en vez de reimplementarlo al lado: una copia pasa en verde mientras el de
+ * verdad se queda atrás.
+ */
+export const esClaveDe = (usuario: string, clave: unknown): boolean =>
+  typeof clave === 'string' && (clave.startsWith(`${usuario}:`) || clave === ULTIMO)
+
 const BASE = 'super'
 const COLA = 'cola'
 const LISTAS = 'listas'
@@ -165,6 +184,18 @@ export const leerLista = (usuario: string, grupo: string): Promise<Item[] | null
   conTienda<Item[]>(LISTAS, 'readonly', (t: IDBObjectStore) =>
     t.get(claveInstantanea(usuario, grupo)) as IDBRequest<Item[]>)
 
+/**
+ * Spec C / R5 — Expand/contract (§D.5): un dispositivo con instantánea anterior
+ * a este cambio no tiene nombre guardado, y la cáscara tiene que aguantarlo sin
+ * inventarse ninguno.
+ */
+export const guardarNombre = (usuario: string, grupo: string, nombre: string): Promise<boolean> =>
+  escribir(LISTAS, (t: IDBObjectStore) => { t.put(nombre, claveDelNombre(usuario, grupo)) })
+
+export const leerNombre = (usuario: string, grupo: string): Promise<string | null> =>
+  conTienda<string>(LISTAS, 'readonly', (t: IDBObjectStore) =>
+    t.get(claveDelNombre(usuario, grupo)) as IDBRequest<string>)
+
 export const guardarUltimoUsuario = (usuario: string): Promise<boolean> =>
   escribir(LISTAS, (t: IDBObjectStore) => { t.put(usuario, ULTIMO) })
 
@@ -193,7 +224,6 @@ export async function olvidarTodo(usuario: string): Promise<void> {
     t.getAllKeys() as IDBRequest<IDBValidKey[]>)
   // Y la marca de quién estaba: si no, el shell sin red seguiría creyendo que
   // hay alguien dentro después de que se haya ido.
-  const mias = (claves ?? []).filter(
-    (k): k is string => typeof k === 'string' && (k.startsWith(`${usuario}:`) || k === ULTIMO))
+  const mias = (claves ?? []).filter((k): k is string => esClaveDe(usuario, k))
   await Promise.all(mias.map(k => escribir(LISTAS, (t: IDBObjectStore) => { t.delete(k) })))
 }

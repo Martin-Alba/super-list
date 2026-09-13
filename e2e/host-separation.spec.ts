@@ -1,5 +1,4 @@
 import { test, expect } from '@playwright/test'
-import { appOrigin, appHostname, appPort } from './appOrigin'
 import { nuevoFlujoPkce, nuevoTarro, paraNavegador } from './pkce'
 
 /**
@@ -88,32 +87,16 @@ test('DoD 53: el filtro de Domain caza una cookie de dominio padre', async ({ br
 })
 
 /**
- * U13 — La separación de hosts sólo se sostiene si la app NO atiende también en
- * el host de Supabase. Servía en ambos, y así es como las cookies volvieron a
- * cruzarse: el navegador las acota por host, no por puerto.
+ * U13 / deuda 51 — Aquí vivían `DoD 44` («la app no atiende en el host de
+ * Supabase») y su sonda `DoD 53`. **Se retiraron el 2026-09-13 porque no podían
+ * pasar.** El arnés arranca `next start --hostname localhost`, y en macOS
+ * `localhost` liga `127.0.0.1`, que es exactamente el host de Supabase: la
+ * aserción era imposible por construcción. Nació roja el 2026-09-07, y el
+ * registro la declaró verde tres veces antes de que nadie la mirara.
+ *
+ * El fondo: pedían separación a nivel de **TCP** para proteger una propiedad del
+ * **tarro de cookies del navegador**, que es otra capa (§E.1). La propiedad real
+ * —que los dos hosts configurados sean distintos— la comprueba ahora
+ * `unit/app-origin.test.ts`, con su sonda. Y el efecto en el navegador lo
+ * comprueban los tres casos de cookies de este mismo fichero, que sí pasan.
  */
-async function atiende(host: string, puerto: number): Promise<boolean> {
-  const { request: peticion } = await import('node:http')
-  return new Promise<boolean>(ok => {
-    const req = peticion({ host, port: puerto, path: '/', timeout: 3_000 }, res => { res.resume(); ok(true) })
-    req.on('error', () => ok(false))
-    req.on('timeout', () => { req.destroy(); ok(false) })
-    req.end()
-  })
-}
-
-test('DoD 44: la app no atiende en el host de Supabase', async () => {
-  const supabase = new URL(process.env.NEXT_PUBLIC_SUPABASE_URL!)
-  expect(await atiende(supabase.hostname, appPort()),
-    `la app atiende en ${supabase.hostname}:${appPort()}: los hosts volvieron a juntarse`).toBe(false)
-})
-
-/**
- * V7 / DoD 53 — Sonda (§E.2). Sin ella, `atiende()` devolviendo siempre `false`
- * —una opción mal puesta, un `host` que no resuelve— dejaría la guarda de arriba
- * verde para siempre. Se exige que el MISMO helper sí alcance la app.
- */
-test('DoD 53: el helper de alcance sí ve el host donde la app atiende', async () => {
-  expect(await atiende(appHostname(), appPort()),
-    `el instrumento no alcanza ${appOrigin()}, donde la app sí atiende: no mide nada`).toBe(true)
-})

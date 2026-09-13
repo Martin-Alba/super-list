@@ -366,3 +366,43 @@ describe('M4 una instalación a medias no deja nada escrito', () => {
     expect(sw.borradas, 'borró la caché de una instalación que fue bien').toEqual([])
   })
 })
+
+/**
+ * Spec C / DoD 11 — La sonda del sondeo **tiene que salir a la red**.
+ *
+ * La cáscara comprueba si volvió la conexión sondeando `location.href` con
+ * `{cache:'no-store'}` — dentro de un grupo, `/g/<uuid>`.
+ * Si el worker la respondiera de caché, acertaría siempre estando sin red: la
+ * cáscara recargaría, la navegación volvería a caer en la cáscara, y sería un
+ * **bucle de recargas** que además martillearía el disco cada pocos segundos.
+ *
+ * Se ataca el fuente real del worker, que es la capa donde vive la decisión
+ * (§E.1). La otra mitad —que en un Chrome de verdad tampoco se sirva de caché—
+ * se comprueba en el navegador, porque aquí el `mode` lo pone la prueba.
+ *
+ * Qué lo pone rojo (§E.3): meter `/` entre los estáticos, o responder a todo.
+ */
+describe('Spec C la sonda de la cáscara no la responde el worker', () => {
+  /**
+   * Iteración 3 — Se pregunta con la **forma real** de la sonda: la cáscara
+   * sondea `location.href`, que dentro de un grupo es `/g/<uuid>`. La versión
+   * anterior preguntaba por `/` y por eso no cazaba lo que importa: metiendo
+   * `/g/` en `esEstatico` el worker respondería la sonda de caché —bucle de
+   * recargas— **y** guardaría el documento del grupo, que es §A.1.
+   */
+  it('un fetch a la URL del grupo en modo cors pasa de largo', () => {
+    const sw = cargarSW()
+    expect(sw.pide('https://app.example/g/8f1f1f7a-0000-4000-8000-000000000000', 'cors'),
+      'el worker respondió la sonda: sondear sin red acertaría siempre').toBe(false)
+  })
+
+  // Sonda (§E.2): sin ella, un worker que no respondiera a NADA pasaría la de
+  // arriba, y con él no habría ni modo sin red ni estáticos cacheados.
+  it('pero sí responde lo que debe: la navegación y el estático', () => {
+    const sw = cargarSW()
+    expect(sw.pide('https://app.example/g/123', 'navigate'),
+      'dejó de servir el documento: no hay modo sin red').toBe(true)
+    expect(sw.pide('https://app.example/_next/static/chunks/a.js', 'cors'),
+      'dejó de servir el estático: el shell no hidrata').toBe(true)
+  })
+})

@@ -175,3 +175,98 @@ describe('L2 un almacén que ni se puede abrir tampoco rompe', () => {
     await expect(m.olvidarTodo('u1')).resolves.toBeUndefined()
   })
 })
+
+/**
+ * Spec C / R5 y D3 — El nombre del grupo entra en la instantánea, y **tiene que
+ * irse con ella**.
+ *
+ * `olvidarTodo` borra las claves que empiezan por `${usuario}:`. Una clave
+ * `nombre:u1:g1` **sobreviviría al cierre de sesión**, y el siguiente que entrase
+ * en el mismo dispositivo vería el nombre del grupo del anterior: §A.1, la misma
+ * regla que costó retirar el cacheo del documento.
+ *
+ * Se ejercita **el predicado real**, no una copia: una copia al lado pasa en
+ * verde mientras el de verdad se queda atrás (§E.2).
+ *
+ * Qué lo pone rojo (§E.3): mover el nombre a una clave fuera del prefijo.
+ */
+describe('Spec C · el nombre del grupo se borra al salir, como la lista', () => {
+  it('la clave del nombre cae dentro de lo que olvidarTodo barre', async () => {
+    const { claveDelNombre, esClaveDe } = await import('@/lib/local')
+    expect(esClaveDe('u1', claveDelNombre('u1', 'g1')),
+      'el nombre sobreviviría al cierre de sesión: A.1').toBe(true)
+  })
+
+  it('y la de otro usuario no', async () => {
+    const { claveDelNombre, esClaveDe } = await import('@/lib/local')
+    expect(esClaveDe('u1', claveDelNombre('u2', 'g1')),
+      'borraría la clave de otro usuario').toBe(false)
+  })
+
+  // Sonda (§E.2): sin esto, un `esClaveDe` que devolviera siempre `true` pasaría
+  // las dos de arriba y borraría el almacén entero.
+  it('el predicado distingue: barre lo del usuario y la marca, nada más', async () => {
+    const { esClaveDe } = await import('@/lib/local')
+    expect(esClaveDe('u1', 'u1:g1')).toBe(true)
+    expect(esClaveDe('u1', 'ultimo-usuario')).toBe(true)
+    expect(esClaveDe('u1', 'u2:g1')).toBe(false)
+    expect(esClaveDe('u1', 'otra-cosa')).toBe(false)
+  })
+})
+
+/**
+ * Spec C / iteración 2 / DoD 13 — `olvidarTodo`, conducido de verdad.
+ *
+ * La sonda de más arriba ejercita `esClaveDe`, que es la mitad correcta; pero
+ * nadie llevaba `olvidarTodo` contra un almacén y comprobaba que la clave del
+ * nombre **desaparece**. Una guarda a una indirección de distancia cubre la copia
+ * y deja suelta la otra: si mañana alguien deja de llamar al predicado, el nombre
+ * del grupo del anterior sobrevive al cierre de sesión. Es §A.1.
+ *
+ * Qué lo pone rojo (§E.3): sacar la clave del prefijo del usuario, o dejar de
+ * filtrar con `esClaveDe`.
+ */
+describe('Spec C · cerrar sesión se lleva también el nombre del grupo', () => {
+  const conClaves = (claves: string[]) => {
+    const borradas: string[] = []
+    const tienda = {
+      put: () => ({}),
+      delete: (k: string) => { borradas.push(k); return {} },
+      get: () => disparar({}, 'ok', undefined),
+      getAll: () => disparar({}, 'ok', []),
+      getAllKeys: () => disparar({}, 'ok', claves),
+    }
+    const db = {
+      objectStoreNames: { contains: () => true },
+      transaction: () => {
+        const tx: Tx = {}
+        queueMicrotask(() => tx.oncomplete?.())
+        return { ...tx, objectStore: () => tienda,
+          set oncomplete(f: () => void) { tx.oncomplete = f },
+          set onerror(f: () => void) { tx.onerror = f },
+          set onabort(f: () => void) { tx.onabort = f } }
+      },
+    }
+    return { idb: { open: () => disparar({}, 'ok', db) }, borradas }
+  }
+
+  it('borra la instantánea y el nombre del usuario que sale', async () => {
+    const { idb, borradas } = conClaves(['u1:g1', 'u1:g1:nombre', 'ultimo-usuario'])
+    const { olvidarTodo } = await cargar(idb)
+    await olvidarTodo('u1')
+    expect(borradas, 'el nombre del grupo sobrevivió al cierre de sesión: A.1')
+      .toContain('u1:g1:nombre')
+    expect(borradas).toContain('u1:g1')
+  })
+
+  // Sonda (§E.2): sin ella, un `olvidarTodo` que borrara el almacén entero
+  // pasaría la de arriba y se llevaría por delante la cola de otro usuario.
+  it('y no toca lo de otro usuario', async () => {
+    const { idb, borradas } = conClaves(['u1:g1:nombre', 'u2:g9:nombre', 'u2:g9'])
+    const { olvidarTodo } = await cargar(idb)
+    await olvidarTodo('u1')
+    expect(borradas).toContain('u1:g1:nombre')
+    expect(borradas, 'se llevó por delante lo de otro usuario').not.toContain('u2:g9:nombre')
+    expect(borradas).not.toContain('u2:g9')
+  })
+})

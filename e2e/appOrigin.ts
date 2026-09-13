@@ -33,3 +33,23 @@ export function esHostLocal(host: string): boolean {
 }
 
 export const esOrigenLocal = () => esHostLocal(appHostname())
+
+/**
+ * U13 / deuda 51 — La separación de hosts es lo que impide que la cookie de
+ * sesión de la app viaje al endpoint de Supabase: el 431 de Kong del 2026-09-06.
+ * El navegador acota las cookies por **nombre de host**, no por dirección, y por
+ * eso `localhost` y `127.0.0.1` sirven aunque sean la misma interfaz de red.
+ *
+ * Ésa es la propiedad comprobable, y es de configuración. La guarda anterior
+ * —«la app no atiende en el host de Supabase»— pedía separación a nivel de TCP
+ * para proteger una propiedad de cookies: imposible, porque
+ * `next start --hostname localhost` liga `127.0.0.1`. Nació roja el 2026-09-07 y
+ * el registro la contó verde tres veces.
+ *
+ * Devuelve el host compartido, o `null` si están separados.
+ */
+export function hostCompartido(origenApp: string, urlSupabase: string): string | null {
+  const host = (u: string) => new URL(u).hostname.replace(/^\[|\]$/g, '').toLowerCase()
+  const app = host(origenApp)
+  return app === host(urlSupabase) ? app : null
+}

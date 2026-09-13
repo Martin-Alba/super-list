@@ -522,8 +522,213 @@ así que la satisface el aviso **derivado** tomando el relevo. No distingue «el
 aviso de la cola sobrevivió» de «otro lo sustituyó». Es válida —su sonda la pone
 roja— pero para cerrar la 40 hace falta el gemelo con `loadClase` nulo.
 
-### 46. `eslint` corre sin `--max-warnings`
-Cualquier número de avisos sale con código 0, así que la puerta pasa mientras el
-linter nombra un defecto. Pasó en este ciclo durante cuatro iteraciones. El
-arreglo mecánico es `--max-warnings 0`; el de criterio, leer la salida y no sólo
-el código.
+### 46. `eslint` corre sin `--max-warnings` — RESUELTO (2026-09-13)
+Cualquier número de avisos salía con código 0, así que la puerta pasaba mientras
+el linter nombraba un defecto. Pasó durante cuatro iteraciones del ciclo de la
+deuda 34. El arreglo mecánico fue `--max-warnings 0`; el de criterio, leer la
+salida y no sólo el código.
+
+`unit/puerta-lint.test.ts` lo vigila por cuatro sitios: que un aviso sembrado
+ponga la puerta roja, que las supresiones en línea estén declaradas una a una,
+que ninguna directiva silencie sin nombrar su regla, y que toda configuración de
+eslint escrita en el código esté en un inventario declarado.
+
+## Del ciclo «la puerta no pasa con avisos del linter» (cierre 2026-09-13)
+
+### 47. Nada ejecuta la puerta salvo una persona que la teclea
+No hay `.github/` y no hay hook de git instalado: `.git/hooks` sólo tiene los
+`.sample` y `core.hooksPath` está sin fijar. La §C de `CLAUDE.md` dice «los hooks
+son ley», y no hay hook que sea ley: endurecer el script es real, pero su
+cumplimiento es voluntario. Medido el 2026-09-13.
+
+Un matiz que la primera redacción de esta entrada se dejó, y que apunta al
+contrario: `unit/puerta-lint.test.ts` ejecuta `pnpm lint` y `npx eslint`, así que
+**`pnpm test` sí corre el linter**. La mitad `lint` de la puerta va enganchada a
+la suite; lo que no ejecuta nadie automáticamente es la suite.
+
+Se dejó fuera a propósito: instalar un hook o un CI cambia el flujo de trabajo
+del usuario, que es quien commitea, y eso es decisión suya y no del ciclo.
+
+### 48. La configuración de eslint no está gobernada por nada
+Medido el 2026-09-13, y **corregido** el mismo día: la primera redacción decía
+que apagar `@typescript-eslint/no-unused-vars` en `eslint.config.mjs` no lo cazaba
+**ninguna** de las guardas. Es falso, y se comprobó apagándola: caen **2 de 3**
+(la del aviso sembrado y la de la supresión sembrada), porque las dos siembran
+usando esa regla.
+
+El hueco real es más estrecho y sigue abierto: apagar —o ignorar el fichero de—
+una regla **de la que ninguna guarda dependa**, como `no-console` o
+`@next/next/no-img-element`, deja las guardas en verde. La puerta gobierna lo que
+el linter dice, no lo que al linter se le manda decir desde su configuración.
+
+Se rechazó cerrarlo en el mismo ciclo por dos motivos escritos: la Spec A pone
+«cambiar qué reglas de eslint están activas» fuera de alcance por su nombre, y
+«qué reglas son portantes» no tiene final — se responde otra vez con cada regla
+nueva. Quien lo retome, que le ponga ese límite por escrito antes de empezar.
+
+### 50. Un plugin puede silenciar sin que eslint se entere
+Medido el 2026-09-13. `eslint-plugin-react-hooks` (7.1.1) busca
+`$FlowFixMe[react-rule-hook]` o `$FlowFixMe[react-rule-unsafe-ref]` en **cualquier
+comentario** y hace `continue` sobre el diagnóstico en vez de reportarlo. No hay
+mensaje, no hay `suppressedMessages`, y el código de salida no se mueve: un
+`react-hooks/rules-of-hooks` pasa de 1 error a 0 y `pnpm lint` sale 0.
+
+Alcance real, también medido: silencia `rules-of-hooks`; **no** silencia
+`exhaustive-deps` ni `set-state-in-effect` puesta sobre el efecto. La marca
+concreta está en el inventario de `unit/puerta-lint.test.ts` y sale roja sembrada,
+3 de 3.
+
+**Lo que queda abierto es la clase, no la instancia.** El inventario cierra la
+familia de comentarios de configuración *de eslint*; no puede cerrar un canal que
+un plugin futuro invente sin pasar por eslint, porque no habría nada que observar
+salvo el código del plugin. Quien añada un plugin de lint a este proyecto: mirar
+si trae su propio mecanismo de silenciado, y si lo trae, añadirlo al inventario.
+
+### 51. `DoD 44` de la separación de hosts nació rojo y se contó como verde — RESUELTO (2026-09-13)
+Medido el 2026-09-13. `e2e/host-separation.spec.ts:105` —«la app no atiende en el
+host de Supabase»— **no puede pasar en esta máquina, y no ha pasado nunca.**
+
+**La causa.** El arnés arranca `next start --hostname localhost`. En macOS
+`localhost` resuelve a `127.0.0.1` —lo hacen igual las tres versiones de Node
+instaladas, 24.14.0, 24.14.1 y 25.2.1— así que el servidor liga `127.0.0.1:3000`,
+comprobado con `lsof`. Y `NEXT_PUBLIC_SUPABASE_URL` es `http://127.0.0.1:54321`.
+O sea: la app **sí** atiende en el host de Supabase, porque `localhost` y
+`127.0.0.1` son la misma interfaz. La aserción es imposible por construcción.
+
+**Lo que el test creía proteger no se protege así.** La separación que importa es
+la del **tarro de cookies del navegador**, que sí trata `localhost` y `127.0.0.1`
+como hosts distintos. Eso lo comprueban los otros tres casos del mismo fichero, y
+están verdes. `DoD 44` pide una separación a nivel de TCP para proteger una
+propiedad de cookies: son capas distintas (§E.1).
+
+**Desde cuándo, comprobado y no estimado.** Se montó un árbol de trabajo aparte en
+`d1a19d6` (2026-09-07, el commit que creó el test), con `pnpm install
+--frozen-lockfile` sobre el mismo lock, y **falla ahí igual**, con el mismo
+mensaje. El fichero y `playwright.config.ts` no se han tocado desde ese día, y
+`pnpm-lock.yaml` no tiene un solo cambio desde entonces.
+
+**Y el checkpoint lo declaró verde tres veces.** «42 — 2026-09-07», «EXIT=0 las
+tres, 81/81 — 2026-09-09». Las cifras de total son correctas —42, 60, 81 y 82
+casos, contados con `playwright test --list` en cada commit—, así que no es un
+«81 de 82» mal leído: es una afirmación de verde sobre una suite que tenía un
+rojo. El 2026-09-12 la suite ya no se ejecutó, declarado.
+
+**Límite de esta investigación:** `.env.local` está fuera del control de versiones
+y `E2E_BASE_URL` es una variable de entorno, así que no puedo reconstruir qué
+valores tenían aquellos días. Todo lo que **sí** se puede inspeccionar —el test,
+la configuración de Playwright, las dependencias, `supabase/config.toml`,
+`.env.example`, `/etc/hosts` y las tres versiones de Node— es incapaz de haber
+hecho pasar ese caso. No puedo probar que el verde de entonces fuera falso; sí
+puedo decir que ninguna palanca inspeccionable lo explica.
+
+**Cómo se arregló.** `DoD 44` y su sonda `DoD 53` se retiraron de
+`e2e/host-separation.spec.ts`, y la propiedad se comprueba donde vive su
+requisito (§E.1): `hostCompartido()` en `e2e/appOrigin.ts`, ejercitada desde
+`unit/app-origin.test.ts`. Afirma lo que de verdad separa las cookies —que el
+host de la app y el de Supabase son **nombres** distintos—, no una separación de
+TCP que dos alias de loopback no pueden dar.
+
+Puesta roja por mutación, 3 de 3 pasadas, por las dos variables que pueden
+juntarlos: `NEXT_PUBLIC_SUPABASE_URL=http://localhost:54321` y
+`E2E_BASE_URL=http://127.0.0.1:3000`. Lleva sonda de lector con cuatro casos que
+debe cazar —incluidos `LOCALHOST` y `[::1]`— y dos que no debe.
+
+Los tres casos de cookies de `host-separation.spec.ts` siguen donde estaban: son
+los que miden el efecto en el navegador, y son los que nunca fallaron.
+
+**`pnpm test:e2e` sale EXIT=0 el 2026-09-13, 80 casos.** Es el primer verde de la
+suite comprobado por mí de punta a punta.
+
+### 52. Nadie abre la app y la usa como una persona desde el 2026-09-09
+Leído del propio `docs/CHECKPOINT.md`, no estimado:
+
+- **2026-09-07** y **2026-09-08**: login real de Google en el navegador, build de
+  producción, sesión real del usuario.
+- **2026-09-09**: «Chrome real, a mano, con la app apagada». Última vez.
+- **2026-09-12** (deuda 34): declarado que **nadie** lo miró a mano; en su lugar,
+  Playwright a 390×844 con `isMobile`.
+- **2026-09-13** (puerta del linter): tampoco, y declarado, con el motivo de que
+  el cambio no tiene superficie de navegador — que es cierto para *ese* cambio.
+
+Cuatro días y dos ciclos con la app ejercitada sólo por la suite. El motivo de
+cada salto era bueno por separado; el efecto acumulado no lo es, y **el defecto de
+la deuda 51 es de esa familia**: una guarda que lleva seis días roja mientras el
+registro decía verde tres veces. La suite mide lo que alguien escribió que
+midiera; una persona usando la app mide lo que nadie escribió.
+
+Concreto, para que no sea una buena intención: la próxima vez que se cierre un
+ciclo que toque superficie de navegador, la pasada a mano no se sustituye por
+Playwright; y si se salta, el motivo va con fecha, como aquí.
+
+### 53. Sin cobertura y recargando, el mecanismo de la app no está montado
+Medido en Chrome el 2026-09-13, a 390×844, contra build de producción y con sesión
+real sembrada. Recargando dentro de un grupo sin red, el service worker sirve
+`app/sin-conexion/page.tsx`: la URL sigue siendo `/g/<id>` pero **`GroupView` no
+se monta**, así que `avisar`, `reintentar`, `useSinRed` y la cola **no existen en
+pantalla**. Por `data-testid`: hay `sin-red`, `items`, `item`; no hay `item-name`
+ni `add-item`.
+
+Con la pestaña ya abierta sí funciona entero: el aviso pasa a «puedes apuntar», se
+tecleó un producto con el gesto, y al volver la red llegó a la base y el aviso se
+retiró solo.
+
+**Por qué importa el orden de trabajo:** la cabecera del propio worker dice que
+existe porque el App Shell «no sobrevive a cerrar la app, que es justo lo que pasa
+entre una compra y la siguiente». En ese camino exacto —el que motivó construirlo—
+la cola no está. Y la cáscara no se entera de que vuelve la red: ocho segundos
+medidos con el servidor ya levantado, mismo banner.
+
+Esto **reordenó el trabajo**: la Spec C (la cáscara) va antes que la Spec B (el
+mecanismo de aviso-y-recuperación), porque depurar un mecanismo ausente antes de
+arreglar su ausencia es el orden equivocado. La C está sellada en `docs/spec.md`.
+
+### 54. El sondeo del framework y el propio conviven — ACOTADO (2026-09-13)
+`next/dist/esm/client/app-index.js:248` hace `require('./components/offline')` en
+**toda** página del App Router cuando `__NEXT_USE_OFFLINE`, y ese módulo registra
+`window.addEventListener('offline', …)` y entra en su bucle desde cualquier fetch
+del framework que falle. **No depende de que `useSinRed` esté montado**: el hook
+es sólo el lado de lectura.
+
+**Historial de esta entrada, porque importa cómo se llegó aquí.** La revisión de
+la iteración 2 midió el bucle; yo escribí que no se reproducía apoyándome en tres
+mediciones propias que daban cero, y **sustituí una explicación correcta por una
+equivocada**. Mis ceros eran honestos para la condición que medí —documento ya
+cargado sin red, y el ratón *por encima* de la salida— y falsos como conclusión.
+Pulsando, sale a la primera:
+
+    63ms  GET  /          ← la recarga        3581ms  HEAD /g/…
+    69ms  HEAD /g/…                           6027ms  GET  /g/…  ← sonda propia
+   573ms  HEAD /g/…                           6584ms  HEAD /g/…
+  1576ms  HEAD /g/…                           9588ms  HEAD /g/…
+  2023ms  GET  /g/…  ← sonda propia           → 6 HEAD en 10 s
+
+**Acotado, no cerrado.** La salida de la cáscara pasó a ser un enlace normal en
+vez de `next/link`: así la navegación la intercepta el service worker y el
+framework no ve ningún fetch fallado. Medido: **0 HEAD**, dos pasadas; volviendo a
+`next/link`, **6 HEAD**, dos pasadas. Lo vigila
+`e2e/sin-red.spec.ts` («no despierta el sondeo del framework»), y la supresión del
+linter que eso exige está declarada en el inventario de `unit/puerta-lint.test.ts`.
+
+**Lo que queda abierto:** cualquier otro fetch del framework que falle sin red
+—una navegación desde otro sitio de la app, un reintento de RSC— vuelve a
+arrancarlo. Esta entrada acota **la salida de la cáscara**, que es el camino que
+se midió. Quien toque la cáscara: si añade otra navegación, medir primero con
+`page.on('request')`, que es de una línea.
+
+### 55. Una recarga se lleva el borrador sin enviar
+Medido en la revisión de la iteración 4. La sonda recarga en cuanto acierta si no
+hay un envío en vuelo, pero el texto **tecleado y no enviado** se va con la
+recarga: sin ficha, sin aviso y sin rastro. Con la cadencia en su techo de 30 s y
+unos 5 s de tecleo por producto, del orden de **1 de cada 6 recuperaciones**.
+
+Se dejó fuera de la Spec C por su nombre: persistir el borrador y rehidratarlo al
+volver a la vista cruza a `app/g/[id]/GroupView.tsx`, que es la Spec B. La otra
+opción —posponer la recarga mientras el campo no esté vacío— ancla al usuario en
+la cáscara si se olvida texto escrito, y es una decisión de producto.
+
+### 49. El inventario de supresiones no ve un movimiento dentro del mismo fichero
+Es un multiconjunto de pares *(fichero, regla)*: a propósito, porque fijar la
+línea haría que cualquier edición por encima lo moviera. El precio, medido: mover
+una supresión dentro del mismo fichero y con la misma regla no se distingue.
+Importa para la Spec B, que reescribe justo `app/g/[id]/GroupView.tsx`. Está
+declarado en el propio fichero de la guarda.

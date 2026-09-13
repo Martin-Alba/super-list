@@ -19,6 +19,12 @@ const REGISTRADOS = [
   ['skip_nonce_check', /skip_nonce_check/],
   ['additional_redirect_urls', /additional_redirect_urls/],
   ['el estado real de esa entrada', /RESUELTO al separar los hosts/],
+  // La spec de la puerta del linter declaró que estas dos entradas las vigilaba
+  // este fichero. No era verdad: revertir la deuda entera lo dejaba en 8/8
+  // verde. Ahora sí, que es la única forma de que la decisión sobreviva al
+  // borrado de la spec.
+  ['que nadie ejecuta la puerta', /Nada ejecuta la puerta salvo una persona/],
+  ['que la configuración de eslint no está gobernada', /La configuración de eslint no está gobernada/],
 ] as const
 
 /**

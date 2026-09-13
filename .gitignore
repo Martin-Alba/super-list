@@ -46,3 +46,6 @@ next-env.d.ts
 
 # fathom
 .claude/fathom/
+
+# sonda de la puerta del linter (unit/puerta-lint.test.ts)
+.sonda-lint.ts

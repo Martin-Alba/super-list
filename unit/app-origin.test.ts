@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import { readdirSync, readFileSync } from 'node:fs'
 import { sinComentarios } from './comentarios'
-import { appOrigin, appHostname, appPort, DEFECTO, esHostLocal } from '../e2e/appOrigin'
+import { appOrigin, appHostname, appPort, DEFECTO, esHostLocal, hostCompartido } from '../e2e/appOrigin'
 
 /**
  * V1 / DoD 45 — El origen se congelaba al importar el módulo, así que la
@@ -138,5 +138,52 @@ describe('Z6 la parada en seco distingue local de hospedado', () => {
     '',
   ])('rechaza %j', (host) => {
     expect(esHostLocal(host), `${host} NO es local y se admitió: el banco se montaría fuera`).toBe(false)
+  })
+})
+
+/**
+ * U13 / deuda 51 — La guarda de la separación de hosts, en la capa donde vive su
+ * requisito (§E.1): los hosts son un hecho de **configuración**, no de TCP. La
+ * versión anterior estaba en `e2e/host-separation.spec.ts` y no podía pasar en
+ * ninguna máquina donde `localhost` resuelva a `127.0.0.1` — o sea, en macOS.
+ *
+ * `[REGRESIÓN]`: verde de partida, porque la configuración de hoy es correcta.
+ * Lo que faltaba no era el arreglo, era quien lo vigilara. Qué la pone roja
+ * (§E.3): apuntar `NEXT_PUBLIC_SUPABASE_URL` o `E2E_BASE_URL` al mismo host.
+ */
+describe('U13 la app y Supabase no comparten host', () => {
+  const SUPABASE = process.env.NEXT_PUBLIC_SUPABASE_URL
+
+  it('el entorno trae la URL de Supabase', () => {
+    expect(SUPABASE, 'sin NEXT_PUBLIC_SUPABASE_URL esta guarda no miraría nada').toBeTruthy()
+  })
+
+  it('[REGRESIÓN] los hosts configurados son distintos', () => {
+    expect(hostCompartido(appOrigin(), SUPABASE!),
+      'la app y Supabase comparten host: la cookie de sesión volverá al endpoint de realtime')
+      .toBeNull()
+  })
+
+  it('los dos son locales: el arnés sólo trabaja contra el stack local', () => {
+    expect(esHostLocal(appHostname())).toBe(true)
+    expect(esHostLocal(new URL(SUPABASE!).hostname)).toBe(true)
+  })
+
+  // Sonda (§E.2): sin esto, una función que devolviera siempre `null` dejaría el
+  // caso de arriba en verde para siempre, que es como llegamos hasta aquí.
+  it.each([
+    ['http://localhost:3000', 'http://localhost:54321', 'localhost'],
+    ['http://127.0.0.1:3000', 'http://127.0.0.1:54321', '127.0.0.1'],
+    ['http://LOCALHOST:3000', 'http://localhost:54321', 'localhost'],
+    ['http://[::1]:3000', 'http://[::1]:54321', '::1'],
+  ])('caza %j contra %j', (app, supa, compartido) => {
+    expect(hostCompartido(app, supa)).toBe(compartido)
+  })
+
+  it.each([
+    ['http://localhost:3000', 'http://127.0.0.1:54321'],
+    ['http://127.0.0.1:3000', 'http://localhost:54321'],
+  ])('acepta %j contra %j', (app, supa) => {
+    expect(hostCompartido(app, supa)).toBeNull()
   })
 })

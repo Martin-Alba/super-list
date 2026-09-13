@@ -343,7 +343,7 @@ vez (2026-09-07) el documento decía 221 tests en 36 ficheros cuando eran 245 en
 37, y la guarda que debía impedirlo daba verde sobre un documento con cifras
 inventadas.
 
-- Ficheros de prueba unitaria: 61
+- Ficheros de prueba unitaria: 63
 - Ficheros de prueba de navegador: 16
 
 
@@ -589,3 +589,252 @@ El ciclo se detuvo en la cuarta vuelta por la **regla del techo** y se escaló a
 usuario: cuatro iteraciones seguidas habían introducido una regresión en el mismo
 sitio. El diagnóstico —y la decisión del usuario— fue acotar la quinta a las dos
 regresiones y llevar el problema real a una spec aparte.
+
+---
+
+# Verificación del ciclo «la puerta no pasa con avisos del linter» (2026-09-13)
+
+Cierra la entrada **46** de `docs/TECHNICAL_DEBT.md`. Cuatro vueltas; la cuarta
+la autorizó el usuario expresamente tras avisarle del techo que él mismo puso.
+
+## Qué se construyó
+
+| Mecanismo | Dónde |
+|---|---|
+| `--max-warnings 0`: un aviso pone la puerta roja | `package.json:9` |
+| Inventario de supresiones: las que eslint reporta coinciden con las declaradas | `unit/puerta-lint.test.ts` |
+| Toda directiva `disable` nombra la regla que silencia | ídem |
+| Inventario de toda configuración de eslint escrita en el código, familia entera más el canal del plugin | ídem |
+
+## Terminal
+
+| | Antes | Después |
+|---|---|---|
+| Ficheros de prueba unitaria | 61 | 62 |
+| Casos unitarios | 1.369 | 1.394 |
+| `pnpm typecheck` · `lint` · `test` · `build` | 0 · 0 · 0 · 0 | 0 · 0 · 0 · 0 |
+
+`pnpm build` se corrió sobre un `.next` borrado antes, no contra un servidor de
+desarrollo.
+
+## Runtime — qué se ejercitó y contra qué build
+
+La capa que el requisito nombra es la **terminal** (§E.1): «`pnpm lint` sale ≠ 0».
+Se atacó ahí directamente y por mutación, no por lectura. Cada guarda se vio roja
+sembrando su defecto, **3 pasadas de 3** en todas:
+
+| Sonda sembrada | Resultado |
+|---|---|
+| Un aviso (`const` sin usar) | rojo 3/3; sin el flag, verde — 2026-09-13 |
+| Una supresión en línea sin declarar | rojo 3/3 — 2026-09-13 |
+| Una directiva sin regla nombrada | rojo 3/3 — 2026-09-13 |
+| Configuración en línea poniendo una regla en `"off"` | rojo 3/3 — 2026-09-13 |
+| La misma, **partida en dos líneas** | rojo 3/3 — 2026-09-13 |
+| La marca de plugin `$FlowFixMe[react-rule-hook]` | rojo 3/3 — 2026-09-13 |
+| Revertir `docs/TECHNICAL_DEBT.md` a `HEAD` | 2 tests rojos, 3/3 — 2026-09-13 |
+| Quitar `--cached` del barrido | rojo: 131 ficheros analizados y no mirados — 2026-09-13 |
+
+`pnpm test:e2e` se ejecutó completo el **2026-09-13**: 81 pasan, 1 falla. El fallo
+es `e2e/host-separation.spec.ts:105`, y es **pre-existente**: reproduce idéntico
+con el árbol limpio en `HEAD`, y también en un árbol de trabajo montado sobre
+`d1a19d6` —el commit que creó el test, el 2026-09-07— con el mismo lock instalado
+desde cero. Diagnóstico y alcance, en la deuda 51.
+
+**Primer diagnóstico mío de ese fallo, y era falso.** El 2026-09-13 dije que ese
+caso pasaba corriendo su fichero solo, 3 de 3, y que fallaba sólo acompañado. No:
+falla siempre. El error fue de lectura, no de medición — Playwright imprime la
+línea de fallos y después la de aciertos, y mi comando se quedaba con la última.
+Conté el verde y tiré el rojo, en el mismo ciclo cuya cicatriz es exactamente
+ésa.
+
+## Qué NO se verificó, y qué se hizo en su lugar
+
+- **Navegador a 390 px:** no se ejercitó. El cambio no tiene superficie de
+  navegador —un script de `package.json`, dos ficheros de prueba, tres documentos
+  y una línea de exclusión—, y `pnpm build` emite las mismas 8 rutas que antes.
+- **La causa del fallo de `host-separation`:** no se diagnosticó hasta el final.
+  Se acotó a un caso mínimo que reproduce en 3 segundos y se anotó. Arreglarlo
+  habría sido ensanchar el ciclo a código que esta spec no tocó.
+- **Que no quede una quinta forma de silenciar:** no se puede demostrar, y así se
+  declara. El límite está escrito: la guarda cubre la familia de configuración en
+  línea de eslint más los canales de plugin conocidos; no cubre `eslint.config.mjs`
+  (deuda 48), ni la ausencia de hook o CI (deuda 47), ni un canal que un plugin
+  futuro invente sin reportar a eslint (deuda 50).
+
+## Cicatriz del ciclo — cuatro frases falsas, todas mías
+
+Las cuatro revisiones encontraron algo real cada una. Tres de los hallazgos eran
+**afirmaciones falsas que yo había escrito** en la spec o en la deuda: que ninguna
+guarda cazaba una regla apagada (cazaban dos de tres), que `package.json` era el
+único sitio que llamaba a `eslint` (mi propio test lo llamaba), y que
+`unit/debt.test.ts` vigilaba dos entradas nuevas — revertir la deuda lo dejaba en
+8/8 verde, medido el 2026-09-13. La cuarta fue decir «enumeración cerrada» cuando
+el barrido leía línea a línea un comentario que eslint lee a través de ellas.
+
+El patrón: **copiar una medición ajena, o deducir una propia, en vez de repetir el
+comando.** La regla del proyecto ya lo dice —«no asumir, verificar»— y la
+incumplí escribiendo documentos, que es donde menos se nota y más dura.
+
+## Trayectoria
+
+| Vuelta | Qué encontró la revisión | Qué cambió |
+|---|---|---|
+| 1 | — (construcción) | `--max-warnings 0` y su sonda |
+| 2 | La puerta se salta silenciando en línea; `pnpm test` rojo por el contador del checkpoint | Inventario de supresiones; 61 → 62 — 2026-09-13 |
+| 3 | Un `disable` general vacía un fichero de linter y el inventario no lo distingue; la deuda decía lo contrario de la realidad | Barrido de directivas; deuda 46 cerrada, 47–49 abiertas |
+| 4 | La configuración en línea escapa a las tres guardas; cuatro frases falsas en el registro | Inventario de la familia entera; luego, sobre el texto completo y con el canal del plugin |
+
+---
+
+# Cierre de la deuda 51 (2026-09-13)
+
+La guarda de la separación de hosts llevaba **seis días roja** —desde el commit
+que la creó, el 2026-09-07— y el registro la había declarado verde tres veces.
+Diagnóstico completo en la entrada 51 de `docs/TECHNICAL_DEBT.md`.
+
+## Qué se cambió
+
+| | |
+|---|---|
+| Retirado | `DoD 44` y su sonda `DoD 53` de `e2e/host-separation.spec.ts`: pedían separación de TCP, que dos alias de loopback no pueden dar — 2026-09-13 |
+| Añadido | `hostCompartido()` en `e2e/appOrigin.ts`, ejercitada desde `unit/app-origin.test.ts` |
+| Intacto | Los tres casos de cookies del mismo fichero: son los que miden el efecto en el navegador |
+
+## Terminal y runtime
+
+- El 2026-09-13: `pnpm typecheck` 0 · `pnpm lint` 0 · `pnpm test` 0 (1.403 casos
+  en 62 ficheros) · `pnpm build` 0 sobre un `.next` borrado antes.
+- **`pnpm test:e2e` EXIT=0, 80 casos — 2026-09-13.** Primer verde de la suite
+  comprobado de punta a punta en este ciclo; los dos anteriores la declararon sin
+  que lo fuera, o no la ejecutaron.
+- Mutación: juntar los hosts por cualquiera de las dos variables pone roja la
+  guarda, 3 de 3 pasadas — 2026-09-13.
+
+## De paso, una demostración no buscada
+
+Al retirar el test viejo quedaron tres imports huérfanos. `pnpm lint` salió **≠ 0**
+y los nombró. Con el `package.json` de ayer habría salido 0 y habrían viajado en
+el commit: es el defecto que la deuda 46 describía, cazado en vivo el mismo día
+que se cerró.
+
+## Qué NO se verificó
+
+- **La app abierta a mano.** Nadie la usa como una persona desde el 2026-09-09
+  (deuda 52). Este cambio no toca superficie de navegador —un helper de
+  configuración y dos tests—, pero el hallazgo es de la app, no de este cambio.
+
+---
+
+# Verificación del ciclo «la cáscara sin red» (2026-09-13)
+
+Cinco vueltas. La quinta la autorizó el usuario tras una escalada por el techo del
+ciclo, con el encargo de cerrarla y cerrar.
+
+## Por qué existió esta spec
+
+Una pasada manual a 390 px descubrió que **al recargar sin cobertura dentro de un
+grupo, el service worker sirve la cáscara**, así que `GroupView` no se monta y el
+mecanismo de aviso-y-recuperación —la cola incluida— **no existe en pantalla**. El
+propio worker dice que existe porque el App Shell «no sobrevive a cerrar la app,
+que es justo lo que pasa entre una compra y la siguiente»: en ese camino exacto,
+el que motivó construirlo, no se podía apuntar. Eso reordenó el trabajo: la
+cáscara pasó delante de la Spec B (deuda 53).
+
+## Qué se construyó
+
+| | |
+|---|---|
+| Sondeo propio | `location.href`, cadencia 2/4/8/16/30 s sostenida, cota de 2 s por sonda, pausa con la pestaña oculta, generación para no duplicarse |
+| Recuperación | Al acertar la sonda, recarga — salvo con un envío en vuelo. El contador cruza la recarga por `sessionStorage`, y por `window.name` si está capado |
+| Apuntar sin red | La regla de la cola sale a `lib/cola.ts` y la comparten las dos pantallas; los efectos se quedan en cada una. `avisar` **no se tocó** |
+| Textos | El banner deja de ser incondicional: tres estados, y la línea de debajo con el mismo criterio |
+| Identidad | La cáscara dice de qué grupo es, leyendo un nombre que la instantánea empezó a guardar bajo clave propia dentro del prefijo del usuario |
+| Salida | Enlace normal —no `next/link`— con la regla del linter silenciada, su motivo escrito y declarada en el inventario |
+
+## Terminal
+
+| | Antes | Después |
+|---|---|---|
+| Ficheros de prueba unitaria | 62 | 63 — 2026-09-13 |
+| Casos unitarios | 1.403 | 1.465 — 2026-09-13 |
+| Casos de navegador | 80 | 88 — 2026-09-13 |
+| `typecheck` · `lint` · `test` · `build` · `test:e2e` | — | 0 · 0 · 0 · 0 · 0 — 2026-09-13 |
+
+## Runtime — qué se ejercitó y contra qué build
+
+El 2026-09-13, a 390×844, contra `next start` sobre un `.next` borrado antes, con
+sesión real sembrada por el camino del arnés. Escenario completo y **con el
+gesto**: entrar al grupo · cortar la red · recargar —sirve la cáscara, con nombre
+de grupo, lista y formulario— · apuntar con la **tecla «ir»** · restaurar la red ·
+y **sin tocar nada**, vuelta a `GroupView`. Los dos productos apuntados sin red
+—«Cebollas» y «Naranjas»— llegaron a la base.
+
+Mutaciones, cada guarda contra su defecto, repetidas donde había duda:
+
+| Sonda | Resultado |
+|---|---|
+| `/g/` metido en `esEstatico` del worker | rojo **por la aserción de §A.1**: el documento del grupo acaba en la caché compartida — 2026-09-13 |
+| Volver a `!res.redirected` | rojo: la sesión caducada dejaba la cáscara encerrada — 2026-09-13 |
+| Quitar la generación del sondeo | 8 sondas contra 11 en 120 s — 2026-09-13 |
+| Quitar la `ref` de envío dejando `disabled` | rojo 3/3 por formulario; por el botón `disabled` basta — 2026-09-13 |
+| Volver a `next/link` en la salida | **6 HEAD del framework en 10 s** contra 0 — 2026-09-13 |
+| Quitar la lectura de `window.name` | rojo — 2026-09-13 |
+| Quitar las restauraciones del banco | 2 rojos — 2026-09-13 |
+
+## Qué NO se verificó, y qué se hizo en su lugar
+
+- **La iteración 5 no la revisó nadie de forma independiente.** El usuario
+  autorizó cerrar tras ella. En su lugar: sonda de mutación por guarda, la puerta
+  completa, y la pasada a mano de arriba. Es la única vuelta de las cinco sin
+  calificación externa, y las cuatro anteriores encontraron algo real cada una.
+- **La deuda 31 se vio en vivo y no se arregló.** `sw.js` no cambia de bytes, así
+  que el navegador **no reinstala**: hubo que registrar `/sw.js?pasada-final=1` a
+  mano para poder probar. Traducido: **este arreglo no le llega a quien ya tenga
+  la cáscara instalada**. Está fuera de alcance y sigue anotado.
+- **El proyecto hospedado.** Todo contra la instancia local.
+
+## Cicatriz del ciclo — cuatro guardas que no podían ponerse rojas
+
+En cuatro vueltas escribí cuatro guardas que pasaban con el defecto puesto: una
+que miraba una constante del estándar Fetch; un techo de «≤ 7» cuando los valores
+reales eran 2 contra 3; un `dblclick` que reparte los clics en tareas distintas; y
+un test que probaba que `window.name` se **escribe** pero no que se **lee**. Tres
+las cazó la revisión, una yo.
+
+**Corregido el 2026-09-13 al revisarlo con el fichero delante:** la primera
+redacción decía que la causa era la misma las cuatro veces. Es cierta en **tres de
+cuatro** —el `Request.mode`, el techo «≤ 7» y el `dblclick` se escribieron después
+del código, y un test escrito después está moldeado por el código al que tiene que
+juzgar—. El cuarto es distinto y es el que enseña algo: el de `window.name` **se
+escribió primero y se vio rojo por el motivo correcto**, y salió inerte igual.
+
+Porque «rojo antes» demuestra que el test nota **el cambio**, no cada una de sus
+partes. El mecanismo tenía dos mitades —escribir y leer—; antes del cambio no
+había ninguna, así que el test era rojo; después, verde. Borrando sólo la lectura,
+la suite entera seguía en verde.
+
+Lo que sí funcionó fue mutar antes de dar nada por bueno — y ahí apareció lo
+contrario: buscando el camino que aísla la `ref` de envío se descubrió que
+`disabled` basta por el botón y **no** por el formulario, que es la tecla «ir» del
+teclado móvil. La guarda hacía falta, pero por un motivo distinto del que yo había
+escrito.
+
+De aquí salió una regla nueva en `build` del método, fuera de este repositorio:
+quitar cada parte añadida, una a una, y exigir un rojo antes de entregar.
+
+Y cuatro afirmaciones falsas mías en el registro, la peor en la deuda 54:
+sustituí una explicación correcta de la revisión por una equivocada, apoyándome en
+tres mediciones propias que daban cero. Los ceros eran ciertos para la condición
+que medí —el ratón *por encima* de la salida—; pulsando, el bucle sale a la
+primera. Medir una condición y concluir sobre todas es el mismo error que la
+cicatriz del ciclo anterior.
+
+## Trayectoria
+
+| Vuelta | Qué encontró la revisión | Qué cambió |
+|---|---|---|
+| 1 | — (construcción) | Sondeo, recuperación, apuntar, banner, nombre, salida |
+| 2 | Bucle de recargas por la puerta que la spec no miró; tres cicatrices de `GroupView` repetidas | Sonda a `location.href`, contador que escala, generación, las tres cicatrices |
+| 3 | La regresión de la sesión caducada; tres guardas que no guardaban | Redirección al propio origen; `DoD 14` mide comportamiento |
+| 4 | Contradicción banner/línea; la lectura de `window.name` sin vigilar | `window.name` medido; no recargar con envío en vuelo |
+| 5 | *(escalada al usuario: tres HIGH)* | Salida sin `next/link` — 6 HEAD → 0; la lectura vigilada; cinco frases falsas corregidas |

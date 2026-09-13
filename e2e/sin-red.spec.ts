@@ -2,7 +2,7 @@ import { test, expect, type Browser, type BrowserContext, type Page } from '@pla
 import { nuevoFlujoPkce, nuevoTarro, paraNavegador } from './pkce'
 import { admin } from './fixtures'
 import { PENDIENTE, RED, SERVIDOR, SIN_INSTANTANEA, SIN_RED, SIN_RED_ACCION,
-  SIN_RED_FUERA, SIN_RED_SOLO_LECTURA } from '../lib/errors'
+  SIN_RED_FUERA, SIN_RED_CON_COPIA, SIN_RED_ESPERANDO } from '../lib/errors'
 import { addActiveMember, createUser, makeGroup, signedInContext } from './fixtures'
 import { appOrigin } from './appOrigin'
 
@@ -173,7 +173,7 @@ test('DoD 10: sin red, la lista del grupo ya abierto sigue ahí', async ({ brows
    */
   await expect(a.page.getByTestId('item').first())
     .toContainText('aceite', { timeout: 20_000 })
-  await expect(a.page.getByTestId('sin-red')).toContainText(SIN_RED_SOLO_LECTURA)
+  await expect(a.page.getByTestId('sin-red')).toContainText(SIN_RED_CON_COPIA)
   await a.ctx.close()
 })
 
@@ -409,7 +409,7 @@ test('DoD 14 y 21: sin red y desde cero, el shell enseña la última lista', asy
   await fria.goto(`/g/${gid}`).catch(() => {})
   await expect(fria.getByTestId('sin-red'), 'el arranque en frío sin red no pintó nada')
     .toBeVisible({ timeout: 20_000 })
-  await expect(fria.getByTestId('sin-red')).toContainText(SIN_RED_SOLO_LECTURA)
+  await expect(fria.getByTestId('sin-red')).toContainText(SIN_RED_CON_COPIA)
   await expect(fria.getByTestId('item').first()).toContainText('membrillo')
   await a.ctx.close()
 })
@@ -548,7 +548,9 @@ test('DoD 34 y 44: entrando por la portada anónima, el arranque en frío sin re
     // Pestaña nueva: arranque en frío de verdad, sin router de Next en memoria.
     const frio = await ctx.newPage()
     await frio.goto('/')
-    await expect(frio.getByTestId('sin-red')).toHaveText(SIN_RED_SOLO_LECTURA)
+    // Spec C / R4 — fuera de un grupo el banner ya no promete memoria: no hay
+    // ninguna, y prometerla era el defecto que esta prueba fijaba sin querer.
+    await expect(frio.getByTestId('sin-red')).toHaveText(SIN_RED_ESPERANDO)
     // DoD 44 — fuera de un grupo no se habla de «este grupo»: aquí no hay ninguno.
     await expect(frio.getByTestId('sin-instantanea')).toHaveText(SIN_RED_FUERA)
 
@@ -725,5 +727,277 @@ test('DoD 7: la red cae entre pulsar y responder, y lo apuntado no se pierde',
     const despues = await admin.from('items').select('name')
       .eq('group_id', gid).is('deleted_at', null)
     expect(despues.data?.map(x => x.name)).toEqual(['lentejas'])
+    await a.ctx.close()
+  })
+
+/**
+ * Spec C / iteración 2 / R4 — Los ítems que dicen «navegador», en el navegador.
+ *
+ * La iteración 1 no añadió ni un caso aquí y cinco ítems nombraban esta capa
+ * (§E.1). El peor era el 13: que la cáscara no pinte el **nombre** de otro
+ * usuario no lo vigilaba nadie, y es la mitad nueva de una regla de A.1.
+ */
+test('DoD 8 y 9: desde la cáscara se apunta, y dice de qué grupo es', async ({ browser }) => {
+  const a = await entrar(browser, 'cascara1')
+  await grupoCon(a.page, 'Familia Alba')
+  await apuntar(a.page, 'membrillo')
+  await expect(a.page.getByTestId('item')).toHaveCount(1)
+  await shellGuardado(a.page)
+
+  // Recargar sin red: lo que se monta es la cáscara, no la vista.
+  await a.ctx.setOffline(true)
+  await a.page.reload().catch(() => { /* sin red, el documento lo sirve el shell */ })
+  await expect(a.page.getByTestId('sin-red')).toBeVisible({ timeout: 20_000 })
+  await expect(a.page.getByTestId('nombre-grupo'),
+    'la cáscara enseña la lista sin decir de qué grupo es').toHaveText('Familia Alba')
+
+  // Y se puede apuntar, que es el escenario que motivó la PWA.
+  await a.page.getByTestId('item-name').fill('aceitunas')
+  await a.page.getByTestId('add-item').click()
+  await expect(a.page.getByTestId('pendiente')).toContainText('aceitunas')
+
+  // En la cola de verdad, no sólo en pantalla.
+  const enCola = await a.page.evaluate(() => new Promise<string[]>((ok) => {
+    const req = indexedDB.open('super', 1)
+    req.onerror = () => ok([])
+    req.onsuccess = () => {
+      const p = req.result.transaction('cola', 'readonly').objectStore('cola').getAll()
+      p.onsuccess = () => ok((p.result as { nombre: string }[]).map(x => x.nombre))
+      p.onerror = () => ok([])
+    }
+  }))
+  expect(enCola, 'lo apuntado en la cáscara no llegó a la cola').toContain('aceitunas')
+  await a.ctx.close()
+})
+
+/**
+ * DoD 10 — El escenario entero, sin que nadie pulse nada: cortar, recargar,
+ * apuntar, restaurar, y que la cáscara se quite sola de en medio.
+ */
+test('DoD 10: al volver la red la cáscara se recupera sola', async ({ browser }) => {
+  const a = await entrar(browser, 'cascara2')
+  await grupoCon(a.page, 'Familia Alba')
+  await apuntar(a.page, 'membrillo')
+  await shellGuardado(a.page)
+
+  await a.ctx.setOffline(true)
+  await a.page.reload().catch(() => {})
+  await expect(a.page.getByTestId('sin-red')).toBeVisible({ timeout: 20_000 })
+
+  // Vuelve la red y **no se toca nada**: el sondeo tiene que hacer el resto.
+  await a.ctx.setOffline(false)
+  /**
+   * El discriminador **no** puede ser `add-item`: desde esta spec la cáscara
+   * también lo tiene. Se mira algo que sólo la vista de verdad trae —el canal en
+   * vivo y la invitación— porque recuperarse es volver ahí, no maquillar esto.
+   */
+  await expect(a.page.getByTestId('create-invite'),
+    'la red volvió y la cáscara siguió siendo la cáscara').toBeVisible({ timeout: 60_000 })
+  await expect(a.page.getByTestId('sin-red')).toHaveCount(0)
+  // En la vista el nombre vive en el `value` del campo, no en el texto del `li`.
+  await expect(a.page.getByTestId('item').first().locator('input').first())
+    .toHaveValue('membrillo')
+  await a.ctx.close()
+})
+
+/**
+ * DoD 11 — La mitad **nueva** de la regla K4: sin sesión en el dispositivo no se
+ * pinta la lista de nadie, y tampoco el **nombre** de su grupo.
+ */
+test('DoD 11: sin sesión, la cáscara no pinta el nombre del grupo ajeno', async ({ browser }) => {
+  const a = await entrar(browser, 'cascara3')
+  await grupoCon(a.page, 'Familia Secreta')
+  await apuntar(a.page, 'anchoas')
+  await shellGuardado(a.page)
+  const gid = a.page.url().split('/g/')[1]
+
+  // Se van las cookies: el dispositivo sigue teniendo la instantánea, pero no
+  // hay nadie dentro. Es el caso que K4 midió con productos, y ahora con nombre.
+  await a.ctx.clearCookies()
+  await a.ctx.setOffline(true)
+  const fria = await a.ctx.newPage()
+  await fria.goto(`/g/${gid}`).catch(() => {})
+  await expect(fria.getByTestId('sin-red')).toBeVisible({ timeout: 20_000 })
+  const texto = await fria.locator('main').innerText()
+  expect(texto, 'la lista del anterior, sin sesión ninguna').not.toContain('anchoas')
+  expect(texto, 'el NOMBRE del grupo del anterior, sin sesión ninguna')
+    .not.toContain('Familia Secreta')
+  await a.ctx.close()
+})
+
+/**
+ * DoD 14 / iteración 3 — El ítem que el usuario marcó como el que importa,
+ * medido por **comportamiento** y no por construcción.
+ *
+ * La versión anterior creaba un `Request` en la página y miraba su `mode`: eso
+ * afirma una constante del estándar Fetch, y pasaba verde con el manejador
+ * `fetch` del worker entero neutralizado. Demostrado en la revisión.
+ *
+ * Lo que se afirma ahora: con red la sonda resuelve 200 y HTML; **sin red
+ * rechaza**. Si el worker la sirviera de caché —metiendo `/g/` entre los
+ * estáticos, por ejemplo— la sonda de arriba la habría guardado y la de abajo
+ * resolvería: sondear sin red acertaría siempre, la cáscara recargaría, volvería
+ * a caer, y sería un bucle. Y además el documento del grupo estaría en un disco
+ * compartido, que es §A.1.
+ */
+test('DoD 14: la sonda sale a la red y sin red rechaza', async ({ browser }) => {
+  const a = await entrar(browser, 'cascara4')
+  await grupoCon(a.page, 'Familia Alba')
+  await shellGuardado(a.page)
+
+  const conRed = await a.page.evaluate(async () => {
+    const r = await fetch(window.location.href, { cache: 'no-store' })
+    return {
+      controlado: !!navigator.serviceWorker.controller,
+      ok: r.ok, tipo: r.headers.get('content-type') ?? '',
+    }
+  })
+  expect(conRed.controlado, 'el worker no controla la página: no se mide nada').toBe(true)
+  expect(conRed.ok).toBe(true)
+  expect(conRed.tipo).toContain('text/html')
+
+  // Y el documento del grupo NO puede haber quedado guardado por el camino.
+  const enCache = await a.page.evaluate(() => caches.match(window.location.href).then(r => !!r))
+  expect(enCache, 'el documento del grupo acabó en la caché compartida: A.1').toBe(false)
+
+  await a.ctx.setOffline(true)
+  const sinRed = await a.page.evaluate(async () => {
+    try { await fetch(window.location.href, { cache: 'no-store' }); return 'resolvió' }
+    catch { return 'rechazó' }
+  })
+  expect(sinRed, 'la sonda se resolvió sin red: el worker la sirve de caché, y eso es un bucle')
+    .toBe('rechazó')
+  await a.ctx.close()
+})
+
+/**
+ * DoD 1 de la iteración 3 — El camino que la iteración 2 rompió: sesión caducada.
+ * `proxy.ts` redirige `/g/<id>` a `/login`, y exigir `!res.redirected` dejaba la
+ * cáscara encerrada con la red ya de vuelta. Medido entonces: 40 s y seguía.
+ */
+test('DoD 1 (iter 3): sin sesión, la cáscara también se recupera al volver la red',
+  async ({ browser }) => {
+    const a = await entrar(browser, 'cascara6')
+    await grupoCon(a.page, 'Familia Alba')
+    await apuntar(a.page, 'membrillo')
+    await shellGuardado(a.page)
+    const gid = a.page.url().split('/g/')[1]
+
+    // La sesión se va mientras no hay red: la cáscara sigue en pie.
+    await a.ctx.clearCookies()
+    await a.ctx.setOffline(true)
+    await a.page.goto(`/g/${gid}`).catch(() => {})
+    await expect(a.page.getByTestId('sin-red')).toBeVisible({ timeout: 20_000 })
+
+    // Vuelve la red y no se toca nada: tiene que salir de aquí, aunque el
+    // destino sea el login.
+    await a.ctx.setOffline(false)
+    await expect(a.page.getByTestId('sin-red'),
+      'la sesión caducada deja la cáscara encerrada para siempre').toHaveCount(0, { timeout: 60_000 })
+    await a.ctx.close()
+  })
+
+/**
+ * Iteración 4 / DoD 2 — La guarda de envío, en la capa donde la `ref` es la que
+ * salva: dos toques **dentro de la misma tarea**, con cambio de valor en medio.
+ *
+ * La versión anterior usaba `dblclick`, y no podía ponerse roja: reparte los dos
+ * clics en tareas distintas, React vuelca el estado entre medias, `disabled` ya
+ * está puesto y el segundo clic cae en la rama del campo vacío. Es exactamente el
+ * defecto que esta misma iteración había diagnosticado en el gemelo de jsdom,
+ * reproducido en el gemelo de navegador escrito para cubrirlo.
+ */
+test('DoD 2 (iter 4): dos envíos en la misma tarea encolan una sola vez', async ({ browser }) => {
+  const a = await entrar(browser, 'cascara7')
+  await grupoCon(a.page, 'Familia Alba')
+  await shellGuardado(a.page)
+  await a.ctx.setOffline(true)
+  await a.page.reload().catch(() => {})
+  await expect(a.page.getByTestId('sin-red')).toBeVisible({ timeout: 20_000 })
+
+  /**
+   * Se envía por **formulario**, no por el botón, y ahí está la diferencia
+   * medida: React vuelca los eventos discretos de forma síncrona, así que tras un
+   * `click()` el botón ya está `disabled` y el segundo clic no llega. El
+   * `requestSubmit` no pasa por el botón, y `disabled` no lo detiene.
+   *
+   * Medido el 2026-09-13, tres pasadas por lado: con la `ref` queda **1**
+   * encolado; quitándola —y dejando `disabled` puesto— quedan **2**. Es el único
+   * camino que demuestra para qué existe la `ref`, y es un camino real: la tecla
+   * «ir» del teclado del móvil envía por formulario.
+   */
+  await a.page.evaluate(() => {
+    const campo = document.querySelector('[data-testid=item-name]') as HTMLInputElement
+    const form = campo.closest('form') as HTMLFormElement
+    const poner = (v: string) => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(campo, v)
+      campo.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    poner('aceitunas'); form.requestSubmit()
+    // Sin ceder el hilo, y sin pasar por el botón: sólo la `ref` puede parar esto.
+    poner('vino');      form.requestSubmit()
+  })
+
+  await expect(a.page.getByTestId('pendiente')).toHaveCount(1)
+  const enCola = await a.page.evaluate(() => new Promise<number>((ok) => {
+    const req = indexedDB.open('super', 1)
+    req.onerror = () => ok(-1)
+    req.onsuccess = () => {
+      const p = req.result.transaction('cola', 'readonly').objectStore('cola').getAll()
+      p.onsuccess = () => ok((p.result as unknown[]).length)
+      p.onerror = () => ok(-1)
+    }
+  }))
+  expect(enCola, 'los dos envíos de la misma tarea encolaron dos veces').toBe(1)
+  await a.ctx.close()
+})
+
+/** DoD 16 — La única vía de escape de la cáscara se puede tocar con el pulgar. */
+test('DoD 16: la salida de la cáscara mide al menos 44 px', async ({ browser }) => {
+  const a = await entrar(browser, 'cascara5')
+  await grupoCon(a.page, 'Familia Alba')
+  await shellGuardado(a.page)
+  await a.ctx.setOffline(true)
+  await a.page.reload().catch(() => {})
+  await expect(a.page.getByTestId('sin-red')).toBeVisible({ timeout: 20_000 })
+  const caja = await a.page.getByTestId('salida').boundingBox()
+  expect(caja?.height ?? 0, 'la única salida no se puede tocar').toBeGreaterThanOrEqual(44)
+  await a.ctx.close()
+})
+
+/**
+ * Spec C / iteración 5 / DoD 1 — Pulsar la salida no despierta el segundo bucle.
+ *
+ * Medido el 2026-09-13 con `next/link`: pulsar `← Grupos` sin red hace fallar un
+ * fetch del framework, y eso arranca el bucle de
+ * `next/dist/esm/client/components/offline.js` —cadencia 500ms/1s/2s/3s, sin
+ * rendirse—: **6 HEAD en 10 s** al documento **autenticado** del grupo, encima de
+ * las 2 sondas por minuto que esta pantalla ya hace. Unas 20 peticiones por
+ * minuto contra un servicio que puede estar pausado, que es el escenario para el
+ * que existe todo esto.
+ *
+ * Con un enlace normal la navegación la intercepta el service worker y el
+ * framework no ve ningún fetch fallado. La regla del linter queda silenciada en
+ * `app/sin-conexion/page.tsx` con su motivo, y declarada en el inventario de
+ * `unit/puerta-lint.test.ts`.
+ */
+test('DoD 1 (iter 5): pulsar la salida sin red no despierta el sondeo del framework',
+  async ({ browser }) => {
+    const a = await entrar(browser, 'cascara8')
+    await grupoCon(a.page, 'Familia Alba')
+    await shellGuardado(a.page)
+
+    const vistas: string[] = []
+    a.page.on('request', r => vistas.push(r.method()))
+
+    await a.ctx.setOffline(true)
+    await a.page.reload().catch(() => {})
+    await expect(a.page.getByTestId('sin-red')).toBeVisible({ timeout: 20_000 })
+    const base = vistas.length
+    await a.page.getByTestId('salida').click().catch(() => { /* sin red, no llega */ })
+    await a.page.waitForTimeout(10_000)
+
+    const heads = vistas.slice(base).filter(m => m === 'HEAD').length
+    expect(heads, `el bucle del framework arrancó: ${heads} HEAD en 10 s`).toBe(0)
     await a.ctx.close()
   })

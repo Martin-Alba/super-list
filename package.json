@@ -6,7 +6,7 @@
     "dev": "next dev --turbopack --hostname localhost",
     "build": "next build --turbopack",
     "start": "next start --hostname localhost",
-    "lint": "eslint",
+    "lint": "eslint --max-warnings 0",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

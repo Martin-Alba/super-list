@@ -9,7 +9,8 @@ import { activeItems, addItem, mergeItems, mismoProducto, softDeleteItem, update
 import { caducados, ESCRIBE_NOMBRE, esperasDeReintento, GONE, LISTA_EN_VIVO, mensajeDe,
   PENDIENTE, refinarSinRed, refinarSinSesion, RELECTURA, SIN_ALMACEN, SIN_CONEXION_LISTA, SIN_RED,
   SIN_RED_ACCION, type Clase } from '@/lib/errors'
-import { encolar, guardarLista, leerCola, leerLista, quitarDeCola, reparte, siguienteEnCola,
+import { decidirEncolar } from '@/lib/cola'
+import { encolar, guardarLista, guardarNombre, leerCola, leerLista, quitarDeCola, reparte, siguienteEnCola,
   type Pendiente } from '@/lib/local'
 import { useGroupChannel } from '@/lib/useGroupChannel'
 import { createInviteAction, decideMemberAction, leaveGroupAction } from '@/app/actions'
@@ -271,13 +272,20 @@ export function GroupView({
     nombre: string, cantidad: string | null, desde: number,
   ): Promise<boolean> => {
     const cola = await leerCola(me.id)
-    const repetido = items.some(i => mismoProducto(i.name, nombre))
-      || cola.some(p => p.grupo === group.id && mismoProducto(p.nombre, nombre))
-    if (repetido) { devolver(nombre, cantidad, desde); void avisar('duplicado', '23505'); return false }
-    const p: Pendiente = {
-      id: crypto.randomUUID(), usuario: me.id, grupo: group.id,
-      nombre, cantidad, creado: Date.now(),
+    /**
+     * Spec C / R3 — La **regla** vive en `lib/cola.ts` porque la cáscara sin red
+     * tiene que decidir lo mismo. Lo que se queda aquí son los efectos: devolver
+     * el texto, avisar y pintar la ficha. `avisar` es el mecanismo de la Spec B y
+     * no sale de este componente.
+     */
+    const decision = decidirEncolar({
+      usuario: me.id, grupo: group.id, nombre, cantidad,
+      visibles: items, cola, id: crypto.randomUUID(), ahora: Date.now(),
+    })
+    if (decision.accion === 'duplicado') {
+      devolver(nombre, cantidad, desde); void avisar('duplicado', '23505'); return false
     }
+    const p: Pendiente = decision.pendiente
     // J6 — si el almacén no admite la escritura no se pinta ficha: el usuario
     // vería su producto, recargaría, y no estaría.
     if (!(await encolar(p))) {
@@ -468,6 +476,18 @@ export function GroupView({
     if (sinRed || loadClase) return
     void guardarLista(me.id, group.id, items)
   }, [items, sinRed, loadClase, group.id, me.id])
+
+  /**
+   * Spec C / R5 — El nombre va a la instantánea por la misma puerta y con el
+   * mismo gate que la lista, pero en **su propio efecto**: colgado del de la
+   * lista reescribía la misma cadena en disco con cada cambio de un ítem, que en
+   * una compra son decenas de transacciones que no cambian nada. Clave propia,
+   * dentro del prefijo del usuario, para que `olvidarTodo` se la lleve (A.1).
+   */
+  useEffect(() => {
+    if (sinRed || loadClase) return
+    void guardarNombre(me.id, group.id, group.name)
+  }, [sinRed, loadClase, group.id, group.name, me.id])
 
   /**
    * I6 — El camino que R2 nombra por su nombre: **el primer acceso** tras la

@@ -76,7 +76,30 @@ export const SIN_RED = 'Sin conexión. Puedes apuntar productos: se enviarán al
 export const SIN_ALMACEN = 'Este dispositivo no puede guardar lo apuntado sin conexión. Vuelve a intentarlo con red.'
 
 /** I2 — Lo que dice el shell que se sirve cuando la navegación no llega. */
-export const SIN_RED_SOLO_LECTURA = 'Sin conexión: esto es lo último que vimos. Cuando vuelva la red podrás apuntar y cambiar cosas.'
+/**
+ * Spec C / R4 — Tres estados, no uno. Medido el 2026-09-13: el texto único
+ * prometía memoria en la portada sin haber visto nada, y prometía apuntar en una
+ * pantalla que no dejaba apuntar. Ahora la cáscara sí deja (R3), así que lo que
+ * dice es verdad en cada caso.
+ */
+export const SIN_RED_CON_COPIA =
+  'Sin conexión: esto es lo último que vimos. Puedes apuntar productos y se enviarán al volver la red.'
+export const SIN_RED_SIN_COPIA =
+  'Sin conexión y sin copia de este grupo. Puedes apuntar productos y se enviarán al volver la red.'
+export const SIN_RED_ESPERANDO =
+  'Sin conexión. En cuanto vuelva la red, seguimos donde estabas.'
+
+/**
+ * Fuera de un grupo no hay grupo al que apuntar, y sin sesión en el dispositivo
+ * no se sabe de quién sería la cola: en los dos casos el banner no ofrece nada
+ * que esta pantalla no pueda cumplir.
+ */
+export const bannerSinRed = (
+  estado: { enUnGrupo: boolean; haySesion: boolean; hayCopia: boolean },
+): string => {
+  if (!estado.enUnGrupo || !estado.haySesion) return SIN_RED_ESPERANDO
+  return estado.hayCopia ? SIN_RED_CON_COPIA : SIN_RED_SIN_COPIA
+}
 
 /** J8 — El shell también se sirve para la portada y para entrar. */
 export const SIN_RED_FUERA = 'Necesitas conexión para entrar y ver tus grupos.'
@@ -215,6 +238,20 @@ export const refinarSinRed = (clase: Clase | null, hayRed: boolean): Clase | nul
  * no es información, es ruido.
  */
 export const esperasDeReintento = (): number[] => [1_000, 2_000, 4_000, 8_000, 8_000]
+
+/**
+ * Spec C / R1 — La cadencia del sondeo de la cáscara. **Suya**, no la de
+ * `esperasDeReintento`: ésa la usan los dos reintentos de `GroupView` y cambiarla
+ * movería dos comportamientos que esta spec no toca.
+ *
+ * Sube y se sostiene en 30 s: dos peticiones por minuto en régimen, que no
+ * castiga la batería ni martillea un servicio pausado. No para nunca mientras la
+ * pestaña se vea — quien está en el supermercado sin cobertura no quiere que la
+ * app se rinda— y la pausa por visibilidad la pone la pantalla.
+ */
+const SONDEO = [2_000, 4_000, 8_000, 16_000, 30_000] as const
+export const esperaDeSondeo = (intento: number): number =>
+  SONDEO[Math.min(Math.max(intento, 0), SONDEO.length - 1)]
 
 /** El mensaje que le corresponde a una clase. La única fuente de texto. */
 export const mensajeDe = (clase: Clase | null | undefined): string | null =>
