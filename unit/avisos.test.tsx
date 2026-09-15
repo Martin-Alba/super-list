@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, cleanup, act } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import type { Item } from '@/lib/items'
 import { SESION, DUPLICADO, GONE, claseDe } from '@/lib/errors'
@@ -231,6 +231,34 @@ describe('S4 el aviso no espera a la consulta de sesión', () => {
     fireEvent.click(screen.getByTestId('add-item'))
     // Sin el arreglo esto no aparece hasta que la consulta responda: nunca.
     await waitFor(() => expect(screen.getByTestId('notice')).toBeTruthy(), { timeout: 2000 })
+    espia.mockRestore()
+  })
+
+  /**
+   * DoD 1 y 2 — La puerta que abre el arreglo del sello (§E.4b). El test de la
+   * puerta que se cierra —el afinado cancelado por una escritura correcta— se
+   * conserva más abajo; éste es el camino nuevo, y es donde el defecto vive: con
+   * la pantalla limpia, `limpiarAviso` no encuentra nada que limpiar y la cuenta
+   * del sello sale bien por casualidad. Con un aviso ya puesto, la mueve.
+   */
+  it('con un aviso ya en pantalla, el segundo 42501 se sigue afinando', async () => {
+    const mod = await import('@/lib/supabase/client')
+    const espia = vi.spyOn(mod, 'createClient').mockReturnValue(
+      { auth: { getSession: async () => ({ data: { session: null } }) } } as never)
+    respuesta = { error: 'permission denied for table items', code: '42501', data: null }
+    montar()
+    fireEvent.change(screen.getByTestId('item-name'), { target: { value: 'pan' } })
+    fireEvent.click(screen.getByTestId('add-item'))
+    await waitFor(() => expect(screen.getByTestId('notice').textContent).toContain(SESION))
+
+    // Y ahora el segundo, con el aviso del primero todavía puesto.
+    fireEvent.change(screen.getByTestId('item-name'), { target: { value: 'sal' } })
+    fireEvent.click(screen.getByTestId('add-item'))
+    await waitFor(() => expect(screen.getByTestId('notice')).toBeTruthy())
+    await waitFor(() => expect(screen.getByTestId('notice').textContent,
+      'el afinado se descartó: se lee «no tienes acceso» con la sesión muerta').toContain(SESION))
+    expect(screen.queryByTestId('volver-a-entrar'),
+      'y sin el enlace, que es el callejón que R4 cerró').toBeTruthy()
     espia.mockRestore()
   })
 
@@ -490,5 +518,43 @@ describe('W1 la fusión cede ante lo más reciente', () => {
     await new Promise(r => setTimeout(r, 40))
     expect((screen.getByLabelText('Cantidad de pan') as HTMLInputElement).value,
       'la respuesta de mi escritura revirtió el cambio correcto de otro').toBe('3')
+  })
+})
+
+/**
+ * Spec B / DoD 8 / R1 — La **tercera** cosa que `secuencia` sellaba, con guarda
+ * propia porque es la que R1 puede colocar del lado equivocado sin que ningún
+ * otro ítem lo note: el afinado por sesión sigue sellado por la generación de
+ * **avisos**, no por la de recuperación.
+ *
+ * Vive aquí y no en `unit/drenado.test.tsx` por una razón medida: aquel arnés
+ * mockea `createClient` sin `auth`, así que el afinado nunca llega a repintar y
+ * el test **no podía fallar**. Lo encontró la pasada de mutación del ítem 10.
+ */
+describe('Spec B el afinado por sesión lo sella la generación de avisos', () => {
+  it('DoD 8: limpiar un aviso cancela el afinado en vuelo', async () => {
+    const mod = await import('@/lib/supabase/client')
+    let responder!: (v: unknown) => void
+    const espia = vi.spyOn(mod, 'createClient').mockReturnValue(
+      { auth: { getSession: () => new Promise(r => { responder = r }) } } as never)
+    try {
+      // Un 42501 pinta «no tienes acceso» y lanza el afinado, que queda en vuelo.
+      respuesta = { error: 'permission denied for table items', code: '42501', data: null }
+      montar()
+      fireEvent.change(screen.getByTestId('item-name'), { target: { value: 'pan' } })
+      fireEvent.click(screen.getByTestId('add-item'))
+      await waitFor(() => expect(screen.getByTestId('notice')).toBeTruthy())
+
+      // Y antes de que conteste, una escritura correcta limpia el aviso.
+      respuesta = { error: null, code: null, data: 1 }
+      fireEvent.change(screen.getByTestId('item-name'), { target: { value: 'sal' } })
+      fireEvent.click(screen.getByTestId('add-item'))
+      await waitFor(() => expect(screen.queryByTestId('notice')).toBeNull())
+
+      // Ahora sí contesta, y dice que no hay sesión: ya no le toca hablar.
+      await act(async () => { responder({ data: { session: null } }) })
+      expect(screen.queryByTestId('notice')?.textContent ?? '',
+        'el afinado reapareció sobre una escritura que fue bien').not.toContain(SESION)
+    } finally { espia.mockRestore() }
   })
 })

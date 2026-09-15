@@ -343,7 +343,7 @@ vez (2026-09-07) el documento decía 221 tests en 36 ficheros cuando eran 245 en
 37, y la guarda que debía impedirlo daba verde sobre un documento con cifras
 inventadas.
 
-- Ficheros de prueba unitaria: 63
+- Ficheros de prueba unitaria: 64
 - Ficheros de prueba de navegador: 16
 
 
@@ -838,3 +838,164 @@ cicatriz del ciclo anterior.
 | 3 | La regresión de la sesión caducada; tres guardas que no guardaban | Redirección al propio origen; `DoD 14` mide comportamiento |
 | 4 | Contradicción banner/línea; la lectura de `window.name` sin vigilar | `window.name` medido; no recargar con envío en vuelo |
 | 5 | *(escalada al usuario: tres HIGH)* | Salida sin `next/link` — 6 HEAD → 0; la lectura vigilada; cinco frases falsas corregidas |
+
+---
+
+# Una regla que previno en vez de diagnosticar (2026-09-15)
+
+Se anota aparte del ciclo porque no es un hallazgo de producto: es la primera
+evidencia medida de que una regla nueva del método **impide** un defecto en lugar de
+explicarlo después.
+
+## Qué pasó
+
+La regla es de `build`, escrita el 2026-09-14: *la pasada de mutación se entrega en
+forma reproducible, fuera del árbol, con las mutaciones tal como se aplicaron*. Su
+motivo era de coste — correr una mutación es barato, **verificarla** obliga a quien
+revisa a reconstruirla, así que se verifica por muestreo, y una regla que sólo se
+verifica por muestreo se degrada sola.
+
+Primera aplicación, en la vuelta del eje de la duración. La pasada se entregó como un
+script de zsh ejecutable. Dentro, esta mutación pretendía borrar las **dos** retiradas
+del aviso de la cola:
+
+    s/            despachar\(\{ tipo: 'retirar', origen: 'cola' \}\)\n//g
+
+Exige **12 espacios** de sangría. `GroupView.tsx:461` tiene 12; `:467` tiene **10**.
+Borraba una, no dos. Y la guarda de «⚠️ sin efecto» no lo cazaba, porque el fichero sí
+cambiaba.
+
+De ahí salió una conclusión falsa: que las dos retiradas estaban sin vigilar porque el
+fichero seguía entero en verde. Medido de verdad —con ` *despachar` en vez de doce
+espacios— borrar las dos daba **6 rojos** y borrar sólo la primera, ninguno. Las dos
+eran guardias vivos; la segunda tenía prueba y la primera no. La conclusión falsa llegó a escribirse **dentro del
+repositorio**, como comentario de `unit/drenado.test.tsx`, invitando a la siguiente
+iteración a borrar ese guardia por inerte.
+
+## Por qué cuenta como prevención y no como diagnóstico
+
+La revisión **ejecutó el script** y vio que no hacía lo que decía. Con la pasada
+entregada en prosa habría reconstruido la mutación *correctamente* —un `perl` con la
+sangría bien, o una edición a mano— habría obtenido 6 rojos, y habría concluido que la
+entrega decía la verdad. **El fallo no estaba en la mutación descrita, estaba en la
+ejecutada**, y ésa sólo existe si se entrega ejecutable.
+
+Dicho al revés: la prosa describe la intención; el script describe el hecho. Un
+instrumento roto sólo se caza entregando el instrumento.
+
+## Lo que esto sugiere sobre el método, sin generalizar de más
+
+Es **un** caso, y la evidencia de una regla nueva es siempre un caso hasta que son
+varios. Pero la forma es la que se buscaba al escribirla: la regla no sirvió para
+explicar mejor un defecto ya ocurrido, sirvió para que el defecto no saliera de la
+vuelta. Anotado aquí para poder comparar cuando haya un segundo caso — o para
+retirarla con motivo si resulta que éste fue suerte.
+
+**Coste medido de aplicarla, para que la comparación sea honesta:** escribir el script
+costó unos minutos más que narrar la pasada; ejecutarlo, lo mismo que correrla. La
+revisión lo corrió entero —19 mutaciones— en vez de muestrear 4 de 24, que es lo que
+hizo la vuelta anterior con la pasada en prosa.
+
+---
+
+# Verificación del ciclo «el eje que faltaba es la duración» (2026-09-15)
+
+Nueve vueltas sobre el mismo mecanismo. Cierra **siete** y abre una spec nueva con lo
+que resultó ser otro problema.
+
+## Qué se construyó
+
+El aviso pasa a un reducer puro en `lib/aviso.ts`, con dos ejes **independientes** y
+los dos escritos como dato:
+
+- **Duración.** Un aviso vive *mientras su condición sea cierta* (nivel: `carga`,
+  `cola`) o *hasta que lo lean* (una vez: `mutacion`, `relectura`, `apertura`). La
+  partición se **midió**, no se eligió: los orígenes que alguien retira explícitamente
+  son exactamente los niveles. Derivarla del peso daba una partición distinta en dos de
+  cinco, y esos dos —`cola` y `apertura`— son los que produjeron los dos últimos fallos
+  del ciclo.
+- **Peso**, sólo dentro de su duración. Entre los de una vez decide quién tapa a quién;
+  entre los niveles, cuál se ve primero — nunca cuál sobrevive.
+
+`visible = unaVez ?? nivelVisible(niveles)`. Los niveles tienen casilla propia porque
+dos pueden ser ciertos a la vez.
+
+Lo demás que entra: la identidad del afinado **viaja dentro de la acción** (un token
+despachado con ella) en vez de deducirse del estado, porque quien despacha no puede
+saber en qué estado aterrizará — los manejadores limpian antes del `await`. Dos
+generaciones de recuperación con dueño, `recCarga` y `recMutacion`, cada una invalidada
+por quien la armó.
+
+## Terminal
+
+| | Antes del ciclo | Después |
+|---|---|---|
+| Casos unitarios | 1.478 | 1.518 |
+| Ficheros unitarios | 63 | 64 |
+| Casos de navegador | 88 | 88 |
+
+`typecheck` 0 · `lint` 0 con 0 avisos · `test` 0 · `build` 0 sobre `.next` borrado ·
+`test:e2e` 0.
+
+## Runtime — qué se ejercitó y contra qué build
+
+La suite de navegador entera contra `next start` sobre un build con `.next` borrado, a
+390 px. Además, la revisión de la octava vuelta ejercitó **dos pestañas reales sobre la
+misma IndexedDB** a 390 px: el camino feliz pasa, y los dos bordes que fallan son los
+que abren la spec nueva.
+
+## Qué NO se verificó, y qué se hizo en su lugar
+
+- **La pasada manual con el gesto, a 390 px, por una persona.** No se hizo: el ciclo
+  paró por el umbral antes de llegar ahí. La cubre estructuralmente la suite de
+  navegador, que corre en ese viewport y contra el build de producción, pero no es lo
+  mismo y queda pendiente.
+- **La retirada del aviso y de las fichas cuando otra instancia vacía la cola.** Se
+  intentó en este ciclo y se retiró: el arreglo derivaba de una copia de la cola leída
+  antes de tres `await` y borraba la ficha de lo apuntado sin red mientras seguía
+  pendiente, medido 3/3. Sale del alcance **por su nombre** y es la spec nueva.
+
+## El hallazgo que cierra el ciclo: eran dos familias, no una
+
+Clasificadas las nueve vueltas por si el defecto **se reproduce con una sola instancia
+montada**:
+
+| Vueltas | Defecto | ¿Una instancia basta? | Familia |
+|---|---|---|---|
+| 1 a 7 | aviso sin dueño, re-anuncio, sello, prioridades | sí, todas | el hueco del aviso |
+| 8 y 9 | otra pestaña vacía la cola; lectura rancia; ventana de 23 s | no, o exige un escritor concurrente | pantalla derivada de estado durable |
+
+**Siete de nueve eran el hueco del aviso, y ese problema queda cerrado.** Las dos
+últimas no lo eran, y por eso cada arreglo abría la puerta de al lado: se estaban
+arreglando dos problemas creyendo que era uno.
+
+La frontera **no es «entre instancias»**, y conviene decirlo porque fue la primera
+formulación y era imprecisa: el defecto de la novena vuelta se reproduce con una sola
+instancia — lo que lo rompe es que el bucle lee la cola una vez, cruza tres `await`, y
+durante ese viaje la propia app escribe por la rama sin red. La propiedad común es
+**pantalla derivada de un estado durable que cambia sin avisar**; quién lo cambia —otra
+pestaña o un camino concurrente— es secundario.
+
+## La señal que estuvo a la vista siete vueltas
+
+**Cambió la clase de arnés necesario para reproducir el fallo.** Las siete primeras se
+reproducían con un `montar()`; las dos últimas necesitaron dos raíces, o una escritura
+concurrente durante un envío en vuelo. Eso no se leyó como lo que era.
+
+De ahí la regla que se lleva el método: **cuando la sonda que reproduce un fallo cambia
+de forma, probablemente el fallo cambió de familia.** Es barata de comprobar —se mira el
+arnés del último test escrito y se compara con los anteriores— y habría ahorrado dos
+vueltas aquí.
+
+## Trayectoria
+
+| Vuelta | Qué encontró la revisión | Qué cambió |
+|---|---|---|
+| 1 | — (construcción de la Spec B) | Generaciones separadas, refinado con la red viva |
+| 2 | El aviso sin dueño; la recuperación sin rearmarse | Marca del aviso de carga; `sinRed` en dependencias |
+| 3 | La regla de prioridad cubría escrituras, no retiradas | Retirada selectiva; el mensaje que prometía un reintento |
+| 4 | La limpieza mata cualquier recuperación | Dos generaciones con dueño |
+| 5 | El sello pasó a estado y el afinado se descartaba siempre | La identidad viaja en la acción |
+| 6 | `carga > apertura` dejó apertura inalcanzable | Duración y peso, dos ejes; niveles con casilla propia |
+| 7 | R6 retirada sobre un camino no ejecutado | R6 repuesta; instrumento de mutación con recuento |
+| 8 | Lectura rancia de la cola: la ficha desaparecía | *(umbral: se para y se reparte en dos specs)* |

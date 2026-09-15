@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState, useTransition } from 'react'
+import { useCallback, useEffect, useReducer, useRef, useState, useTransition } from 'react'
 import { useRouter } from 'next/navigation'
 import { useSinRed } from '@/lib/useSinRed'
 import Link from 'next/link'
@@ -9,6 +9,7 @@ import { activeItems, addItem, mergeItems, mismoProducto, softDeleteItem, update
 import { caducados, ESCRIBE_NOMBRE, esperasDeReintento, GONE, LISTA_EN_VIVO, mensajeDe,
   PENDIENTE, refinarSinRed, refinarSinSesion, RELECTURA, SIN_ALMACEN, SIN_CONEXION_LISTA, SIN_RED,
   SIN_RED_ACCION, type Clase } from '@/lib/errors'
+import { avisoInicial, reducirAviso, visible, type Origen } from '@/lib/aviso'
 import { decidirEncolar } from '@/lib/cola'
 import { encolar, guardarLista, guardarNombre, leerCola, leerLista, quitarDeCola, reparte, siguienteEnCola,
   type Pendiente } from '@/lib/local'
@@ -97,12 +98,22 @@ export function GroupView({
   // hay que ofrecer volver a entrar. Sin la clase, distinguir "sesión caducada"
   // de "sin acceso" se quedaría en el texto y nadie podría actuar sobre ello.
   /**
-   * N5 — `deCola` marca el aviso que pone la cola. Identificarlo por su CLASE no
+   * N5 — El **origen** marca de quién es cada aviso. Identificarlo por su CLASE no
    * valía: `servidor` la comparten este aviso, una edición fallida, un borrado
    * fallido y el «no se ha podido recargar la lista» del resync, y el drenado los
    * borraba todos sin haber recuperado nada de eso.
    */
-  const [notice, setNotice] = useState<{ texto: string; clase: Clase; deCola?: true } | null>(null)
+  const [aviso, despachar] = useReducer(reducirAviso, avisoInicial)
+  const notice = visible(aviso)
+  /**
+   * Spec B / R3.2 y R3.3 — Las dos preguntas que separan un nivel de un evento:
+   * qué clase está anunciada ya, y qué clase de carga resolvió la recuperación.
+   * Sin la segunda, «resuelta» y «aún no anunciada» son el mismo estado —
+   * `loadClase` es una prop del render del servidor y no cambia cuando la lista
+   * llega por el reintento—, y el siguiente parpadeo repone el aviso sobre una
+   * lista buena. Es I6, y es la tercera vez que esta pieza hace falta.
+   */
+  const cargaResuelta = useRef<Clase | null>(null)
   // K2 — el botón de borrar no tenía guarda en vuelo: un doble toque lo
   // disparaba dos veces y la segunda pasada, con 0 filas, acusaba a otro
   // usuario del segundo toque del propio.
@@ -127,35 +138,33 @@ export function GroupView({
 
   // L3 — el fallo de carga es una LINEA BASE, no un valor inicial de estado.
   // Sembrado como estado inicial no se pintaba en el primer render, y en cuanto
-  // una mutacion llamaba a `setNotice(null)` desaparecia aunque el fallo
-  // siguiera vigente. Derivado en cada render, un aviso de mutacion lo tapa
-  // mientras dura, pero nunca lo borra.
-  // U6 / AD3 — Del servidor llega la **clase**, no un mensaje: el texto crudo de
-  // Postgres ya no existe fuera de `lib/errors.ts`, así que no hay nada que
-  // traducir aquí ni nada que reclasificar a partir del código.
   /**
-   * I6 — `loadClase` es una **prop**: `limpiarAviso()` vacía el estado y el aviso
-   * derivado seguía en pantalla para siempre. Lo cazó el test del reintento: la
-   * app se recuperaba, traía la lista, y el usuario seguía leyendo que el
-   * servicio estaba despertando. Cuando el reintento sale bien, la carga deja de
-   * estar fallida.
-   */
-  /**
-   * J7 — Se recuerda **qué** carga se resolvió, no que alguna se resolvió. Con un
-   * booleano, el primer reintento con éxito silenciaba el aviso derivado para el
-   * resto de la vida de la pestaña: una segunda carga fallida —otra clase, un
-   * acceso perdido— no se anunciaba, y el usuario leía una lista vieja sin que
-   * nadie le dijera que ya no la estaba trayendo nadie.
+   * Spec B / R3 — **Un solo origen para el aviso visible.** Aquí había una
+   * segunda capa: `avisoVisible` era el estado `notice` **o** uno derivado de
+   * `loadClase` mientras `resueltaPara` no lo cancelara. De esa doble fuente
+   * salió la deuda 40, y con ella `resueltaPara`, que existía sólo para
+   * cancelarla. Un solo aviso visible se conserva; lo que se retiró es la idea de
+   * que bastaba con fundirlo todo en una puerta. La clase que trae el servidor
+   * tiene **su propio disparador**, que sólo pinta; rearmar la recuperación tiene
+   * otro; y ninguno de los dos retira por `limpiarAviso`, sino por una retirada
+   * selectiva que respeta lo que haya puesto una mutación.
    *
-   * Límite conocido, escrito porque es el borde: la **misma** clase llegando otra
-   * vez tras un refresco no se distingue de la que ya se resolvió —la página no
-   * manda identidad por carga— y sigue callada. Anunciarla exigiría esa identidad
-   * y no la vale.
+   * Lo que esto arregla de paso, medido: el derivado pintaba `mensajeDe(loadClase)`
+   * en crudo, así que a quien estaba sin red se le culpaba al servidor de su
+   * propia conexión.
+   *
+   * Y lo que cuesta, escrito porque tres iteraciones lo pagaron: un derivado se
+   * apaga solo cuando su fuente deja de venir, y un estado no. El aviso de carga
+   * lleva por eso su origen declarado, y **todo** el que escriba o retire en el
+   * hueco declara si es suyo. Ésa es la regla entera, y las retiradas cuentan
+   * tanto como las escrituras: dejarlas fuera fue el cuarto fallo de esta misma
+   * familia.
+   *
+   * Límite conocido, del bloque J7, que se perdió al reescribir y vuelve aquí: la
+   * **misma** clase llegando otra vez **sin pasar por null** no se distingue de la
+   * ya resuelta —la página no manda identidad por carga— y sigue callada. Con
+   * `null` en medio sí se distingue, y eso es lo que las dos refs reinician.
    */
-  const [resueltaPara, setResueltaPara] = useState<Clase | null>(null)
-  const avisoVisible = notice ?? (loadClase && loadClase !== resueltaPara
-    ? { texto: mensajeDe(loadClase) ?? '', clase: loadClase }
-    : null)
 
   /**
    * R1/R4 — Un único sitio por el que sale todo fallo. `haySesion` no se adivina
@@ -163,7 +172,34 @@ export function GroupView({
    * token" de `42501` "tu token no basta para esta fila". Sin esa pregunta, a
    * quien se le caduca la sesión se le dice que ha perdido el acceso al grupo.
    */
-  const secuencia = useRef(0)
+  /**
+   * Spec B / R1 — **Cada generación sella una sola cosa.** `secuencia` sellaba
+   * tres: los avisos, el afinado por sesión —que es la misma conversación con el
+   * usuario— y el reintento de **carga**, que no lo es. Un `limpiarAviso()` mataba
+   * las tres, y de ahí salió la regresión I1: apuntar algo se llevaba por delante
+   * la recuperación en vuelo sin que nada lo dijera.
+   *
+   * `envio` ya tenía la suya desde el ciclo de la deuda 34. Esto termina la
+   * separación que aquél empezó.
+   */
+  /**
+   * Dos generaciones, no una. La recuperación que arma el disparador de carga debe
+   * morir cuando cambia lo que la justificaba —se va la red, la carga deja de ser
+   * `servidor`—; la que arma una mutación fallida **no**: nada de eso invalida el
+   * gesto del usuario. Las respuestas difieren, luego no es un mecanismo, son dos.
+   * Compartirlas fue el CRITICAL de la vuelta anterior.
+   */
+  const recCarga = useRef(0)
+  const recMutacion = useRef(0)
+  /**
+   * Iteración 1 / R1 — Identidades para los avisos que van a afinarse. Esto NO es el
+   * sello: el sello es la comparación, y vive dentro del suceso, en el estado. Aquí
+   * sólo se generan números que no deciden nada y que por tanto no pueden quedar
+   * desfasados. La época que había antes obligaba a quien despacha a saber en qué
+   * estado aterrizaría —y con un `limpiarAviso()` antes del `await`, no podía—.
+   */
+  const tokenAviso = useRef(0)
+
 
   /**
    * T6 — La fila cuya cantidad hay que enfocar viaja en una **ref**, no en
@@ -195,7 +231,6 @@ export function GroupView({
      * el usuario pasaba **30,6 s** sin ver nada. Un aviso que tarda medio minuto
      * es un aviso que no existe.
      */
-    secuencia.current++
     if (!clase) return
     /**
      * R1 — `lib/items.ts` no puede leer un hook, así que devuelve `servidor` para
@@ -203,11 +238,21 @@ export function GroupView({
      * refina: si la red del usuario está caída, el fallo es suyo y no del
      * servidor. Es la misma forma que el afinado por sesión de más abajo.
      */
-    const real = refinarSinRed(clase, !sinRed) ?? clase
-    setNotice({ texto: mensajeDe(real) ?? '', clase: real })
+    /**
+     * Spec B / R4 — Con la red **viva**, no con la del render. La rama de la cola
+     * ya usaba `sinRedVivo.current` (deuda 43); aquí seguía el valor capturado
+     * cuando se creó el manejador, así que en la ventana que la deuda 34 nombró
+     * —la red cae entre pulsar y responder— se culpaba al servidor de la red del
+     * usuario. Vale para los tres caminos: alta, edición y borrado.
+     */
+    const real = refinarSinRed(clase, !sinRedVivo.current) ?? clase
+    // Origen `mutacion`: es la respuesta al gesto que el usuario acaba de hacer.
+    const token = ++tokenAviso.current
+    despachar({ tipo: 'avisar', origen: 'mutacion', texto: mensajeDe(real) ?? '', clase: real, token })
 
-    // R2 — el servicio pausado despierta solo: se reintenta sin que nadie pulse.
-    if (real === 'servidor') { void reintentar(++secuencia.current); return }
+    // R2 — el servicio pausado despierta solo, sin que nadie pulse, y el bucle va
+    // sellado por su propia generación: limpiar un aviso ya no lo mata.
+    if (real === 'servidor') { void reintentar(++recMutacion.current, recMutacion); return }
 
     // Sólo `42501` cambia de significado según haya sesión o no: es el único
     // código que la base reutiliza para las dos cosas.
@@ -216,7 +261,6 @@ export function GroupView({
     // salió ha pasado cualquier otra cosa —otro aviso, o una escritura correcta
     // que lo limpió—, ya no le toca hablar. Sin el sello, medido, "tu sesión ha
     // caducado" reaparecía hasta 2 s después sobre una escritura que fue bien.
-    const mio = ++secuencia.current
     let reloj: ReturnType<typeof setTimeout> | undefined
     try {
       // D.6 — toda llamada de red con cota. Sin ella, esto es la espera de 30 s.
@@ -224,11 +268,11 @@ export function GroupView({
         createClient().auth.getSession(),
         new Promise<never>((_, no) => { reloj = setTimeout(() => no(new Error('sin respuesta')), 2_000) }),
       ])
-      if (data.session || mio !== secuencia.current) return
+      if (data.session) return
       // AD1 — el afinado es una regla sobre la clase, no una segunda
       // clasificación: sin sesión, «no tienes acceso» es «se te ha caducado».
       const afinada = refinarSinSesion(real)
-      if (afinada) setNotice({ texto: mensajeDe(afinada) ?? '', clase: afinada })
+      if (afinada) despachar({ tipo: 'afinar', token, texto: mensajeDe(afinada) ?? '', clase: afinada })
     } catch { /* se queda el aviso ya pintado: menos preciso, pero visible */
     } finally { if (reloj) clearTimeout(reloj) }
   }
@@ -240,25 +284,47 @@ export function GroupView({
    * recargue. Las esperas viven en el traductor porque son la cota que D.6 exige,
    * y una cota dentro de un componente no la puede afirmar nadie.
    *
-   * Se sella con la misma secuencia que el resto de avisos: si mientras se espera
-   * pasa cualquier otra cosa, este reintento ya no tiene nada que decir.
+   * Spec B / R1 — Se sella con **su** generación, `recuperacion`. Antes compartía
+   * la de los avisos, así que `limpiarAviso()` —que corre al principio de cada
+   * alta— lo mataba a mitad.
    */
-  const reintentar = async (mio: number) => {
+  const reintentar = async (mio: number, gen: { current: number }) => {
     for (const espera of esperasDeReintento()) {
       await new Promise(r => setTimeout(r, espera))
-      if (mio !== secuencia.current) return
+      if (mio !== gen.current) return
       const r = await activeItems(createClient(), group.id)
-      if (mio !== secuencia.current) return
+      if (mio !== gen.current) return
       if (!r.clase) {
+        // R3.3 — Y se apunta qué clase de carga quedó resuelta: la prop no se
+        // entera de que la lista llegó, así que sin esto el siguiente cambio de
+        // red vuelve a anunciar lo que ya no pasa.
+        cargaResuelta.current = loadClase ?? null
         setItems(prev => mergeItems(r.data, prev))
-        setResueltaPara(loadClase ?? null)
-        // U3 — se limpia por la única puerta que sella. Un `setNotice(null)`
-        // suelto deja que el afinado en vuelo reaparezca encima.
-        limpiarAviso()
+        /**
+         * R4.1 — Retira **lo suyo**, no lo que haya. `limpiarAviso()` se llevaba
+         * por delante el aviso de la mutación que el usuario acababa de provocar
+         * —medido con «Alguien lo quitó de la lista» y con «Tu sesión ha
+         * caducado» y su enlace—.
+         *
+         * Y **no sella**, al contrario que `limpiarAviso`. El sello existe para
+         * que un afinado por sesión en vuelo no reaparezca sobre un hueco que
+         * alguien vació, y un afinado en vuelo implica un aviso que NO es
+         * de origen `carga` — exactamente el que esta retirada no toca. Se puso por
+         * simetría; la pasada de mutación del ítem 7 lo midió inerte con los
+         * 1.488 tests en verde, y se quita en vez de inventarle una prueba.
+         */
+        despachar({ tipo: 'retirar', origen: 'carga' })
         return
       }
     }
   }
+  /**
+   * R3.1 — En ref viva por el mismo motivo que `avisar`: es un arrow recreado en
+   * cada render, y listarlo como dependencia relanzaría el bucle sin parar. Va
+   * aquí y no arriba porque antes de esta línea el `const` está en zona muerta.
+   */
+  const reintentarVivo = useRef(reintentar)
+  reintentarVivo.current = reintentar
 
   /**
    * N3 — Una sola puerta a la cola. Las dos ramas —sin red al pulsar, y fallo en
@@ -289,7 +355,7 @@ export function GroupView({
     // J6 — si el almacén no admite la escritura no se pinta ficha: el usuario
     // vería su producto, recargaría, y no estaría.
     if (!(await encolar(p))) {
-      devolver(nombre, cantidad, desde); avisarTexto(SIN_ALMACEN, 'generico'); return false
+      devolver(nombre, cantidad, desde); avisarTexto(SIN_ALMACEN, 'generico', 'mutacion'); return false
     }
     setPendientes(prev => [...prev, p])
     return true
@@ -349,7 +415,6 @@ export function GroupView({
        */
       if (!p) {
         if (envioHecho) {
-          setNotice(n => (n?.deCola ? null : n))
           /**
            * N6 — Y se RELEE la lista. Marcarla resuelta sin leerla era fallar
            * abierto: el envío llegaba, el aviso se iba, y el usuario se quedaba
@@ -362,10 +427,39 @@ export function GroupView({
            */
           const relectura = await activeItems(createClient(), group.id)
           if (mio !== envio.current) return
-          if (!relectura.clase) {
-            setItems(prev => mergeItems(relectura.data, prev))
-            setResueltaPara(loadClase ?? null)
+          /**
+           * Spec B / R5 — Aquí se decide **después de saber**, y son dos hechos
+           * distintos, no uno:
+           *
+           * - La cola se vació: su aviso ya no es verdad y se retira
+           *   pase lo que pase. Decirle a alguien que su producto «se enviará al
+           *   volver la red» cuando ya está en la lista es mentir (DoD 17).
+           * - La relectura falló: la lista puede estar rancia, y eso **sí** hay
+           *   que decirlo. Antes se limpiaba antes de releer y con `loadClase`
+           *   nulo no quedaba ninguna señal: la deuda 40, y lo que la 45 pedía
+           *   probar con el gemelo de `loadClase` nulo.
+           */
+          // La cola se vació y su aviso ya no es verdad (Spec B / R5). Vive en las
+          // dos ramas y no antes del `if (envioHecho)`: retirar sin haber enviado
+          // deriva de la copia de la cola leída antes de los `await`, y eso es lo
+          // que la spec de «pantalla y estado durable» se lleva a su alcance.
+          despachar({ tipo: 'retirar', origen: 'cola' })
+          if (relectura.clase) {
+            // Si falló, el aviso de la relectura toma el relevo: sobrescribe al de
+            // la cola, así que retirarlo antes era una línea que nadie podía
+            // observar — lo midió la pasada de mutación de la iteración 2.
+            /**
+             * R4.2 — El mismo texto que su gemelo de la resincronización usa
+             * para este hecho. `avisar` pintaría `SERVIDOR` —«lo reintentamos
+             * solo»— y desde que este camino dejó de rearmar, nadie lo
+             * reintenta: el mensaje mentía. Se pierde aquí el afinado por sesión
+             * del 42501, y se acepta: el gemelo ya lo acepta, y dos caminos
+             * diciendo cosas distintas del mismo fallo es peor.
+             */
+            avisarTexto(RELECTURA, relectura.clase, 'relectura')
+            return
           }
+          setItems(prev => mergeItems(relectura.data, prev))
         }
         return
       }
@@ -379,10 +473,13 @@ export function GroupView({
       setPendientes(prev => prev.filter(x => x.id !== p.id))
       if (r.data) setItems(prev => mergeItems([r.data as Item], prev))
     }
-    // N6 — `loadClase` es una PROP y cambia sin desmontar: este componente llama
-    // a `router.refresh()` en cuatro sitios. Capturado al montar, el drenado
-    // resolvía con un valor caduco. El linter lo venía avisando.
-  }, [group.id, me.id, loadClase])
+    /**
+     * N6 dejó aquí `loadClase` porque el drenado marcaba la carga resuelta con
+     * él, y capturado al montar resolvía con un valor caduco. Spec B / R3 se
+     * llevó esa marca —`resueltaPara` ya no existe—, así que el drenado no lee la
+     * prop en absoluto y la dependencia sobraba. El linter lo dijo en cuanto pasó.
+     */
+  }, [group.id, me.id])
 
   const drenando = useRef(false)
   const pedido = useRef(false)
@@ -396,6 +493,27 @@ export function GroupView({
    *
    * Ahora el que llega tarde deja constancia, y quien tiene el cerrojo vuelve a
    * mirar la cola antes de soltarlo.
+   */
+  /**
+   * R6 / iteración 1 de la duración — **Un nivel lo retira su condición, no el flujo
+   * de control de quien la cambió.** El aviso de la cola es un nivel: es cierto
+   * mientras queden pendientes de este grupo. Cuando dejan de quedar, deja de ser
+   * cierto, se haya vaciado la cola por el drenado de esta instancia, por el de otra
+   * pestaña —la cola vive en IndexedDB y la comparten todas (§D.3)— o por el
+   * descarte de caducados.
+   *
+   * Esto **deroga N4** —«quien vacía la cola retira el aviso, no quien la encuentra
+   * vacía»—, que existía porque limpiar al encontrarla vacía barría el aviso de una
+   * edición fallida. Con origen declarado no puede barrer nada ajeno: `retirar cola`
+   * sólo toca la casilla de la cola.
+   *
+   * Medido antes de escribirlo, ejecutando el camino y no enumerándolo: con dos
+   * vistas montadas sobre la misma cola, la que no drenó se quedaba con «el servicio
+   * está despertando, lo reintentamos solo» para siempre, sobre una cola vacía y con
+   * el producto ya en la lista.
+   *
+   * Y la condición se lee **donde se observa la cola compartida**, no en el estado
+   * local: `pendientes` es de esta instancia y no se entera de lo que hace otra.
    */
   const drenar = useCallback(async () => {
     if (drenando.current) { pedido.current = true; return }
@@ -427,9 +545,8 @@ export function GroupView({
     setName(nombre); setQuantity(cantidad ?? '')
   }
 
-  const avisarTexto = (texto: string, clase: Clase = 'generico') => {
-    secuencia.current++
-    setNotice({ texto, clase })
+  const avisarTexto = (texto: string, clase: Clase, origen: Origen) => {
+    despachar({ tipo: 'avisar', origen, texto, clase })
   }
   /**
    * U3 — Cuatro de los cinco sitios que limpiaban el aviso no sellaban, así que
@@ -437,7 +554,7 @@ export function GroupView({
    * caducado" otra vez. Reproducido determinista. Limpiar es una operación, no un
    * `setNotice(null)` suelto.
    */
-  const limpiarAviso = () => { secuencia.current++; setNotice(null) }
+  const limpiarAviso = () => despachar({ tipo: 'limpiar' })
 
   /**
    * R5/R6 — Al abrir: se descarta lo que lleva más de un día en la cola y se dice
@@ -454,7 +571,7 @@ export function GroupView({
       const { vivos, caducados: viejos } = reparte(cola, Date.now())
       await Promise.all(viejos.map(x => quitarDeCola(x.id)))
       setPendientes(vivos.filter(x => x.grupo === group.id))
-      if (viejos.length) avisarTexto(caducados(viejos.length), 'texto')
+      if (viejos.length) avisarTexto(caducados(viejos.length), 'texto', 'apertura')
       const guardada = await leerLista(me.id, group.id)
       if (guardada?.length) setItems(prev => (prev.length ? prev : guardada))
     })()
@@ -490,16 +607,92 @@ export function GroupView({
   }, [sinRed, loadClase, group.id, group.name, me.id])
 
   /**
-   * I6 — El camino que R2 nombra por su nombre: **el primer acceso** tras la
-   * pausa. El aviso decía «lo reintentamos solo» y no lo reintentaba nadie —
-   * `reintentar` sólo era alcanzable desde una mutación fallida, así que quien
-   * abría la app con el servicio dormido leía una frase que no se cumplía.
+   * Spec B / R3.1 — **Rearmar.** Un disparador propio, y no escribe avisos.
+   *
+   * I6 lo nombró: el primer acceso tras la pausa decía «lo reintentamos solo» y
+   * no lo reintentaba nadie. Tiene que volver a dispararse cuando vuelve la red,
+   * y por eso `sinRed` está en las dependencias.
+   *
+   * Estuvo fundido con el anuncio y ésa fue la regresión: los dos consumidores
+   * piden lo contrario de la misma dependencia —rearmar sí debe redispararse al
+   * volver la red, anunciar no—, así que ninguna lista de dependencias los
+   * satisface a los dos y cada vuelta elegía cuál sacrificar.
+   *
+   * `reintentar` viaja en ref viva para no declararlo dependencia: es un arrow
+   * que se recrea en cada render, y listarlo relanzaría el bucle sin parar.
    */
   useEffect(() => {
-    if (loadClase !== 'servidor' || sinRed) return
-    void reintentar(++secuencia.current)
-    // Una vez por carga fallida: `reintentar` ya lleva su propia cota.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // R4.3 — Y mira la memoria: una carga ya resuelta no se rearma. Sin esto,
+    // medido, cada parpadeo sondeaba otra vez durante toda la vida de la pestaña.
+    if (loadClase !== 'servidor' || sinRed || cargaResuelta.current === loadClase) return
+    void reintentarVivo.current(++recCarga.current, recCarga)
+  }, [loadClase, sinRed])
+
+  /**
+   * R4.3 — Y el bucle que deja en vuelo no sobrevive a que cambien las condiciones
+   * que lo justificaban: irse la red, dejar de ser `servidor` la carga, o
+   * desmontar. Medido: seguía sondeando a un servidor inalcanzable hasta agotar
+   * sus cinco esperas.
+   *
+   * Va en su propio efecto, sin cuerpo, por la misma forma que usan las dos
+   * invalidaciones de más arriba: leer `recCarga.current` dentro de la
+   * limpieza del efecto que también lo incrementa hace saltar
+   * `react-hooks/exhaustive-deps`, y la puerta del linter no admite avisos.
+   * Sustituye a la invalidación sólo-al-desmontar que puso la iteración 2: estas
+   * dependencias incluyen el desmontaje.
+   */
+  useEffect(() => () => { recCarga.current++ }, [loadClase, sinRed])
+  /** Y la que arma una mutación muere sólo al desmontar: nada más la invalida. */
+  useEffect(() => () => { recMutacion.current++ }, [])
+
+  /**
+   * Spec B / R3.2 y R3.3 — **Anunciar.** El otro disparador. Escribe sólo cuando
+   * cambia lo que se anunciaría, y calla para una carga ya resuelta.
+   *
+   * **Una** puerta, y cierra un fallo medido: *resuelta* — la recuperación trajo
+   * la lista y `loadClase` sigue diciendo lo contrario, porque es una prop del
+   * render del servidor. Aquí hubo otras dos y las dos se fueron al separar la
+   * duración del peso: comparar la clase con la anterior dejó de hacer falta
+   * cuando reescribir el mismo nivel pasó a ser inobservable, y la prioridad la
+   * decide el reducer, no este sitio.
+   *
+   * Y **sí restaura**: el aviso de carga es un nivel, así que una mutación lo tapa
+   * sin destruirlo y vuelve a verse en cuanto lo de encima se limpia, si sigue
+   * siendo cierto. Aquí decía lo contrario —«no restaura»— desde antes de que el
+   * eje de la duración existiera; hoy hay test que exige justo lo que negaba.
+   */
+  useEffect(() => {
+    if (!loadClase) {
+      cargaResuelta.current = null
+      /**
+       * La carga dejó de fallar: se retira su aviso, y sólo el suyo. Va diferido
+       * por el mismo motivo que el drenado —poner estado en el cuerpo de un
+       * efecto encadena renders, y el linter lo dice—; aquí además no corre
+       * prisa, porque la clase ya se resolvió.
+       */
+      void (async () => {
+        await Promise.resolve()
+        despachar({ tipo: 'retirar', origen: 'carga' })
+      })()
+      return
+    }
+    if (cargaResuelta.current === loadClase) return
+    const refinada = refinarSinRed(loadClase, !sinRed) ?? loadClase
+    /**
+     * R4.4 — La prioridad se decide **dentro** del actualizador, que es donde el
+     * estado que protege está vivo. Antes se leía de una ref escrita en el cuerpo
+     * del render, y este componente usa `useTransition`: un render descartado la
+     * dejaba apuntando a un estado nunca confirmado.
+     *
+     * Sin sello: cuando esto aterriza, el hueco estaba vacío o tenía un aviso de
+     * carga, y todo camino que vacía el hueco teniendo un afinado en vuelo ya
+     * incrementa el sello. Estaba, se midió inerte, y se quita en vez de
+     * inventarle una prueba.
+     *
+     * Síncrono a propósito, al contrario que la retirada: hay pruebas de la verja
+     * que leen el aviso en el mismo tick del montaje.
+     */
+    despachar({ tipo: 'avisar', origen: 'carga', texto: mensajeDe(refinada) ?? '', clase: refinada })
   }, [loadClase, sinRed])
 
   /**
@@ -533,7 +726,7 @@ export function GroupView({
         // nombre. Medido: la fila se quedaba en pantalla con texto que no está
         // guardado en ninguna parte.
         setIdas(prev => new Set(prev).add(row.id))
-        avisarTexto(GONE)
+        avisarTexto(GONE, 'generico', 'mutacion')
         return
       }
       setItems(prev => {
@@ -580,7 +773,7 @@ export function GroupView({
       // AE1 — `activeItems` ya no lanza, así que aquí no hay ningún objeto de
       // error que recoger: llega su clase, como en cualquier otra mutación.
       void activeItems(createClient(), group.id).then(r => {
-        if (r.clase) { avisarTexto(RELECTURA, r.clase); return }
+        if (r.clase) { avisarTexto(RELECTURA, r.clase, 'relectura'); return }
         // `prev` ya incluye los eventos llegados durante la petición: sustituir
         // la lista los borraría hasta el siguiente evento (J6, D.2).
         setItems(prev => mergeItems(r.data, prev))
@@ -624,7 +817,7 @@ export function GroupView({
      * vigor, y quedarse sin red es un guardado fallido como cualquier otro. Lo
      * tecleado espera a que vuelva la red.
      */
-    if (sinRed) { avisarTexto(SIN_RED_ACCION, 'red'); return }
+    if (sinRed) { avisarTexto(SIN_RED_ACCION, 'red', 'mutacion'); return }
     limpiarAviso()
     const patch = campo === 'nombre' ? { name: limpio } : { quantity: limpio || null }
     const { data: fila, clase, code } = await updateItem(createClient(), item.id, patch)
@@ -638,7 +831,7 @@ export function GroupView({
        * compartido, mientras en la base no quedaba ninguna fila viva. Eso es
        * fallar abierto, que es lo que A.3 prohíbe.
        */
-      avisarTexto(GONE)
+      avisarTexto(GONE, 'generico', 'mutacion')
       setItems(prev => prev.filter(i => i.id !== item.id))
       olvidarFila(item.id)
       return
@@ -667,7 +860,7 @@ export function GroupView({
     if (busy) return
     // R2 — esto era un `return` mudo. El usuario pulsaba y no pasaba nada: ni
     // ítem, ni explicación. Medido en el navegador: "NADA CAMBIO".
-    if (!trimmed) { avisarTexto(ESCRIBE_NOMBRE, 'texto'); return }
+    if (!trimmed) { avisarTexto(ESCRIBE_NOMBRE, 'texto', 'mutacion'); return }
     /**
      * R3 — Sin red, lo apuntado entra en cola y se ve. El campo se vacía para
      * poder seguir apuntando, que es el gesto real en un lineal: se apuntan tres
@@ -759,8 +952,7 @@ export function GroupView({
            * culpando al servidor de su propia red.
            */
           const suya = refinarSinRed('servidor', !sinRedVivo.current) ?? 'servidor'
-          secuencia.current++
-          setNotice({ texto: mensajeDe(suya) ?? '', clase: suya, deCola: true })
+          despachar({ tipo: 'avisar', origen: 'cola', texto: mensajeDe(suya) ?? '', clase: suya })
           void reintentarEnvio(++envio.current)
           return
         }
@@ -805,7 +997,7 @@ export function GroupView({
       const r = await decideMemberAction(group.id, userId, decision)
       // R3/S9 — las acciones devuelven el texto traducido **y su clase**, para
       // que un fallo de sesión ofrezca la salida también por este camino.
-      if (r?.mensaje) avisarTexto(r.mensaje, r.clase ?? 'generico')
+      if (r?.mensaje) avisarTexto(r.mensaje, r.clase ?? 'generico', 'mutacion')
       else router.refresh()
     })
   }
@@ -847,16 +1039,16 @@ export function GroupView({
         </p>
       )}
 
-      {avisoVisible && (
+      {notice && (
         <p role="alert" data-testid="notice" className="rounded-xl bg-red-50 p-3 text-sm text-red-700">
-          {avisoVisible.texto}
+          {notice.texto}
           {/* R4 — "tu sesión ha caducado" sin manera de volver a entrar es un
               callejón: el usuario se queda en una pantalla que ya no puede usar.
               El enlace sólo aparece cuando el problema es la sesión; para un
               fallo de acceso real no habría nada que reintentar entrando. */}
           {/* V7 — sin `next` el usuario vuelve a entrar y aterriza en la raíz,
               lejos del grupo que estaba mirando. La convención ya existe. */}
-          {avisoVisible.clase === 'sesion' && (
+          {notice.clase === 'sesion' && (
             <Link href={`/login?next=${encodeURIComponent(`/g/${group.id}`)}`}
               data-testid="volver-a-entrar"
               className="ml-2 inline-block min-h-[44px] underline">Volver a entrar</Link>
@@ -914,13 +1106,13 @@ export function GroupView({
               onClick={() => {
                 if (deleting.has(item.id)) return
                 // R7 — igual que editar: sin red no se tacha.
-                if (sinRed) { avisarTexto(SIN_RED_ACCION, 'red'); return }
+                if (sinRed) { avisarTexto(SIN_RED_ACCION, 'red', 'mutacion'); return }
                 limpiarAviso()
                 setDeleting(prev => new Set(prev).add(item.id))
                 void softDeleteItem(createClient(), item.id)
                   .then(r => {
                     if (r.clase) void avisar(r.clase, r.code)
-                    else if (r.data === 0) avisarTexto(GONE)
+                    else if (r.data === 0) avisarTexto(GONE, 'generico', 'mutacion')
                   })
                   .finally(() => {
                     // L1 — sin esto el id no salia nunca del conjunto: tras un
@@ -977,7 +1169,7 @@ export function GroupView({
             onClick={() => startTransition(async () => {
               limpiarAviso()
               const r = await createInviteAction(group.id)
-              if (r.mensaje) avisarTexto(r.mensaje, r.clase ?? 'generico')
+              if (r.mensaje) avisarTexto(r.mensaje, r.clase ?? 'generico', 'mutacion')
               else if (r.token) setInvite(`${window.location.origin}/invite/${r.token}`)
             })}>
             Generar link de invitación
@@ -995,7 +1187,7 @@ export function GroupView({
           <button data-testid="leave" className="min-h-[44px] text-sm text-neutral-500"
             onClick={() => startTransition(async () => {
               const r = await leaveGroupAction(group.id)
-              if (r?.mensaje) avisarTexto(r.mensaje, r.clase ?? 'generico')
+              if (r?.mensaje) avisarTexto(r.mensaje, r.clase ?? 'generico', 'mutacion')
             })}>
             Salir del grupo
           </button>

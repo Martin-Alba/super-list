@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, waitFor, cleanup, act, fireEvent } from '@testing-library/react'
 import type { Item } from '@/lib/items'
 import type { Pendiente } from '@/lib/local'
-import { claseDe, mensajeDe, SIN_ALMACEN, type Clase } from '@/lib/errors'
+import { claseDe, mensajeDe, SIN_ALMACEN, GONE, SIN_ACCESO, RELECTURA, type Clase } from '@/lib/errors'
 
 /**
  * I7/I9 — El drenado, atacado en la capa donde vive: montado dentro de la vista.
@@ -17,6 +17,7 @@ const quitarDeCola = vi.fn()
 const encolar = vi.fn()
 const guardarLista = vi.fn()
 const softDeleteItem = vi.fn()
+const updateItem = vi.fn()
 
 /**
  * J3/DoD 38 — `sinRed` mandable desde el test. Es lo que hace observable el
@@ -49,7 +50,7 @@ vi.mock('@/lib/items', async (orig) => ({
   ...(await orig<typeof import('@/lib/items')>()),
   activeItems: (...a: unknown[]) => activeItems(...a),
   addItem: (...a: unknown[]) => addItem(...a),
-  updateItem: vi.fn(),
+  updateItem: (...a: unknown[]) => updateItem(...a),
   softDeleteItem: (...a: unknown[]) => softDeleteItem(...a),
 }))
 vi.mock('@/lib/local', async (orig) => ({
@@ -122,6 +123,7 @@ beforeEach(() => {
   addItem.mockResolvedValue({ data: fila('x'), clase: null, code: null })
   activeItems.mockResolvedValue({ data: [], clase: null, code: null })
   softDeleteItem.mockResolvedValue({ data: 1, clase: null, code: null })
+  updateItem.mockResolvedValue({ data: fila('x'), clase: null, code: null })
 })
 afterEach(() => cleanup())
 
@@ -646,21 +648,37 @@ describe('N4 un solo bucle, y quien vacía la cola retira el aviso', () => {
     await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
   }
 
-  it('DoD 17: el envío se recupera y la relectura sigue fallando: no queda aviso', async () => {
+  it('DoD 17: el envío se recupera y la relectura sigue fallando: se dice cuál falla', async () => {
     vi.useFakeTimers()
     try {
       colaViva()
-      // El GET nunca se recupera. El POST sí. Es el caso medido.
-      activeItems.mockResolvedValue({ data: [], clase: 'servidor', code: '' })
+      /**
+       * Iteración 2 / R4 — La relectura falla con una clase **distinta** de la
+       * que produjo el aviso de la cola. Con las dos en `servidor` los textos
+       * coincidían y la aserción no podía distinguir «quedó el de la cola» de
+       * «quedó el de la relectura»: medido, seguía verde con la limpieza quitada.
+       */
+      activeItems.mockResolvedValue({ data: [], clase: 'sin-acceso', code: '42501' })
       addItem.mockResolvedValueOnce(falloReal())
       const r = montar()
       await apuntar3(r, 'lentejas')
       cola = [...cola, encolar.mock.calls[0][0] as Pendiente]
       addItem.mockResolvedValue({ data: fila('lentejas'), clase: null, code: null })
       await act(async () => { await vi.advanceTimersByTimeAsync(25_000) })
+
       expect(r.queryAllByTestId('item-pendiente')).toHaveLength(0)
+      /**
+       * Esta aserción era `toBeNull()`, y afirmaba el defecto que la deuda 40
+       * describe palabra por palabra: con `loadClase` nulo y la relectura
+       * fallando, la pantalla se quedaba muda. Lo que la prueba protege de verdad
+       * —que no quede el aviso de la cola mintiendo con el producto ya en la
+       * lista— se conserva aquí: el que queda es el de la relectura.
+       */
       expect(r.queryByTestId('notice'),
-        'el producto está en la lista y la alerta sigue diciendo que el servidor no contesta').toBeNull()
+        'la relectura falló y la pantalla se quedó muda: deuda 40').not.toBeNull()
+      expect(r.queryByTestId('notice')!.textContent,
+        'quedó el aviso de la cola, que con el producto ya en la lista es mentira')
+        .toBe(RELECTURA)
     } finally { vi.useRealTimers() }
   })
 
@@ -740,11 +758,19 @@ describe('N5 el aviso de la cola es suyo, se refina, y resuelve la carga', () =>
       // Una fila real de partida, para poder fallar un borrado sobre ella.
       const r = render(vista(null, [fila('arroz')]))
       await encolarFallando(r, 'lentejas')
-      // Aviso AJENO, de la misma clase `servidor`, puesto por otro camino.
-      // La relectura tiene que seguir fallando: si acierta, `reintentar` limpia
-      // el aviso por su cuenta y el test mediría esa cura, no la del drenado.
-      activeItems.mockResolvedValue({ data: [], clase: 'servidor', code: '' })
-      softDeleteItem.mockResolvedValue({ data: null, clase: 'servidor', code: '' })
+      /**
+       * Aviso AJENO, puesto por otro camino. Antes tenía que ser de clase
+       * `servidor` **y** la relectura tenía que seguir fallando, porque
+       * `reintentar` limpiaba el hueco entero al acertar; con las dos en
+       * `servidor` los textos coincidían y la aserción no distinguía «sobrevivió»
+       * de «lo sustituyó otro igual». Era el mismo agujero que el DoD 17 tuvo.
+       *
+       * R4.1 lo hace comprobable: la recuperación retira sólo lo suyo, así que la
+       * relectura puede acertar y el aviso ajeno tiene que seguir ahí. Es la
+       * puerta que abre el arreglo, probada por donde la abre (§E.4b).
+       */
+      activeItems.mockResolvedValue({ data: [], clase: null, code: null })
+      softDeleteItem.mockResolvedValue({ data: null, clase: 'sin-acceso', code: '42501' })
       await act(async () => { fireEvent.click(r.getAllByTestId('delete-item')[0]) })
       expect(r.getByTestId('notice'), 'el aviso ajeno no llegó a pintarse').toBeTruthy()
       const ajeno = r.getByTestId('notice').textContent
@@ -790,13 +816,26 @@ describe('N6 vaciar la cola relee la lista, y el loadClase es el vivo', () => {
     vi.useFakeTimers()
     try {
       colaViva()
-      const r = montarCon('servidor')
+      /**
+       * Iteración 2 / R4 — Monta con `null`, no con `'servidor'`. Aquel prop sólo
+       * estaba aquí por `setResueltaPara(loadClase)`, que R3 borró, y con él la
+       * relectura del reintento de montaje satisfacía el recuento sola: medido,
+       * borrando la relectura del drenado esta prueba **seguía verde**.
+       */
+      const r = montar()
       await encolarFallando(r, 'lentejas')
       activeItems.mockClear()
       activeItems.mockResolvedValue({ data: [fila('arroz')], clase: null, code: null })
       await act(async () => { await vi.advanceTimersByTimeAsync(25_000) })
+      /**
+       * Spec B / R1 — Eran una y pasan a ser dos, y las dos tienen dueño: la del
+       * drenado, y el **reintento de carga sobreviviendo** a `limpiarAviso()`.
+       * Que antes fuera una era la regresión I1 metida en una cifra. Se afirma el
+       * suelo —que se relee, o la lista se queda rancia— y el techo —que no
+       * vuelve el bucle de cinco que R13 quitó—.
+       */
       expect(activeItems.mock.calls.length,
-        'se dio la carga por resuelta sin haber leído nada: la lista se queda rancia').toBe(1)
+        'no se releyó una vez tras vaciar la cola: la lista se queda rancia').toBe(1)
       expect(r.queryByTestId('notice')).toBeNull()
     } finally { vi.useRealTimers() }
   })
@@ -830,4 +869,664 @@ describe('N6 vaciar la cola relee la lista, y el loadClase es el vivo', () => {
         'el drenado resolvió con el loadClase capturado al montar, no el vivo').toBeNull()
     } finally { vi.useRealTimers() }
   })
+})
+
+/**
+ * Spec B — El ciclo de vida de aviso-y-recuperación.
+ *
+ * Viven aquí y no en un fichero propio porque el arnés que hace falta ya está
+ * montado en éste: `GroupView` real, con `loadClase` gobernable desde el test y
+ * la red conmutable a mitad de una petición en vuelo. Duplicar ese banco al lado
+ * es la deriva que la cicatriz N3 describe.
+ */
+const avisoTexto = (r: ReturnType<typeof render>) =>
+  r.queryByTestId('notice')?.textContent ?? null
+
+describe('Spec B · cada generación sella una sola cosa', () => {
+  /**
+   * DoD 1 / R1 + R2 — Vigila **dos partes**: que `limpiarAviso` incremente sólo
+   * la generación de avisos, y que `reintentar` se selle con la de recuperación.
+   * Hoy una sola generación sella las tres cosas, así que apuntar algo mata la
+   * recuperación en vuelo sin que nada lo diga. Es la regresión I1.
+   */
+  it('DoD 1: limpiar un aviso no mata un reintento de carga en vuelo', async () => {
+    vi.useFakeTimers()
+    try {
+      activeItems.mockResolvedValue({ data: [fila('llegada')], clase: null, code: null })
+      const r = montarCon('servidor')
+      await act(async () => {})
+
+      // Antes de que venza la primera espera del reintento (1 s), se apunta algo:
+      // `onAdd` empieza llamando a `limpiarAviso()`.
+      fireEvent.change(r.getByTestId('item-name'), { target: { value: 'pan' } })
+      await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_500) })
+      expect(activeItems, 'el reintento murió al limpiar el aviso: regresión I1')
+        .toHaveBeenCalled()
+    } finally { vi.useRealTimers() }
+  })
+
+})
+
+describe('Spec B · un solo origen para el aviso visible', () => {
+  /**
+   * RETIRADA (spec del reducer, §2b) — «DoD 3: retirado el aviso, un loadClase que no
+   * cambia no lo repone». Su montaje usaba una escritura correcta para vaciar el
+   * hueco, y esa escritura ya no retira la condición de carga: un alta que sale bien
+   * no desmiente «ya no tienes acceso a este grupo». No se reescribe con otro
+   * escenario —eso fue el error de una vuelta anterior—: lo que vigilaba, la
+   * comparación que impide reanunciar, lo juzga la pasada de mutación del ítem 8.
+   */
+
+
+  /**
+   * DoD 4 / R3 — La mitad de **conversión**: la clase que trae el servidor pasa
+   * por `avisar`, y por tanto se refina con la red. Hoy el derivado pinta
+   * `mensajeDe(loadClase)` en crudo, así que a quien está sin red se le culpa al
+   * servidor de su propia conexión.
+   */
+  it('DoD 4: sin red, un loadClase de servidor culpa a la red y no al servidor', async () => {
+    sinRedAhora = true
+    const r = montarCon('servidor')
+    await waitFor(() => expect(avisoTexto(r)).toBeTruthy())
+    expect(avisoTexto(r), 'culpó al servidor de la red del usuario')
+      .toBe(mensajeDe('red'))
+  })
+
+  /**
+   * `[REGRESIÓN]` — verde hoy por el derivado, y tiene que seguir verde por el
+   * aviso normal: un `loadClase` que cambia tras el montaje se anuncia.
+   */
+  it('DoD 4b: un loadClase que cambia tras el montaje produce aviso', async () => {
+    const r = render(vista(null))
+    await waitFor(() => expect(avisoTexto(r)).toBeNull())
+    await act(async () => { r.rerender(vista('sin-acceso')) })
+    await waitFor(() => expect(avisoTexto(r), 'el cambio de clase no se anunció').toBeTruthy())
+  })
+})
+
+describe('Spec B · el refinado usa la red viva', () => {
+  const caeLaRedAMitad = () => {
+    let soltar!: (v: unknown) => void
+    const parado = new Promise(r => { soltar = r })
+    return { parado, soltar }
+  }
+
+  /**
+   * DoD 5 / R4 — Camino de **edición**. `avisar` refina con `!sinRed`, el valor
+   * del render en que se creó el manejador; la rama de la cola usa
+   * `!sinRedVivo.current`. La ventana es la que la deuda 34 nombró: la red cae
+   * entre pulsar y responder.
+   */
+  it('DoD 5: la red cae durante una edición y se culpa a la red', async () => {
+    const { parado, soltar } = caeLaRedAMitad()
+    updateItem.mockReturnValue(parado)
+    const r = render(vista(null, [fila('sal')]))
+    await act(async () => {})
+    const campo = r.getByLabelText('Nombre')
+    fireEvent.change(campo, { target: { value: 'sal gorda' } })
+    await act(async () => { fireEvent.blur(campo) })
+
+    await ponerSinRed(true)
+    await act(async () => { soltar({ data: null, clase: 'servidor', code: null }) })
+
+    await waitFor(() => expect(avisoTexto(r)).toBeTruthy())
+    expect(avisoTexto(r), 'culpó al servidor de la red del usuario').toBe(mensajeDe('red'))
+  })
+
+  /** DoD 6 / R4 — El mismo refinado, camino de **borrado**. */
+  it('DoD 6: la red cae durante un borrado y se culpa a la red', async () => {
+    const { parado, soltar } = caeLaRedAMitad()
+    softDeleteItem.mockReturnValue(parado)
+    const r = render(vista(null, [fila('sal')]))
+    await act(async () => {})
+    await act(async () => { fireEvent.click(r.getByTestId('delete-item')) })
+
+    await ponerSinRed(true)
+    await act(async () => { soltar({ data: null, clase: 'servidor', code: null }) })
+
+    await waitFor(() => expect(avisoTexto(r)).toBeTruthy())
+    expect(avisoTexto(r), 'culpó al servidor de la red del usuario').toBe(mensajeDe('red'))
+  })
+})
+
+describe('Spec B · el aviso se retira después de saber', () => {
+  /**
+   * DoD 7b / R5 — La **otra** mitad: con la relectura buena, el aviso de la cola
+   * se retira. Sin `loadClase`, porque con él el reintento de carga limpia por su
+   * cuenta y tapa la falta — lo demostró la pasada de mutación del ítem 10, que
+   * dejó verdes tanto al DoD 17 como al DoD 25 con la limpieza quitada.
+   */
+  it('DoD 7b: vaciada la cola y releída bien, el aviso de la cola se va', async () => {
+    vi.useFakeTimers()
+    try {
+      colaViva()
+      const r = montar()
+      // El alta falla de verdad: eso encola **y** pinta el aviso `deCola`, que es
+      // justo lo que hay que ver desaparecer. Sembrar la cola a mano no lo pinta,
+      // y entonces el test pasaría sin nada que retirar — lo midió el ítem 10.
+      addItem.mockResolvedValueOnce({
+        data: null, clase: claseDe({ message: 'Failed to fetch' } as never), code: '' })
+      fireEvent.change(r.getByTestId('item-name'), { target: { value: 'lentejas' } })
+      await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
+      cola = [...cola, encolar.mock.calls.at(-1)![0] as Pendiente]
+      expect(r.queryByTestId('notice'), 'no se pintó el aviso de la cola').not.toBeNull()
+
+      addItem.mockResolvedValue({ data: fila('lentejas'), clase: null, code: null })
+      activeItems.mockResolvedValue({ data: [fila('lentejas')], clase: null, code: null })
+      await act(async () => { await vi.advanceTimersByTimeAsync(25_000) })
+
+      expect(r.queryAllByTestId('item-pendiente'), 'la cola no se vació').toHaveLength(0)
+      expect(r.queryByTestId('notice'),
+        'la cola se vació y el aviso sigue diciendo que se enviará al volver la red').toBeNull()
+    } finally { vi.useRealTimers() }
+  })
+
+  /**
+   * DoD 7 / R5 — Vigila que la limpieza ocurra **dentro de la rama que
+   * confirmó**. Hoy se limpia antes de releer: si la relectura falla y no hay
+   * `loadClase` que pinte un derivado, la pantalla se queda muda.
+   */
+  it('DoD 7: una relectura fallida con loadClase nula deja señal en pantalla', async () => {
+    colaViva()
+    cola = [{ id: 'p1', usuario: 'u1', grupo: 'g1', nombre: 'sal', cantidad: null, creado: Date.now() }]
+    addItem.mockResolvedValue({ data: fila('sal'), clase: null, code: null })
+    activeItems.mockResolvedValue({ data: [], clase: 'servidor', code: null })
+
+    const r = montarCon(null)
+    await waitFor(() => expect(addItem).toHaveBeenCalled())
+    await waitFor(() => expect(activeItems).toHaveBeenCalled())
+
+    expect(avisoTexto(r), 'la relectura falló y la pantalla se quedó muda')
+      .toBeTruthy()
+  })
+})
+
+/**
+ * Spec B / iteración 2 — Lo que el refactor rompió, medido contra `HEAD`.
+ */
+describe('Spec B · el refactor no puede perder lo que la capa derivada hacía sola', () => {
+  /**
+   * DoD 1 / R1 — El efecto viejo llevaba `[loadClase, sinRed]`. Con la red
+   * parpadeando al arrancar —«1 de cada 3 arranques», lo dice este mismo
+   * fichero— `avisar` refina a `red` y no arranca nada; cuando la red vuelve
+   * tiene que rearmarse alguien.
+   */
+  it('iter2 DoD 1: con la red volviendo, la carga fallida se relee', async () => {
+    vi.useFakeTimers()
+    try {
+      sinRedAhora = true
+      activeItems.mockResolvedValue({ data: [fila('llegada')], clase: null, code: null })
+      montarCon('servidor')
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_500) })
+      expect(activeItems, 'sin red no debe sondear al servidor').not.toHaveBeenCalled()
+
+      await ponerSinRed(false)
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_500) })
+      expect(activeItems, 'volvió la red y no se rearmó nadie: la lista se queda vacía')
+        .toHaveBeenCalled()
+    } finally { vi.useRealTimers(); sinRedAhora = false }
+  })
+
+  /**
+   * DoD 2 y 3 / R2 — El aviso derivado se apagaba solo cuando `loadClase` dejaba
+   * de venir. `notice` es estado: si nadie lo retira, queda sobre una lista
+   * fresca. Para `servidor` el bucle lo tapa en ≤23 s; para estas dos, nada.
+   */
+  it.each<[Clase, string]>([
+    ['sin-acceso', 'DoD 2'],
+    ['sesion', 'DoD 3'],
+  ])('iter2 %s (%s): una clase que se resuelve retira su aviso', async (clase) => {
+    const r = montarCon(clase)
+    await waitFor(() => expect(r.queryByTestId('notice')).not.toBeNull())
+    await act(async () => { r.rerender(vista(null)) })
+    await waitFor(() => expect(r.queryByTestId('notice'),
+      'la carga se resolvió y el aviso sigue en pantalla sobre una lista buena').toBeNull())
+    expect(r.queryByTestId('volver-a-entrar'),
+      'el callejón de «Volver a entrar» con la sesión ya buena').toBeNull()
+  })
+
+  /**
+   * DoD 4 / R3 — `envio` se invalida al desmontar (`:349`); `recuperacion` no.
+   * El DoD 15 no lo cubre: mide `addItem`, no `activeItems`.
+   */
+  it('iter2 DoD 4: tras desmontar, la recuperación deja de llamar', async () => {
+    vi.useFakeTimers()
+    try {
+      activeItems.mockResolvedValue({ data: [], clase: 'servidor', code: null })
+      const r = montarCon('servidor')
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_500) })
+      const antes = activeItems.mock.calls.length
+      expect(antes, 'no llegó a sondear').toBeGreaterThan(0)
+      r.unmount()
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+      expect(activeItems.mock.calls.length,
+        'la recuperación siguió llamando sobre un árbol muerto').toBe(antes)
+    } finally { vi.useRealTimers() }
+  })
+})
+
+/**
+ * Spec B / R3 reescrita — Anunciar y rearmar son dos disparadores. Los tres
+ * tests de abajo atacan la vista, que es la capa que el requisito nombra: el
+ * mecanismo vive en efectos y estado del componente.
+ */
+describe('R3 reescrita · anunciar no es rearmar', () => {
+  /**
+   * DoD 1 / R3.3 — `loadClase` es una prop del render del servidor y NO cambia
+   * cuando la recuperación resuelve dentro del componente. Sin una marca de
+   * resuelta, «resuelta» y «aún no anunciada» son el mismo estado, y el
+   * siguiente parpadeo repone el aviso sobre una lista buena. Es I6 otra vez.
+   */
+  it('r3bis DoD 1: resuelta la carga, un parpadeo de red no repone el aviso', async () => {
+    vi.useFakeTimers()
+    try {
+      activeItems.mockResolvedValue({ data: [fila('llegada')], clase: null, code: null })
+      const r = montarCon('servidor')
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_500) })
+      expect(r.queryByTestId('notice'),
+        'la recuperación trajo la lista y el aviso sigue puesto').toBeNull()
+
+      await ponerSinRed(true)
+      await act(async () => { await vi.advanceTimersByTimeAsync(50) })
+      expect(r.queryByTestId('notice'),
+        'irse la red repuso un aviso sobre una lista ya traída').toBeNull()
+
+      await ponerSinRed(false)
+      await act(async () => { await vi.advanceTimersByTimeAsync(50) })
+      expect(r.queryByTestId('notice'),
+        'volver la red repuso «el servicio está despertando» sobre una lista buena').toBeNull()
+    } finally { vi.useRealTimers(); sinRedAhora = false }
+  })
+
+  /**
+   * RETIRADA (spec del reducer, §2b) — «r3bis DoD 2». Mismo montaje y mismo motivo
+   * que la de arriba; las dos caen por la misma causa, contada mal como una.
+   */
+
+
+  /**
+   * DoD 2b / R3.2 y R3.3 — La otra mitad de las dos puertas: se **reinician**
+   * cuando la carga deja de fallar. Sin el reinicio, una segunda carga fallida de
+   * la MISMA clase se queda callada, porque sigue pareciendo la ya anunciada o la
+   * ya resuelta. Es J7 por la puerta de al lado: aquel test usa una clase
+   * distinta para el segundo fallo, así que no lo mira. Lo encontró la pasada de
+   * mutación del ítem 7 — quitar el reinicio dejaba la suite entera verde.
+   */
+  it('r3bis DoD 2b: recuperada una carga, otra igual que falla vuelve a anunciarse', async () => {
+    vi.useFakeTimers()
+    try {
+      activeItems.mockResolvedValue({ data: [fila('llegada')], clase: null, code: null })
+      const r = montarCon('servidor')
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_500) })
+      expect(r.queryByTestId('notice')).toBeNull()
+
+      // La carga se resolvió...
+      await act(async () => { r.rerender(vista(null)) })
+      // ...y el servicio se vuelve a dormir: mismo fallo, otra vez.
+      await act(async () => { r.rerender(vista('servidor')) })
+      expect(r.queryByTestId('notice')?.textContent ?? '',
+        'el segundo fallo de la misma clase no se anunció: la lista se queda vieja y callada')
+        .toContain('despertando')
+    } finally { vi.useRealTimers() }
+  })
+
+  /**
+   * RETIRADA (iteración 1 del reducer, R3) — «r3bis DoD 2c». Existía para vigilar el
+   * reinicio de `cargaAnunciada`, y esa ref está muerta y borrada. Medido: ninguna
+   * mutación la pone roja —ni quitar el reinicio de `cargaResuelta`, que caza la 2b,
+   * ni quitar la puerta de resuelta, que caza la DoD 1—. El comportamiento que decía
+   * vigilar —una segunda carga fallida de la misma clase se anuncia— sigue siendo
+   * cierto, pero ahora **por construcción**: sin comparación previa, el disparador
+   * anuncia siempre que corre, así que no queda mecanismo que quitarle. Un test que
+   * no puede fallar ocupa el sitio del que sí probaría (§E.3).
+   */
+
+
+  /**
+   * DoD 3 / R3.4 — La regla de prioridad, punto 1: una escritura de carga sólo
+   * aterriza sobre un hueco vacío o sobre otro aviso de carga. Con la capa
+   * derivada esto era estructural (`notice ?? derivado`: el estado siempre
+   * ganaba); con un solo hueco y diez escritores lo decide el orden de llegada.
+   */
+  it('r3bis DoD 3: un parpadeo de red no pisa el aviso de una mutación', async () => {
+    activeItems.mockResolvedValue({ data: [], clase: 'servidor', code: null })
+    softDeleteItem.mockResolvedValue({ data: 0, clase: null, code: null })
+    const r = render(vista('servidor', [fila('leche')]))
+    await act(async () => { fireEvent.click(r.getByTestId('delete-item')) })
+    await waitFor(() => expect(r.getByTestId('notice').textContent).toContain(GONE))
+
+    await ponerSinRed(true)
+    await ponerSinRed(false)
+    expect(r.getByTestId('notice').textContent,
+      'el parpadeo pisó el aviso de la mutación con el de la carga').toContain(GONE)
+  })
+
+  /**
+   * DoD 5 / R3.5 — La relectura del drenado la contesta el servidor que acaba de
+   * aceptar el envío: no hay nada que reintentar. Anunciar su fallo por `avisar`
+   * arrancaba además un bucle de carga encima del de envío — el doble bucle que
+   * `N4` ya quitó una vez.
+   */
+  it('r3bis DoD 5: una relectura fallida del drenado no arranca el bucle de carga', async () => {
+    vi.useFakeTimers()
+    try {
+      cola = [pendiente('leche', 0)]
+      colaViva()
+      addItem.mockResolvedValue({ data: fila('leche'), clase: null, code: null })
+      activeItems.mockResolvedValue({ data: [], clase: 'servidor', code: null })
+      montar()
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+      expect(activeItems.mock.calls.length,
+        'la relectura fallida arrancó el bucle de carga encima del de envío').toBe(1)
+    } finally { vi.useRealTimers() }
+  })
+})
+
+/**
+ * Spec B / R3 reescrita, iteración 2 — La regla de prioridad cubría las
+ * escrituras del mecanismo de carga y no sus retiradas; y el aviso que quedó tras
+ * quitar el rearme seguía prometiéndolo.
+ */
+describe('R3 reescrita · las retiradas también tienen dueño', () => {
+  /**
+   * DoD 1 / R4.1 — `limpiarAviso()` dentro de `reintentar` es un cuarto escritor
+   * del hueco, del mecanismo de carga, y se llevaba por delante el aviso de una
+   * mutación. La puerta la abrió R1 al separar las generaciones; R3.4 la cerró
+   * sólo del lado de la escritura.
+   */
+  it('r3bis-2 DoD 1: la recuperación no se lleva el aviso de una mutación', async () => {
+    vi.useFakeTimers()
+    try {
+      activeItems.mockResolvedValue({ data: [fila('llegada')], clase: null, code: null })
+      softDeleteItem.mockResolvedValue({ data: 0, clase: null, code: null })
+      const r = render(vista('servidor', [fila('leche')]))
+      await act(async () => { fireEvent.click(r.getByTestId('delete-item')) })
+      expect(r.getByTestId('notice').textContent).toContain(GONE)
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_500) })
+      expect(r.queryByTestId('notice')?.textContent ?? '',
+        'la recuperación borró el aviso de la mutación que el usuario acababa de provocar')
+        .toContain(GONE)
+    } finally { vi.useRealTimers() }
+  })
+
+  /**
+   * DoD 2 / R4.2 — `SERVIDOR` dice «lo reintentamos solo». Tras R3.5 ese camino
+   * ya no reintenta, así que el mensaje miente. Su gemelo de `:716` dice la
+   * verdad para el mismo hecho desde el ciclo de la deuda 34.
+   */
+  it('r3bis-2 DoD 2: la relectura fallida del drenado no promete un reintento', async () => {
+    vi.useFakeTimers()
+    try {
+      cola = [pendiente('leche', 0)]
+      colaViva()
+      addItem.mockResolvedValue({ data: fila('leche'), clase: null, code: null })
+      activeItems.mockResolvedValue({ data: [], clase: 'servidor', code: null })
+      const r = montar()
+      await act(async () => { await vi.advanceTimersByTimeAsync(500) })
+      expect(r.queryByTestId('notice')?.textContent ?? '',
+        'promete un reintento que ya no existe').toContain(RELECTURA)
+    } finally { vi.useRealTimers() }
+  })
+
+  /**
+   * DoD 3 / R4.3 — El disparador de rearme no miraba `cargaResuelta`, así que
+   * rearmaba con cada parpadeo durante toda la vida de la pestaña.
+   */
+  it('r3bis-2 DoD 3: resuelta la carga, un parpadeo no vuelve a sondear', async () => {
+    vi.useFakeTimers()
+    try {
+      activeItems.mockResolvedValue({ data: [fila('llegada')], clase: null, code: null })
+      montarCon('servidor')
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_500) })
+      const antes = activeItems.mock.calls.length
+      expect(antes, 'no llegó a recuperarse').toBe(1)
+
+      await ponerSinRed(true)
+      await ponerSinRed(false)
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_500) })
+      expect(activeItems.mock.calls.length,
+        'un parpadeo rearmó una carga que ya estaba resuelta').toBe(antes)
+    } finally { vi.useRealTimers(); sinRedAhora = false }
+  })
+
+  /**
+   * DoD 4 / R4.3 — Y no invalidaba el bucle en vuelo al irse la red: seguía
+   * sondeando a un servidor inalcanzable hasta agotar sus cinco esperas.
+   */
+  it('r3bis-2 DoD 4: al irse la red, la recuperación en vuelo para', async () => {
+    vi.useFakeTimers()
+    try {
+      activeItems.mockResolvedValue({ data: [], clase: 'servidor', code: null })
+      montarCon('servidor')
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_500) })
+      const antes = activeItems.mock.calls.length
+      expect(antes, 'no llegó a sondear').toBeGreaterThan(0)
+
+      await ponerSinRed(true)
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+      expect(activeItems.mock.calls.length,
+        'siguió sondeando al servidor con la red caída').toBe(antes)
+    } finally { vi.useRealTimers(); sinRedAhora = false }
+  })
+})
+
+/**
+ * Spec del reducer — Lo que el principio de «sucesos y estados» cambia, visto donde
+ * el usuario lo ve. La tabla vive en `unit/aviso.test.ts`; esto es la superficie que
+ * el requisito promete (§E.1).
+ */
+describe('el reducer del aviso · visto en la pantalla', () => {
+  /**
+   * DoD 3 — El usuario acaba de hacer un gesto y espera leer su resultado. Una
+   * lista rancia es un estado; un borrado fallido es un suceso.
+   */
+  it('reducer DoD 3: una relectura fallida del drenado no pisa el aviso de un borrado', async () => {
+    vi.useFakeTimers()
+    try {
+      cola = [pendiente('leche', 0)]
+      colaViva()
+      addItem.mockResolvedValue({ data: fila('leche'), clase: null, code: null })
+      activeItems.mockResolvedValue({ data: [], clase: 'servidor', code: null })
+      softDeleteItem.mockResolvedValue({ data: 0, clase: null, code: null })
+      const r = render(vista(null, [fila('arroz')]))
+      await act(async () => { fireEvent.click(r.getByTestId('delete-item')) })
+      expect(r.getByTestId('notice').textContent).toContain(GONE)
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(500) })
+      expect(r.queryByTestId('notice')?.textContent ?? '',
+        'la relectura pisó el aviso del gesto que el usuario acababa de hacer').toContain(GONE)
+    } finally { vi.useRealTimers() }
+  })
+
+  /**
+   * La pidió la pasada de mutación del ítem 8: quitar la invalidación de
+   * `recMutacion` al desmontar dejaba las 103 en verde. Su gemela para la
+   * recuperación de carga existe desde la iteración 2; ésta nació con la
+   * generación nueva y llegó sin vigilancia. Es la cicatriz N3 por el otro lado.
+   */
+  it('reducer DoD 3b: tras desmontar, la recuperación de una mutación deja de llamar', async () => {
+    vi.useFakeTimers()
+    try {
+      activeItems.mockResolvedValue({ data: [], clase: 'servidor', code: null })
+      softDeleteItem.mockResolvedValue({ data: null, clase: 'servidor', code: '' })
+      const r = render(vista(null, [fila('arroz')]))
+      await act(async () => { fireEvent.click(r.getByTestId('delete-item')) })
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_500) })
+      const antes = activeItems.mock.calls.length
+      expect(antes, 'el borrado fallido no arrancó la recuperación').toBeGreaterThan(0)
+
+      r.unmount()
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+      expect(activeItems.mock.calls.length,
+        'la recuperación de la mutación siguió llamando sobre un árbol muerto').toBe(antes)
+    } finally { vi.useRealTimers() }
+  })
+
+  /**
+   * DoD 4 — «Un alta que sale bien no borra *ya no tienes acceso a este grupo*,
+   * porque eso sigue siendo cierto.» Decisión del usuario, 2026-09-14.
+   */
+  it('reducer DoD 4: un alta con éxito no borra la condición de carga', async () => {
+    const r = montarCon('sin-acceso')
+    expect(r.getByTestId('notice').textContent).toContain(SIN_ACCESO)
+
+    fireEvent.change(r.getByTestId('item-name'), { target: { value: 'pan' } })
+    await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
+    expect(r.queryByTestId('notice')?.textContent ?? '',
+      'la operación con éxito se llevó una condición que sigue siendo cierta').toContain(SIN_ACCESO)
+  })
+
+  /**
+   * DoD 5 — El hueco por el que entró el CRITICAL: la Spec B declaró que quitar el
+   * lanzamiento de `avisar` pondría roja una prueba, y esa guarda caducó. Se prueba
+   * por el camino donde falla — una mutación, no la carga— y **tras un parpadeo**.
+   */
+  it('reducer DoD 5: un borrado fallido con servidor arranca la recuperación, y sobrevive a un parpadeo', async () => {
+    vi.useFakeTimers()
+    try {
+      activeItems.mockResolvedValue({ data: [], clase: 'servidor', code: null })
+      softDeleteItem.mockResolvedValue({ data: null, clase: 'servidor', code: '' })
+      const r = render(vista(null, [fila('arroz')]))
+      await act(async () => { fireEvent.click(r.getByTestId('delete-item')) })
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_500) })
+      const armado = activeItems.mock.calls.length
+      expect(armado, 'el borrado fallido no arrancó la recuperación').toBeGreaterThan(0)
+
+      await ponerSinRed(true)
+      await ponerSinRed(false)
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+      expect(activeItems.mock.calls.length,
+        'un parpadeo mató la recuperación de una mutación, y el aviso sigue prometiéndola')
+        .toBeGreaterThan(armado)
+    } finally { vi.useRealTimers(); sinRedAhora = false }
+  })
+})
+
+/**
+ * Spec «el eje que faltaba es la duración» — El fallo medido, visto donde el usuario
+ * lo ve: abrir con la carga fallida y la cola caducada borraba el aviso de que se
+ * habían descartado productos, que es la única señal de que desaparecieron.
+ */
+describe('duración · lo de una vez tapa el nivel, no lo borra', () => {
+  it('duracion DoD 2: con la carga fallida, el aviso de apertura se ve igual', async () => {
+    cola = [pendiente('viejo', 40 * 60 * 60 * 1000)]
+    colaViva()
+    const r = montarCon('sin-acceso')
+    await waitFor(() => expect(quitarDeCola).toHaveBeenCalled())
+    await act(async () => {})
+    expect(r.queryByTestId('notice')?.textContent ?? '',
+      'la condición de carga se tragó la única señal de que el producto se descartó')
+      .toContain('descart')
+  })
+
+  it('duracion DoD 2b: y leído ese aviso, la condición de carga sigue debajo', async () => {
+    cola = [pendiente('viejo', 40 * 60 * 60 * 1000)]
+    colaViva()
+    const r = render(vista('sin-acceso', [fila('arroz')]))
+    await waitFor(() => expect(quitarDeCola).toHaveBeenCalled())
+    softDeleteItem.mockResolvedValue({ data: 1, clase: null, code: null })
+    await act(async () => { fireEvent.click(r.getAllByTestId('delete-item')[0]) })
+    await waitFor(() => expect(r.queryByTestId('notice')?.textContent ?? '',
+      'el aviso de apertura se fue y no quedó la condición de carga debajo')
+      .toContain(SIN_ACCESO))
+  })
+})
+
+/**
+ * Duración / lista 2 — La retirada del aviso de la cola dejó de estar vigilada al
+ * pasar `cola` a nivel: la relectura ya no lo **sobrescribe**, lo **tapa**, así que
+ * quitar la retirada no se nota mientras el aviso de una vez esté delante. Se nota
+ * en cuanto se lee, y lo que queda debajo es mentira: la cola está vacía.
+ *
+ * El aviso de la cola tiene que nacer del gesto del usuario —apuntar sin red—, no
+ * de sembrar el array: sembrado, nadie lo escribe y el test no puede fallar.
+ */
+describe('duración · la cola vaciada retira su aviso aunque haya otro encima', () => {
+  /**
+   * CORRECCIÓN (2026-09-15) — Aquí decía que las dos retiradas del aviso de la cola
+   * estaban sin vigilar. **Era falso**, y salió de un instrumento roto: el `perl` de
+   * la pasada de mutación exigía doce espacios de sangría y una de las dos líneas
+   * tenía diez, así que borraba una creyendo borrar dos. Las dos eran guardias vivos.
+   *
+   * Ya no existen: las sustituyó una sola retirada en la rama `!p` del drenado, que
+   * las subsume por construcción y además cubre el caso que ninguna cubría —otra
+   * pestaña vaciando la cola compartida—. Lo vigila «duracion-it1 DoD 1».
+   */
+  it('duracion DoD 3: vaciada la cola, no queda aviso', async () => {
+    vi.useFakeTimers()
+    try {
+      colaViva()
+      // El aviso de la cola nace cuando el envío falla con `servidor`, no en el
+      // camino sin red: sembrar el array no lo escribe y el test no podría fallar.
+      addItem.mockResolvedValueOnce({ data: null, clase: 'servidor', code: null })
+      addItem.mockResolvedValue({ data: fila('leche'), clase: null, code: null })
+      activeItems.mockResolvedValue({ data: [fila('leche')], clase: null, code: null })
+      const r = montar()
+      fireEvent.change(r.getByTestId('item-name'), { target: { value: 'leche' } })
+      await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
+      expect(r.queryByTestId('notice'), 'el envío fallido no dejó aviso de cola').not.toBeNull()
+      // `encolar` es un doble que no empuja al array: sin esto el drenado no
+      // encuentra nada, `envioHecho` se queda en falso y el test no prueba nada.
+      cola = [...cola, encolar.mock.calls[0][0] as Pendiente]
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(25_000) })
+      expect(r.queryByTestId('notice'),
+        'la cola se vació y su aviso sigue: con `cola` como nivel, nada lo sobrescribe')
+        .toBeNull()
+    } finally { vi.useRealTimers() }
+  })
+})
+
+/**
+ * Iteración 1 de la duración — Lo que `cola` como nivel cambió, y lo que abrió.
+ */
+describe('duración · el aviso de la cola no sobrevive a su condición', () => {
+  /**
+   * DoD 2 / R2 — La puerta que abrió pasar `cola` a nivel: la relectura fallida ya
+   * no lo **sobrescribe**, lo **tapa**. Si nadie lo retira al vaciar la cola, una
+   * operación con éxito se lleva lo de una vez y el de la cola **resucita** sobre
+   * una cola ya vacía. Es lo que `GroupView.tsx:461` impide.
+   */
+  it('duracion-it1 DoD 2: tras una relectura fallida y un alta buena, el aviso de la cola no resucita', async () => {
+    vi.useFakeTimers()
+    try {
+      colaViva()
+      addItem.mockResolvedValueOnce({ data: null, clase: 'servidor', code: null })
+      addItem.mockResolvedValue({ data: fila('leche'), clase: null, code: null })
+      // La relectura del drenado falla: su aviso tapa al de la cola.
+      activeItems.mockResolvedValue({ data: [], clase: 'servidor', code: null })
+      const r = montar()
+      fireEvent.change(r.getByTestId('item-name'), { target: { value: 'leche' } })
+      await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
+      cola = [...cola, encolar.mock.calls[0][0] as Pendiente]
+      await act(async () => { await vi.advanceTimersByTimeAsync(25_000) })
+      expect(r.queryByTestId('notice')?.textContent ?? '').toContain(RELECTURA)
+
+      // Y ahora una operación que va bien: se lleva lo de una vez.
+      fireEvent.change(r.getByTestId('item-name'), { target: { value: 'pan' } })
+      await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
+      await act(async () => { await vi.advanceTimersByTimeAsync(50) })
+      // El aviso de la cola, con red, pinta el texto de `servidor`: buscar «volver
+      // la red» no distinguiría nada. Se comprueba que NO queda nada, que es lo que
+      // toca con la cola vacía y la última operación correcta.
+      expect(r.queryByTestId('notice')?.textContent ?? 'NINGUNO',
+        'el aviso de la cola resucitó con la cola ya vacía').toBe('NINGUNO')
+    } finally { vi.useRealTimers() }
+  })
+
+  /**
+   * RETIRADOS (2026-09-15) — «duracion-it1 DoD 1» y «DoD 1b» vigilaban que, si otra
+   * pestaña vacía la cola compartida, ésta retire su aviso y sus fichas. El
+   * comportamiento es real y el defecto también, pero **no es de esta spec**: sale
+   * de derivar la pantalla de un estado durable que cambia sin avisar, y el arreglo
+   * que se intentó aquí derivaba de una copia de la cola leída antes de tres
+   * `await` — borraba la ficha de lo apuntado sin red mientras seguía en la cola,
+   * medido 3/3.
+   *
+   * Los dos casos se conservan como la primera comprobación en rojo de la spec
+   * «pantalla y estado durable», que es donde el problema tiene su sitio.
+   */
 })

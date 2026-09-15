@@ -1,189 +1,132 @@
 # Specs
 
-Queda un documento: la **Spec B**, **sin sellar**. No lleva marcador `ACTIVE` y no
-entra en el bucle hasta que `/spec` la verifique contra la base y la selle.
+No queda ninguna spec sellada: el fichero sólo lleva trabajo vivo, y el registro de lo
+construido está en `docs/CHECKPOINT.md`.
 
-Las dos anteriores se construyeron y se cerraron el 2026-09-13, y su registro está
-en `docs/CHECKPOINT.md`:
-
-- **Spec A** — «la puerta no pasa con avisos del linter». Cerró la deuda 46.
-- **Spec C** — «la cáscara sin red». Cerró la deuda 53, y su motivo era el orden:
-  al recargar sin cobertura dentro de un grupo el service worker sirve la cáscara,
-  así que el mecanismo que la **B** viene a depurar no está montado. Por eso fue
-  primero.
+La **Spec B** y sus seis iteraciones —el ciclo de vida de aviso-y-recuperación, hasta
+el eje de la duración— se cerraron el 2026-09-15. Cerraron las deudas 40 a 45 y siete
+de las nueve vueltas de ese mecanismo. Las otras dos resultaron ser otro problema, y es
+el borrador de abajo.
 
 ---
 
-# Spec B — el ciclo de vida de aviso-y-recuperación
+# BORRADOR — Pantalla y estado durable
 
-*(sin sellar: espera a que la Spec A esté construida)*
+**SIN SELLAR. Sin marcador.** No entra en el bucle hasta que el usuario lo revise.
+Cero secciones ACTIVE: no hay nada en construcción.
 
-## Objetivo
+## 1. El problema, en una frase
 
-Desacoplar el mecanismo, no parchearlo. Cierra las entradas **40, 41, 42 y 43**
-de `docs/TECHNICAL_DEBT.md`, que son el mismo problema visto por cuatro sitios.
+La cola de pendientes vive en IndexedDB —durable, compartida por todas las instancias—
+y lo que el usuario ve de ella vive en memoria de una sola. **Nada avisa cuando la cola
+cambia**, así que la pantalla sólo es correcta mientras nadie más escriba y mientras
+quien deriva lo haga sobre una lectura fresca. Las dos cláusulas son falsas hoy.
 
-## Contexto verificado
+Sale de las dos últimas vueltas del ciclo de avisos, que **no eran de aquel mecanismo**:
+siete de nueve se reproducían con un solo montaje, y estas dos no. El registro de esa
+clasificación está en `docs/CHECKPOINT.md`.
 
-El diagnóstico salió de las cinco revisiones del ciclo de la deuda 34, donde
-cuatro iteraciones seguidas abrieron una regresión en el mismo sitio. **Se ha
-vuelto a verificar contra el código de hoy**, que cambió con el arreglo de la 34.
-Las tres piezas siguen en pie, y una es peor de lo que se describió.
+## 2. Los tres caminos medidos
 
-**Pieza 1 — `secuencia` no sella dos cosas, sella tres.** Medido: los avisos
-(`avisarTexto`, `limpiarAviso`), el **afinado por sesión** del `42501`, y el
-reintento de **carga**. Un `limpiarAviso()` mata las tres. La descripción original
-decía dos.
-
-**Pieza 2 — `avisar` acopla mensaje con bucle.** Sigue exacta: para clase
-`servidor` lanza `reintentar` además de pintar. De ahí salió la regresión I1 —
-quitarlo de una rama se llevó por delante la recuperación de la lista, y nada lo
-dijo.
-
-**Pieza 3 — `loadClase` es una prop.** Confirmado: la pasa el servidor en cada
-render (`app/g/[id]/page.tsx:42`), se usa en ocho sitios, y el propio componente
-lo documenta. El arreglo de la 34 la metió en las dependencias de **un** sitio; el
-resto sigue como estaba.
-
-**Lo que el arreglo de la 34 sí cambió, y sirve de precedente:** el reintento de
-**envío** ya tiene su generación propia (`envio`). La separación que esta spec
-propone no es nueva: es terminar la que ya se empezó.
-
-**Radio medido, y por eso es acotable:** el mecanismo entero vive en
-`app/g/[id]/GroupView.tsx` — `avisar` 5 sitios, `avisarTexto` 12, `limpiarAviso`
-9, ninguno fuera. El traductor está en `lib/errors.ts` y no se toca.
-
-## Lo que NO debe cambiar, y qué lo fija hoy
-
-Es un refactor de mecanismo, y la forma de que salga mal es que algo que hoy
-funciona deje de hacerlo sin que ningún test lo note. Cada comportamiento va con
-la prueba que lo sostiene, comprobada el 2026-09-12 — **los siete tienen una**,
-así que ninguno queda desprotegido.
-
-| # | Comportamiento | Lo fija |
-|---|---|---|
-| 1 | Una mutación denegada pinta su aviso; una que va bien no deja ninguno | `unit/notice-render.test.tsx:83` «una mutacion denegada pinta el aviso» y `:102` «una mutacion que va bien no deja aviso» |
-| 2 | El aviso se limpia en la siguiente operación con éxito | `unit/notice-render.test.tsx:109` «el aviso se limpia en la siguiente operacion con exito» |
-| 3 | El afinado por sesión distingue el `42501` «no traes token» del «tu token no basta», y el aviso aparece aunque la consulta de sesión cuelgue | `unit/avisos.test.tsx:102` «un 42501 con sesión sigue diciendo que no hay acceso, y NO ofrece entrar», `:224` «con getSession colgado, el aviso aparece igual» y `:237` «y cuando responde que no hay sesión, el aviso se afina» |
-| 4 | Un servicio pausado despierta solo, sin que nadie pulse | `unit/drenado.test.tsx:176` «DoD 26: trae la lista y retira el aviso sin que nadie pulse» |
-| 5 | El aviso distingue la red del usuario del servidor de datos | `e2e/sin-red.spec.ts:202` «DoD 1 y 2: el aviso distingue tu red del servidor de datos» |
-| 6 | La cola sin red entera: apuntar y que llegue al volver, seis seguidas sin duplicar, sobrevivir a cerrar la app, y caducar a las 24 h | `e2e/sin-red.spec.ts:75`, `:109`, `:133` y `:287` |
-| 7 | Tras drenar no queda aviso mintiendo, y tras desmontar no hay más llamadas | `unit/drenado.test.tsx:589` «DoD 13: tras drenar no queda aviso mintiendo en pantalla» y `:620` «DoD 15: tras desmontar, el reintento no sigue llamando» |
-
-## Requisitos
-
-**R1 — Cada generación sella una sola cosa.**
-*Mecanismo:* `secuencia` se divide en `secuenciaAviso` —avisos y afinado por
-sesión, que son la misma conversación con el usuario— y `recuperacion` —el
-reintento de carga—. `envio` se queda como está.
-*Rojo si se revierte:* el ítem 1.
-
-**R2 — `avisar` sigue arrancando la recuperación, pero sellada aparte.** Decisión
-del usuario: mantener el arranque automático. Que cada uno de los cinco sitios
-decida es el desacople más puro y también la forma exacta en que nació I1 —
-olvidarse en uno.
-*Mecanismo:* `avisar` lanza `reintentar` sellado por `recuperacion`, no por la
-generación de avisos.
-*Rojo si se revierte:* los ítems 1 y 2.
-
-**R3 — Un solo origen para el aviso visible.** Decisión del usuario: colapsar las
-dos capas. Hoy `avisoVisible` es el estado `notice` **o** uno derivado de
-`loadClase` mientras `resueltaPara` no lo cancele; de esa doble fuente salió la
-deuda 40.
-*Mecanismo:* la clase que trae el servidor se convierte en un aviso normal, y
-`resueltaPara` desaparece. Un cambio de `loadClase` posterior al montaje produce
-un aviso nuevo; que no cambie no lo repone.
-*Rojo si se revierte:* el ítem 3.
-
-**R4 — La prop se lee viva en todos los sitios, no en uno.**
-*Mecanismo:* el mismo que el arreglo de la 34 usó en el drenado, aplicado al
-resto: dependencias correctas, o una ref viva donde se lea dentro de un manejador
-asíncrono.
-*Rojo si se revierte:* el ítem 4.
-
-**R5 — El refinado por red se aplica a los cuatro caminos, no a uno.** Deuda 43:
-`sinRedVivo` sólo lo usa la rama de la cola; la edición y el borrado siguen
-diciendo «el servicio está despertando» a quien acaba de quedarse sin conexión.
-*Mecanismo:* `avisar` refina con la red viva.
-*Rojo si se revierte:* los ítems 5 y 6, uno por camino.
-
-**R6 — El aviso se retira después de saber, no antes.** Deuda 40: la limpieza va
-antes de la relectura, así que una relectura fallida puede dejar la pantalla sin
-ninguna señal.
-*Mecanismo:* invertir el orden; la limpieza ocurre en la rama que confirmó.
-*Rojo si se revierte:* el ítem 7, que cubre el hueco por el que la prueba actual
-pasa verde (deuda 45).
-
-## Restricción de orden
-
-**R1 y R2 tienen que llegar juntos, y en el mismo cambio.** Razonado sobre el
-código, no supuesto:
-
-- R1 sin R2: `avisar` seguiría lanzando el reintento con la generación de avisos,
-  que ya no sella el reintento — el bucle quedaría sin quien lo mate, o muerto a
-  destiempo.
-- R2 sin R1: el reintento seguiría sellado por la generación de avisos, así que
-  limpiar un aviso lo mataría. **Es exactamente la regresión I1.**
-
-Cada mitad por separado deja el sistema peor que hoy. R3 a R6 sí pueden llegar
-después, cada una por su cuenta.
-
-## Casos borde
-
-| # | Caso | Qué pasa | Cómo se comprueba |
+| # | Camino | Qué pasa | ¿Cuándo |
 |---|---|---|---|
-| 1 | Limpiar un aviso con un reintento de carga en vuelo | El reintento sobrevive | Ítem 1 |
-| 2 | `loadClase` cambia tras el montaje | Produce un aviso nuevo | Ítem 4 |
-| 3 | `loadClase` sigue igual tras retirar el aviso | No lo repone | Ítem 3 |
-| 4 | Relectura fallida con `loadClase` nula | Queda señal en pantalla | Ítem 7 |
-| 5 | Red cayendo durante una edición | Se culpa a la red, no al servidor | Ítem 5 |
-| 6 | Red cayendo durante un borrado | Ídem | Ítem 6 |
-| 7 | Afinado por sesión en vuelo cuando se limpia el aviso | Se cancela, como hoy | Razón escrita: es comportamiento que **no** debe cambiar, fila 3 de la tabla de arriba, y lo fija `unit/avisos.test.tsx:237`. Cubierto por el ítem 8 |
-| 8 | Servicio pausado sin que nadie pulse | Despierta solo | Ítem 2 |
-| 9 | Desmontar con recuperación en vuelo | No hay más llamadas | Razón escrita: lo cerró el ciclo de la deuda 34 y lo fija `unit/drenado.test.tsx:620`. Cubierto por el ítem 8 |
+| 1 | `drenarUnaVez` deriva de `cola` leída en `:406` y usada tras tres `await` | La rama sin red de `onAdd` es la única que encola **sin** tocar `envio.current`, así que la guarda de generación no dispara. El bucle termina sobre su instantánea vieja | **Reproducido 3/3 con UNA instancia.** Era el CRITICAL de la novena vuelta; el arreglo se retiró y por eso hoy no está en el árbol |
+| 2 | Nadie vuelve a mirar la cola tras el bucle | `reintentarEnvio` es lo único que la relee y sus esperas suman 23 s (`lib/errors.ts`). Si otra instancia la vacía después, el aviso «se enviará al volver la red» se queda para siempre sobre una cola vacía | **Reproducido 2/2 en navegador con dos pestañas reales** |
+| 3 | `meterEnCola` lee la cola en `:340`, decide «duplicado» con `decidirEncolar`, y escribe tras `await encolar` en `:357` | Dos altas concurrentes pasan las dos el chequeo de duplicado | **Anterior a este ciclo.** No medido en ejecución: entra como `[ASSUMPTION]` de §7 |
 
-## Fuera de alcance, por su nombre
+## 3. Qué no existe hoy, verificado
 
-Esto es un refactor de mecanismo entrelazado, que es la clase de spec que se
-ensancha sola. Lo que **no** entra:
+- **IndexedDB no emite eventos de cambio.** `lib/local.ts` es `get`/`put` plano sobre
+  `conTienda`; no hay observador posible en la API.
+- **Cero `BroadcastChannel`** en el árbol de la app.
+- **Cero listeners de `storage`** — y no servirían: son de `localStorage`, no de
+  IndexedDB.
+- El único precedente de «volver a mirar» es `app/sin-conexion/page.tsx:227`, con
+  `visibilitychange`, y es para su propio sondeo.
 
-- **`lib/errors.ts`.** El traductor no se toca: clasifica, y eso funciona.
-- **Qué dice cada mensaje.** Ni los textos ni las clases cambian.
-- **El comportamiento de la cola.** Encolar, drenar, orden, caducidad e
-  idempotencia se quedan exactamente como los dejó el ciclo de la deuda 34.
-- **La deuda 44** (`setNotice` suelto en el drenado). Hoy es inalcanzable, y lo
-  que la haría alcanzable es quitar una guarda que esta spec no toca.
-- **La deuda 45** (la prueba del DoD 26, menos específica que su nombre) entra
-  **sólo** como la mitad que R6 necesita, no como revisión de la suite.
-- **Extraer el mecanismo a un hook o a un módulo propio.** Puede ser la salida
-  correcta, pero es una decisión distinta y no se toma desde aquí.
-- **Los caminos de edición y borrado**, más allá del refinado por red de R5.
+**Y hay un segundo escritor de la cola fuera de este componente:** la cáscara sin red
+encola en `app/sin-conexion/page.tsx:277`. Cualquier mecanismo que se elija tiene que
+contarla, o nace incompleto.
 
-## Definición de Hecho
+## 4. Las dos formas, medidas — y el hallazgo: no son alternativas
 
-| # | Comprobación | Capa | Por qué no puede estar verde antes | Rojo si se revierte |
-|---|---|---|---|---|
-| 1 | Limpiar un aviso no mata un reintento de carga en vuelo | vista | Hoy lo mata: una sola generación sella las tres cosas | Unir las generaciones lo pone rojo |
-| 2 | Tras un aviso de servidor, el servicio despierta solo | vista | `[REGRESIÓN]` — verde hoy; es la red de seguridad de R2 | Es lo que caza olvidarse del arranque |
-| 3 | Retirado el aviso, un `loadClase` sin cambiar no lo repone | vista | Hoy el derivado reaparece | Reponer la doble capa lo pone rojo |
-| 4 | Un `loadClase` que cambia tras el montaje produce aviso | vista | Hoy depende de qué sitio lo lea | Capturarlo al montar lo pone rojo |
-| 5 | Red cayendo en una edición: se culpa a la red | vista | Hoy dice «el servicio está despertando» | Quitar el refinado lo pone rojo |
-| 6 | Red cayendo en un borrado: se culpa a la red | vista | Ídem | Ídem |
-| 7 | Relectura fallida **con `loadClase` nula** deja señal en pantalla | vista | Hoy deja la pantalla muda, y la prueba actual no lo ve porque monta con la prop puesta | Volver a limpiar antes de releer lo pone rojo |
-| 8 | Los siete comportamientos de «lo que NO debe cambiar» siguen verdes, con las mismas diez pruebas que los fijan hoy | vista y navegador | `[REGRESIÓN]` — verdes de partida. No son progreso: son la verja del refactor, y si uno se pone rojo el refactor está mal | — |
-| 9 | `typecheck && lint && test && build` → EXIT=0 | terminal | `[REGRESIÓN]` | — |
+**Forma A — releer en cada punto donde se deriva.**
+*Coste:* una lectura de IndexedDB por derivación. Los puntos son tres: la retirada del
+aviso, la de las fichas, y el chequeo de duplicado de `meterEnCola`. `leerCola` es un
+`getAll` filtrado en memoria; se ejecuta ya cuatro veces en los caminos normales
+(`:340`, `:383`, `:406`, `:570`), así que añadir una o dos no cambia el orden de
+magnitud.
+*Qué arregla:* los caminos **1 y 3**.
+*Qué NO arregla:* el **2**. Releer no ayuda si nadie llega a releer: tras el bucle no
+queda ningún punto de derivación al que llegar.
 
-**Primera comprobación en rojo:** el ítem 1.
+**Forma B — notificación entre instancias (`BroadcastChannel`).**
+*Coste:* un canal, un listener y un `postMessage` por escritor. **Cero dependencias
+nuevas**: es API del navegador. Verificado que existe en `jsdom` y en `node`, así que
+es **probable con dos raíces en el arnés unitario**, sin navegador.
+*Qué arregla:* el **2**.
+*Qué NO arregla:* el **1**. Verificado ejecutando: `BroadcastChannel` **no entrega al
+que publica** (medido: `el emisor recibe su propio mensaje: false`), así que la
+escritura concurrente de la propia instancia no se notifica a sí misma. Y aunque lo
+hiciera, la instantánea local seguiría rancia: haría falta releer igual.
 
-## Suposiciones bloqueantes
+**La decisión, con su motivo: las dos, y en este orden.** No son dos opciones para el
+mismo defecto: cada una cubre un camino que la otra deja abierto, y eso está medido, no
+razonado. Elegir una sola sería cerrar la mitad y declarar el problema resuelto — que es
+exactamente el error que produjo las dos últimas vueltas.
 
-Ninguna. Las tres decisiones de diseño las tomó el usuario antes de escribir:
-generación propia con `avisar` lanzando, colapsar a una capa, y `--max-warnings`
-en spec aparte y antes que ésta.
+**A va primero** porque es la que evita **pérdida de señal para el usuario**: el camino 1
+borra de la pantalla algo que sigue pendiente de enviar, y si el usuario lo reescribe,
+`decidirEncolar` le contesta «ya está en la lista» sobre una pantalla donde no está. El
+camino 2 deja un aviso de más, que es mentira pero no esconde nada.
 
-## Aviso sobre el alcance
+**B va después y con `visibilitychange` como red**, porque un canal sólo entrega a
+quien está escuchando: una pestaña que se abre más tarde no recibe lo que se emitió
+antes. Al montar ya se relee (`:570`), así que el hueco real es la pestaña que estaba
+abierta y en segundo plano — y ésa sí recibe. `visibilitychange` cubre el caso de un
+mensaje perdido y el de un escritor que no publique.
 
-El alcance **sí se deja acotar**, y la medida que lo permite es que el mecanismo
-entero vive en un componente y no lo comparte nadie. Si al construir aparece la
-necesidad de tocar `lib/errors.ts` o de extraer un hook, eso no es parte de esta
-spec: es el hallazgo de que el acotamiento era falso, y vuelve a `/spec`.
+## 5. Requisitos
+
+**R1 — Toda derivación de la pantalla a partir de la cola parte de una lectura que no
+cruza un `await`.** Los tres caminos de §2.
+
+**R2 — Cuando otra instancia cambia la cola, ésta se entera.** Un canal por usuario;
+todo escritor publica —incluida la cáscara sin red—; quien recibe, **relee y re-deriva**,
+no aplica el mensaje. El mensaje es una señal de «mira otra vez», nunca un dato.
+
+**R3 — La señal sobrevive a no haberla oído.** Al volver la visibilidad se relee, por si
+el mensaje se perdió o lo escribió alguien que no publica.
+
+**R4 — El chequeo de duplicado deja de ser check-then-act.** Camino 3. La forma exacta
+se decide al sellar: puede ser releer justo antes de escribir, o una clave única en el
+almacén, que es lo que §D.2 prefiere.
+
+## 6. Fuera de alcance, por su nombre
+
+- **El mecanismo de avisos.** El reducer, la duración, el peso y la identidad en la
+  acción están cerrados y no se tocan. Esta spec **usa** `despachar`, no lo modifica.
+- **La lista de productos.** Sólo la cola de pendientes y lo que de ella se muestra.
+- **Sincronizar entre dispositivos.** Esto es entre pestañas del mismo navegador; entre
+  dispositivos ya lo hace Realtime, y es otra cosa.
+- **La caducidad de la cola**, su orden y su idempotencia.
+
+## 7. Suposiciones a resolver al sellar
+
+- **`[ASSUMPTION]`** — que el camino 3 es alcanzable de verdad. Está razonado sobre el
+  código y **no ejecutado**, y esta spec nace de dos vueltas perdidas por concluir sin
+  ejecutar: se prueba con una sonda que dispare dos altas concurrentes, o se declara no
+  probado.
+- **`[ASSUMPTION]`** — que `BroadcastChannel` funciona en el arnés de navegador con dos
+  contextos. Verificado en `jsdom` y `node`; falta verificarlo en Playwright con dos
+  páginas.
+- **`[ASSUMPTION]`** — que la cáscara sin red puede publicar sin arrastrar el mecanismo
+  de avisos consigo. La Spec C la dejó con su propio `setAviso` a propósito, y hay que
+  comprobar que el canal no la reacopla.
+
+## 8. Lo que ya está escrito y espera a esta spec
+
+Dos pruebas se retiraron del ciclo anterior **conservando su texto** en
+`unit/drenado.test.tsx`, porque vigilan exactamente esto: «si otra pestaña drena la cola,
+ésta retira su aviso igual» y su gemela de las fichas. Son la **primera comprobación en
+rojo** de esta spec, y ya se sabe que fallan.

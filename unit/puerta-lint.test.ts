@@ -108,10 +108,12 @@ describe('Spec A · un aviso pone la puerta roja', () => {
  * Qué lo pone rojo (§E.3): añadir, quitar o mover una supresión sin declararla.
  */
 const SUPRESIONES_DECLARADAS = [
-  // Las dos están en el cuerpo de la Spec B y llevan su motivo escrito encima:
-  // «Sólo al montar» (I3/K7) y «Una vez por carga fallida» (I6). Esta guarda las
-  // cuenta; quitarlas es trabajo de la Spec B, no de aquí.
-  'app/g/[id]/GroupView.tsx react-hooks/exhaustive-deps',
+  /**
+   * Queda **una**. Eran dos: la Spec B se llevó la de «Una vez por carga fallida»
+   * (I6) al sustituir aquel efecto por el que anuncia la clase con una ref viva,
+   * que no necesita silenciar nada. Esta guarda lo notó en cuanto pasó, que es
+   * para lo que está. La que queda es «Sólo al montar» (I3/K7).
+   */
   'app/g/[id]/GroupView.tsx react-hooks/exhaustive-deps',
   /**
    * Spec C / iteración 5 — La salida de la cáscara es un enlace normal y no
@@ -179,28 +181,35 @@ describe('Spec A · un aviso silenciado de más también la pone roja', () => {
     const raiz = process.cwd()
     const informe = (fichero: string, reglas: string[]) =>
       ({ filePath: `${raiz}/${fichero}`, suppressedMessages: reglas.map(ruleId => ({ ruleId })) })
-    const dos = ['react-hooks/exhaustive-deps', 'react-hooks/exhaustive-deps']
+    // Una, no dos: la Spec B se llevó la segunda al sustituir aquel efecto.
+    const una = ['react-hooks/exhaustive-deps']
 
-    // El inventario tiene tres entradas desde la iteración 5 de la Spec C: las
-    // dos de `GroupView` y la de la salida de la cáscara.
+    // El inventario tiene dos entradas: la de `GroupView` y la de la salida de la
+    // cáscara. Eran tres hasta que la Spec B retiró una supresión.
     const salida = informe('app/sin-conexion/page.tsx', ['@next/next/no-html-link-for-pages'])
-    const igual = JSON.stringify([informe('app/g/[id]/GroupView.tsx', dos), salida])
+    const igual = JSON.stringify([informe('app/g/[id]/GroupView.tsx', una), salida])
     expect(supresiones(igual)).toEqual(SUPRESIONES_DECLARADAS)
 
     const deMas = JSON.stringify([
-      informe('app/g/[id]/GroupView.tsx', dos), salida,
+      informe('app/g/[id]/GroupView.tsx', una), salida,
       informe('lib/otro.ts', ['react-hooks/exhaustive-deps']),
     ])
     expect(supresiones(deMas)).not.toEqual(SUPRESIONES_DECLARADAS)
 
-    const deMenos = JSON.stringify([informe('app/g/[id]/GroupView.tsx', dos.slice(1)), salida])
+    const deMenos = JSON.stringify([salida])
     expect(supresiones(deMenos)).not.toEqual(SUPRESIONES_DECLARADAS)
 
-    // La que un contador `=== 2` dejaría pasar: mismo número, otro sitio.
-    const movida = JSON.stringify([
-      informe('app/g/[id]/GroupView.tsx', dos.slice(1)),
-      informe('app/page.tsx', dos.slice(1)), salida,
-    ])
+    /**
+     * La que un contador dejaría pasar: **misma cuenta, otro sitio**. Tiene que
+     * llevar tantos pares como el inventario declarado y diferir sólo en dónde;
+     * con uno de más falla por cuenta, igual que `deMas`, y deja de distinguir un
+     * multiconjunto de un contador — que es la razón por la que existe.
+     *
+     * Bajó a dos pares cuando el inventario bajó de dos supresiones a una, y con
+     * él se quedó este caso en tres. Lo cazó la revisión de la séptima vuelta.
+     */
+    const movida = JSON.stringify([informe('app/page.tsx', una), salida])
+    expect(supresiones(movida)).toHaveLength(SUPRESIONES_DECLARADAS.length)
     expect(supresiones(movida)).not.toEqual(SUPRESIONES_DECLARADAS)
   })
 })
@@ -258,7 +267,6 @@ const VIGILADAS = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/
  * justamente el acto visible que esta guarda existe para forzar.
  */
 const CONFIG_DECLARADA = [
-  `app/g/[id]/GroupView.tsx ${DISABLE}-next-line react-hooks/exhaustive-deps`,
   `app/g/[id]/GroupView.tsx ${DISABLE}-next-line react-hooks/exhaustive-deps`,
   // Spec C / iteración 5 — el motivo, junto a la otra mitad del inventario.
   `app/sin-conexion/page.tsx ${DISABLE}-next-line @next/next/no-html-link-for-pages`,
