@@ -163,19 +163,58 @@ function escribir(almacen: string, hacer: (t: IDBObjectStore) => void): Promise<
 }
 
 /**
+ * Spec «pantalla y estado durable» / R2 — **El almacén publica.** La cola la
+ * comparten todas las instancias del navegador y IndexedDB no emite eventos de
+ * cambio: sin esto, una pestaña no puede enterarse de lo que otra escribió.
+ *
+ * Vive aquí y no en cada vista por una medida: los cuatro escritores de la cola
+ * pasan por `encolar` y `quitarDeCola`, y este módulo es el único que toca la
+ * tienda. Publicando aquí es una consecuencia estructural —un escritor nuevo no
+ * puede olvidarse— en vez de una convención que hay que recordar en cada sitio.
+ *
+ * El mensaje no lleva dato: es una señal de «mira otra vez». Quien lo recibe
+ * relee, porque aplicar el contenido sería confiar en la copia de otro.
+ */
+const CANAL = 'super:cola'
+let canal: BroadcastChannel | null | undefined
+const avisarDeLaCola = () => {
+  // Se resuelve una vez y se recuerda, incluido el «no hay»: un navegador sin
+  // `BroadcastChannel` pierde la notificación y **escribe igual**, que es el
+  // estado de hoy y no uno peor.
+  if (canal === undefined) {
+    canal = typeof BroadcastChannel === 'function' ? new BroadcastChannel(CANAL) : null
+  }
+  canal?.postMessage(1)
+}
+
+/**
  * J6 — Devuelve si el almacén **aceptó** la escritura. Antes se tragaba el fallo
  * y la vista pintaba la ficha igual: el usuario veía su producto, recargaba, y no
  * estaba. Un almacén que no admite nada no puede parecer que sí.
+ *
+ * Y sólo avisa si entró: anunciar un cambio que el disco rechazó haría releer a
+ * las demás para encontrar lo mismo, diciéndoles que pasó algo que no pasó.
  */
 export const encolar = (p: Pendiente): Promise<boolean> =>
-  escribir(COLA, (t: IDBObjectStore) => { t.put(p) })
+  escribir(COLA, (t: IDBObjectStore) => { t.put(p) }).then(ok => { if (ok) avisarDeLaCola(); return ok })
 
 export const leerCola = (usuario: string): Promise<Pendiente[]> =>
   conTienda<Pendiente[]>(COLA, 'readonly', (t: IDBObjectStore) => t.getAll() as IDBRequest<Pendiente[]>)
     .then(todo => (todo ?? []).filter(p => p.usuario === usuario))
 
 export const quitarDeCola = (id: string): Promise<boolean> =>
-  escribir(COLA, (t: IDBObjectStore) => { t.delete(id) })
+  escribir(COLA, (t: IDBObjectStore) => { t.delete(id) }).then(ok => { if (ok) avisarDeLaCola(); return ok })
+
+/**
+ * Lo que la vista usa para enterarse. Devuelve cómo dejar de escuchar, porque un
+ * listener que sobrevive al desmontaje es la cicatriz N3 con otro traje.
+ */
+export const alCambiarLaCola = (hacer: () => void): (() => void) => {
+  if (typeof BroadcastChannel !== 'function') return () => {}
+  const c = new BroadcastChannel(CANAL)
+  c.onmessage = () => hacer()
+  return () => c.close()
+}
 
 export const guardarLista = (usuario: string, grupo: string, items: Item[]): Promise<boolean> =>
   escribir(LISTAS, (t: IDBObjectStore) => { t.put(items, claveInstantanea(usuario, grupo)) })

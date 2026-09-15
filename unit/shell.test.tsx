@@ -15,12 +15,20 @@ const leerCola = vi.fn()
 const encolar = vi.fn()
 const haySesionLocal = vi.fn()
 
+/** El canal del almacén, disparable por el test como si fuera otra pestaña. */
+let oyentesDeLaCola: (() => void)[] = []
+const avisarDeOtraPestana = () => { for (const f of [...oyentesDeLaCola]) f() }
+
 vi.mock('@/lib/local', () => ({
   leerUltimoUsuario: () => leerUltimoUsuario(),
   leerLista: (...a: unknown[]) => leerLista(...a),
   leerNombre: (...a: unknown[]) => leerNombre(...a),
   leerCola: (...a: unknown[]) => leerCola(...a),
   encolar: (...a: unknown[]) => encolar(...a),
+  alCambiarLaCola: (f: () => void) => {
+    oyentesDeLaCola.push(f)
+    return () => { oyentesDeLaCola = oyentesDeLaCola.filter(x => x !== f) }
+  },
 }))
 vi.mock('@/lib/sesionLocal', () => ({ haySesionLocal: () => haySesionLocal() }))
 
@@ -43,6 +51,7 @@ const enGrupo = (id = '8f1f1f7a-0000-4000-8000-000000000000') => {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  oyentesDeLaCola = []
   haySesionLocal.mockReturnValue(true)
   leerUltimoUsuario.mockResolvedValue('u1')
   leerLista.mockResolvedValue([{ id: 'i1', name: 'anchoas', quantity: null }])
@@ -723,5 +732,49 @@ describe('Spec C · el banco del sondeo devuelve lo que toma prestado', () => {
     const d = Object.getOwnPropertyDescriptor(document, 'visibilityState')
     expect(d?.get?.toString().includes('estadoVisible'),
       'la visibilidad quedó sustituida para el resto del fichero').not.toBe(true)
+  })
+})
+
+/**
+ * Spec «pantalla y estado durable» / R5 — **La cáscara entra.** Es literalmente el
+ * mismo defecto en la otra pantalla: pinta fichas de una cola que otra instancia
+ * puede vaciar, y nada se lo dice. Dejarla fuera sería arreglar la mitad.
+ */
+describe('R5 la cáscara sin red también se entera de que la cola cambió', () => {
+  const G = '8f1f1f7a-0000-4000-8000-000000000000'
+
+  it('durable DoD 4: si otra pestaña vacía la cola, la cáscara retira sus fichas', async () => {
+    haySesionLocal.mockReturnValue(true)
+    leerUltimoUsuario.mockResolvedValue('u1')
+    leerLista.mockResolvedValue(null)
+    leerNombre.mockResolvedValue('Familia')
+    const p = { id: 'p1', usuario: 'u1', grupo: G, nombre: 'leche', cantidad: null, creado: 1 }
+    leerCola.mockResolvedValue([p])
+    enGrupo(G)
+    render(<SinConexion />)
+    await waitFor(() => expect(screen.getAllByTestId('pendiente')).toHaveLength(1))
+
+    // Otra instancia la vacía y lo anuncia. La cáscara no ha tocado nada.
+    leerCola.mockResolvedValue([])
+    await act(async () => { avisarDeOtraPestana() })
+    await waitFor(() => expect(screen.queryAllByTestId('pendiente'),
+      'la cáscara sigue enseñando como pendiente algo que otra pestaña ya envió').toHaveLength(0))
+  })
+
+  // Sonda (§E.2): la señal no es un dato. Si la cola NO se vació, no se lleva nada.
+  it('un aviso con la cola aún llena no se lleva la ficha', async () => {
+    haySesionLocal.mockReturnValue(true)
+    leerUltimoUsuario.mockResolvedValue('u1')
+    leerLista.mockResolvedValue(null)
+    leerNombre.mockResolvedValue('Familia')
+    const p = { id: 'p1', usuario: 'u1', grupo: G, nombre: 'leche', cantidad: null, creado: 1 }
+    leerCola.mockResolvedValue([p])
+    enGrupo(G)
+    render(<SinConexion />)
+    await waitFor(() => expect(screen.getAllByTestId('pendiente')).toHaveLength(1))
+
+    await act(async () => { avisarDeOtraPestana() })
+    await waitFor(() => expect(screen.queryAllByTestId('pendiente'),
+      'se llevó una ficha que sigue pendiente').toHaveLength(1))
   })
 })

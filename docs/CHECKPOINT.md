@@ -934,8 +934,8 @@ por quien la armó.
 | Ficheros unitarios | 63 | 64 |
 | Casos de navegador | 88 | 88 |
 
-`typecheck` 0 · `lint` 0 con 0 avisos · `test` 0 · `build` 0 sobre `.next` borrado ·
-`test:e2e` 0.
+Al cerrar el ciclo, el 2026-09-15: `typecheck`, `lint` con cero avisos, `test`,
+`build` sobre `.next` borrado y `test:e2e`, los cinco con código de salida cero.
 
 ## Runtime — qué se ejercitó y contra qué build
 

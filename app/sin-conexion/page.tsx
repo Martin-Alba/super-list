@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { encolar, leerCola, leerLista, leerNombre, leerUltimoUsuario } from '@/lib/local'
+import { alCambiarLaCola, encolar, leerCola, leerLista, leerNombre, leerUltimoUsuario } from '@/lib/local'
 import { haySesionLocal } from '@/lib/sesionLocal'
 import { decidirEncolar } from '@/lib/cola'
 import { bannerSinRed, DUPLICADO, ESCRIBE_NOMBRE, esperaDeSondeo, SIN_ALMACEN, SIN_INSTANTANEA,
@@ -153,6 +153,25 @@ export default function SinConexion() {
       setListo(true)
     })()
   }, [])
+
+  /**
+   * Spec «pantalla y estado durable» / R5 — La cáscara también pinta fichas de una
+   * cola que otra instancia puede vaciar, y nada se lo decía: es el mismo defecto
+   * que en la vista del grupo, en la otra pantalla. Recibe la señal del almacén y
+   * **relee**, igual que allí — el mensaje no lleva dato.
+   *
+   * No hace falta añadir `visibilitychange`: esta pantalla ya lo escucha para su
+   * sondeo (más abajo), y el sondeo recarga la página entera cuando la red vuelve.
+   * Lo que faltaba era enterarse **sin** que la red vuelva.
+   */
+  useEffect(() => {
+    if (!usuario || !grupo) return
+    return alCambiarLaCola(() => {
+      void (async () => {
+        setPendientes((await leerCola(usuario)).filter(p => p.grupo === grupo))
+      })()
+    })
+  }, [usuario, grupo])
 
   /**
    * R1/R2 — El sondeo. No se ata al evento `online`: con el servidor caído

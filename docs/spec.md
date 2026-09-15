@@ -1,132 +1,162 @@
 # Specs
 
-No queda ninguna spec sellada: el fichero sólo lleva trabajo vivo, y el registro de lo
-construido está en `docs/CHECKPOINT.md`.
+Un borrador vivo: **«El duplicado lo impide la escritura»**, sin sellar y sin marcador,
+a la espera de revisión. No hay ninguna sección `ACTIVE`: no hay nada en construcción.
 
-La **Spec B** y sus seis iteraciones —el ciclo de vida de aviso-y-recuperación, hasta
-el eje de la duración— se cerraron el 2026-09-15. Cerraron las deudas 40 a 45 y siete
-de las nueve vueltas de ese mecanismo. Las otras dos resultaron ser otro problema, y es
-el borrador de abajo.
+Al final, dos specs futuras con lo ya medido.
 
 ---
 
-# BORRADOR — Pantalla y estado durable
+# BORRADOR — El duplicado lo impide la escritura
 
-**SIN SELLAR. Sin marcador.** No entra en el bucle hasta que el usuario lo revise.
-Cero secciones ACTIVE: no hay nada en construcción.
+**SIN SELLAR. Sin marcador.**
 
-## 1. El problema, en una frase
+## 1. El problema
 
-La cola de pendientes vive en IndexedDB —durable, compartida por todas las instancias—
-y lo que el usuario ve de ella vive en memoria de una sola. **Nada avisa cuando la cola
-cambia**, así que la pantalla sólo es correcta mientras nadie más escriba y mientras
-quien deriva lo haga sobre una lectura fresca. Las dos cláusulas son falsas hoy.
+Dos instancias del navegador pueden meter **el mismo producto dos veces** en la cola de
+pendientes. Cada una lee la cola, decide que no hay duplicado, y escribe: entre la
+lectura y la escritura hay un `await`, y en esa ventana la otra escribió.
 
-Sale de las dos últimas vueltas del ciclo de avisos, que **no eran de aquel mecanismo**:
-siete de nueve se reproducían con un solo montaje, y estas dos no. El registro de esa
-clasificación está en `docs/CHECKPOINT.md`.
+**Reproducido** —y esto importa, porque dos intentos anteriores concluyeron lo
+contrario: dos raíces montadas, la misma palabra, sin red, con las pulsaciones
+**solapadas dentro de una misma tarea** y un doble de almacén que **escribe** en la cola
+compartida. Resultado: `leerCola` 4 · `encolar` **2** · cola `['leche','leche']`. El
+control seriado —un `act` por pulsación— da `encolar` 1, así que el arnés distingue.
 
-## 2. Los tres caminos medidos
+Es §D.2 literal: *los invariantes se hacen cumplir en la base —`INSERT ... ON CONFLICT`,
+constraints únicas— no en memoria del proceso.*
 
-| # | Camino | Qué pasa | ¿Cuándo |
-|---|---|---|---|
-| 1 | `drenarUnaVez` deriva de `cola` leída en `:406` y usada tras tres `await` | La rama sin red de `onAdd` es la única que encola **sin** tocar `envio.current`, así que la guarda de generación no dispara. El bucle termina sobre su instantánea vieja | **Reproducido 3/3 con UNA instancia.** Era el CRITICAL de la novena vuelta; el arreglo se retiró y por eso hoy no está en el árbol |
-| 2 | Nadie vuelve a mirar la cola tras el bucle | `reintentarEnvio` es lo único que la relee y sus esperas suman 23 s (`lib/errors.ts`). Si otra instancia la vacía después, el aviso «se enviará al volver la red» se queda para siempre sobre una cola vacía | **Reproducido 2/2 en navegador con dos pestañas reales** |
-| 3 | `meterEnCola` lee la cola en `:340`, decide «duplicado» con `decidirEncolar`, y escribe tras `await encolar` en `:357` | Dos altas concurrentes pasan las dos el chequeo de duplicado | **Anterior a este ciclo.** No medido en ejecución: entra como `[ASSUMPTION]` de §7 |
+## 2. Es un defecto en dos pantallas, y el arreglo va donde las dos pasan
 
-## 3. Qué no existe hoy, verificado
+| Camino | Dónde | Forma |
+|---|---|---|
+| 3 | `app/g/[id]/GroupView.tsx:340→357` | `leerCola` → `decidirEncolar` → `await encolar` |
+| 4 | `app/sin-conexion/page.tsx:287→296` | idéntica, palabra por palabra |
 
-- **IndexedDB no emite eventos de cambio.** `lib/local.ts` es `get`/`put` plano sobre
-  `conTienda`; no hay observador posible en la API.
-- **Cero `BroadcastChannel`** en el árbol de la app.
-- **Cero listeners de `storage`** — y no servirían: son de `localStorage`, no de
-  IndexedDB.
-- El único precedente de «volver a mirar» es `app/sin-conexion/page.tsx:227`, con
-  `visibilitychange`, y es para su propio sondeo.
+Los dos son **el mismo defecto escrito dos veces**, y eso tiene una explicación que ya
+está medida y escrita: la Spec C sacó la **regla** a `lib/cola.ts` —`decidirEncolar`, que
+las dos pantallas comparten— y dejó los **efectos** en cada pantalla. El check-then-act
+no vive en la regla: `decidirEncolar` recibe la cola ya leída y decide sin efectos. La
+ventana vive entre esa lectura y la escritura, o sea **en el efecto**, o sea en cada
+llamador. Compartir la decisión y no el efecto duplicó el hueco mientras se declaraba
+haber unificado la lógica.
 
-**Y hay un segundo escritor de la cola fuera de este componente:** la cáscara sin red
-encola en `app/sin-conexion/page.tsx:277`. Cualquier mecanismo que se elija tiene que
-contarla, o nace incompleto.
+**Por eso el arreglo va en `lib/local.ts`**, que es por donde pasan las dos: los cuatro
+escritores de la cola usan `encolar`, y ese módulo es el único que toca la tienda
+`COLA`. Poner el invariante en cada llamador sería repetir el error que causó esto.
 
-## 4. Las dos formas, medidas — y el hallazgo: no son alternativas
+## 3. Qué invariante, exactamente
 
-**Forma A — releer en cada punto donde se deriva.**
-*Coste:* una lectura de IndexedDB por derivación. Los puntos son tres: la retirada del
-aviso, la de las fichas, y el chequeo de duplicado de `meterEnCola`. `leerCola` es un
-`getAll` filtrado en memoria; se ejecuta ya cuatro veces en los caminos normales
-(`:340`, `:383`, `:406`, `:570`), así que añadir una o dos no cambia el orden de
-magnitud.
-*Qué arregla:* los caminos **1 y 3**.
-*Qué NO arregla:* el **2**. Releer no ayuda si nadie llega a releer: tras el bucle no
-queda ningún punto de derivación al que llegar.
+Hoy la tienda `COLA` usa `keyPath: 'id'`, y el `id` lo genera quien encola con
+`crypto.randomUUID()`: dos altas del mismo producto tienen ids distintos, así que la
+clave no las distingue y el almacén las acepta las dos.
 
-**Forma B — notificación entre instancias (`BroadcastChannel`).**
-*Coste:* un canal, un listener y un `postMessage` por escritor. **Cero dependencias
-nuevas**: es API del navegador. Verificado que existe en `jsdom` y en `node`, así que
-es **probable con dos raíces en el arnés unitario**, sin navegador.
-*Qué arregla:* el **2**.
-*Qué NO arregla:* el **1**. Verificado ejecutando: `BroadcastChannel` **no entrega al
-que publica** (medido: `el emisor recibe su propio mensaje: false`), así que la
-escritura concurrente de la propia instancia no se notifica a sí misma. Y aunque lo
-hiciera, la instantánea local seguiría rancia: haría falta releer igual.
+La regla de igualdad **ya existe y es compartida**: `mismoProducto(a, b)` en
+`lib/items.ts` compara nombres normalizados, y `decidirEncolar` la usa para la cola con
+`p.grupo === grupo && mismoProducto(p.nombre, nombre)`. **La spec no inventa un criterio
+nuevo:** el invariante es exactamente el que la regla ya declara — *un producto, por
+nombre normalizado, por grupo, por usuario, no puede estar dos veces en la cola*.
 
-**La decisión, con su motivo: las dos, y en este orden.** No son dos opciones para el
-mismo defecto: cada una cubre un camino que la otra deja abierto, y eso está medido, no
-razonado. Elegir una sola sería cerrar la mitad y declarar el problema resuelto — que es
-exactamente el error que produjo las dos últimas vueltas.
+**Lo que la spec no decide todavía y hay que resolver al sellar** es la forma, porque
+las dos que se ven tienen coste distinto y hay que medirlo:
 
-**A va primero** porque es la que evita **pérdida de señal para el usuario**: el camino 1
-borra de la pantalla algo que sigue pendiente de enviar, y si el usuario lo reescribe,
-`decidirEncolar` le contesta «ya está en la lista» sobre una pantalla donde no está. El
-camino 2 deja un aviso de más, que es mentira pero no esconde nada.
+- **Clave derivada:** que el `keyPath` sea una clave que ya contenga el invariante. Un
+  `put` con la misma clave sobrescribe en vez de duplicar. Coste: es una **migración de
+  la tienda** —`onupgradeneeded`, versión nueva, y qué hacer con las colas que ya
+  existen en disco de los usuarios—.
+- **Re-chequeo dentro de la misma transacción `readwrite`:** leer y escribir sin soltar
+  la transacción, que es lo que la hace atómica. Coste: `encolar` pasa de una escritura
+  a una lectura más una escritura, y hay que comprobar que `escribir` —que hoy sólo
+  sabe de sí o no— puede devolver «ya estaba».
 
-**B va después y con `visibilitychange` como red**, porque un canal sólo entrega a
-quien está escuchando: una pestaña que se abre más tarde no recibe lo que se emitió
-antes. Al montar ya se relee (`:570`), así que el hueco real es la pestaña que estaba
-abierta y en segundo plano — y ésa sí recibe. `visibilitychange` cubre el caso de un
-mensaje perdido y el de un escritor que no publique.
+## 4. El arnés, que entra en la spec
+
+Las dos sondas anteriores fallaron por no tener **las tres cosas a la vez**, y por eso
+el arnés va escrito aquí y no se deja a quien construya:
+
+1. **Dos raíces montadas** sobre la misma cola.
+2. **Las pulsaciones solapadas dentro de una misma tarea** —un solo `act`—. Serializadas
+   no reproducen: la primera termina antes de que empiece la segunda.
+3. **Un doble de `encolar` que escribe de verdad** en la cola compartida del arnés. Sin
+   eso, la segunda lectura no puede ver lo que la primera escribió y el caso se disuelve.
+
+Y el **control** es parte del arnés, no un extra: el mismo caso serializado tiene que dar
+una sola escritura. Sin él, la sonda no distingue «lo impidió el invariante» de «nunca
+ocurrió».
 
 ## 5. Requisitos
 
-**R1 — Toda derivación de la pantalla a partir de la cola parte de una lectura que no
-cruza un `await`.** Los tres caminos de §2.
+**R1 — El almacén impide el duplicado, no el llamador.** `encolar` rechaza —o absorbe—
+un pendiente cuyo producto ya está en la cola para ese usuario y ese grupo, según
+`mismoProducto`. Los llamadores no cambian su forma de pedirlo.
 
-**R2 — Cuando otra instancia cambia la cola, ésta se entera.** Un canal por usuario;
-todo escritor publica —incluida la cáscara sin red—; quien recibe, **relee y re-deriva**,
-no aplica el mensaje. El mensaje es una señal de «mira otra vez», nunca un dato.
+**R2 — El llamador se entera de qué pasó.** `encolar` hoy devuelve `boolean`: entró o no
+entró. «No entró porque el disco dijo que no» y «no entró porque ya estaba» son cosas
+distintas y la pantalla dice cosas distintas —`SIN_ALMACEN` frente a `DUPLICADO`—, así
+que el contrato tiene que distinguirlas.
+*Nota de alcance:* esto toca la firma que **cuatro** sitios usan. Enumerarlos y
+comprobar qué hace cada uno con el `false` de hoy es trabajo de sellado.
 
-**R3 — La señal sobrevive a no haberla oído.** Al volver la visibilidad se relee, por si
-el mensaje se perdió o lo escribió alguien que no publica.
+**R3 — `decidirEncolar` no se toca.** Sigue decidiendo lo mismo para lo que ve, y sigue
+siendo la puerta que da el mensaje al usuario en el caso normal. El invariante del
+almacén es la **red** para lo que la decisión no puede ver: lo que otra instancia
+escribió en la ventana.
 
-**R4 — El chequeo de duplicado deja de ser check-then-act.** Camino 3. La forma exacta
-se decide al sellar: puede ser releer justo antes de escribir, o una clave única en el
-almacén, que es lo que §D.2 prefiere.
+**R4 — La migración de la tienda, si la forma elegida la necesita, es expand/contract y
+tolera colas ya existentes en disco.** §C: forward-only, idempotente. Una cola con
+duplicados ya escritos no puede dejar la app sin arrancar.
 
 ## 6. Fuera de alcance, por su nombre
 
-- **El mecanismo de avisos.** El reducer, la duración, el peso y la identidad en la
-  acción están cerrados y no se tocan. Esta spec **usa** `despachar`, no lo modifica.
-- **La lista de productos.** Sólo la cola de pendientes y lo que de ella se muestra.
-- **Sincronizar entre dispositivos.** Esto es entre pestañas del mismo navegador; entre
-  dispositivos ya lo hace Realtime, y es otra cosa.
-- **La caducidad de la cola**, su orden y su idempotencia.
+- **Las otras dos familias** (§8 y §9). En particular: esta spec **no** arregla que la
+  pantalla muestre lo que otra instancia cambió, ni la copia rancia del drenado.
+- **La lista de productos** y la tienda `LISTAS`. Sólo la cola.
+- **El aviso de duplicado en pantalla**, más allá de que R2 permita distinguirlo.
+- **La caducidad**, el orden y el drenado.
 
 ## 7. Suposiciones a resolver al sellar
 
-- **`[ASSUMPTION]`** — que el camino 3 es alcanzable de verdad. Está razonado sobre el
-  código y **no ejecutado**, y esta spec nace de dos vueltas perdidas por concluir sin
-  ejecutar: se prueba con una sonda que dispare dos altas concurrentes, o se declara no
-  probado.
-- **`[ASSUMPTION]`** — que `BroadcastChannel` funciona en el arnés de navegador con dos
-  contextos. Verificado en `jsdom` y `node`; falta verificarlo en Playwright con dos
-  páginas.
-- **`[ASSUMPTION]`** — que la cáscara sin red puede publicar sin arrastrar el mecanismo
-  de avisos consigo. La Spec C la dejó con su propio `setAviso` a propósito, y hay que
-  comprobar que el canal no la reacopla.
+- **`[ASSUMPTION]`** — que la sonda del §4 corre en el arnés unitario con dos raíces. Lo
+  reprodujo la revisión ahí; falta comprobar que sobrevive fuera del árbol del revisor.
+- **`[ASSUMPTION]`** — que ninguna de las dos formas del §3 rompe `olvidarTodo`, que
+  barre por clave (`esClaveDe`) y que hoy no toca la tienda `COLA`. Hay que verificarlo
+  contra el código, no suponerlo.
+- **`[OPEN]`** — cuál de las dos formas. Se decide midiendo, no por gusto: qué cuesta la
+  migración frente a qué cuesta la transacción larga.
 
-## 8. Lo que ya está escrito y espera a esta spec
+---
 
-Dos pruebas se retiraron del ciclo anterior **conservando su texto** en
-`unit/drenado.test.tsx`, porque vigilan exactamente esto: «si otra pestaña drena la cola,
-ésta retira su aviso igual» y su gemela de las fichas. Son la **primera comprobación en
-rojo** de esta spec, y ya se sabe que fallan.
+# Specs futuras, con lo ya medido
+
+## 8. Releer, notificar y ordenar los escritores — **las tres juntas**
+
+Van juntas y el motivo está medido: **la tercera existe por culpa de la segunda.**
+
+- **Releer.** `GroupView:406→446` retira el aviso de la cola decidiendo sobre una lectura
+  anterior a tres `await`. Reproducido: «pan» sigue en la cola y el aviso desaparece.
+  Era la «Forma A» de la spec anterior, que decía que iba primero, y no se construyó.
+- **Notificar**, su mitad que falta: la cáscara recibe por el canal pero **no** escucha
+  `visibilitychange`. Medido: perdido el mensaje, cero relecturas al volver, y sin red no
+  se recupera nunca. El comentario que dice que no hace falta es falso y está medido como
+  tal. Y el mismo efecto está escrito dos veces con **contenido distinto** en las dos
+  pantallas — el §2 de arriba, cometido otra vez.
+- **Ordenar los escritores del hueco local.** `setPendientes(prev => [...prev, p])`
+  (optimista) y `setPendientes(mios)` (autoritativo, desde la relectura) escriben el
+  mismo estado sin orden. Y la pestaña **se oye a sí misma**: publicador y suscriptor son
+  objetos distintos del mismo canal. Reproducido con entrega síncrona: `fichas=2 cola=1`.
+  Hoy no se manifiesta porque la entrega real llega como tarea y el añadido como
+  microtarea — o sea, la corrección descansa en un detalle de planificación que nadie
+  vigila.
+
+Además, sin resolver de la spec anterior: el canal es global y se declaró «por usuario»;
+y la sonda de ausencia del almacén sólo reconoce una forma de escribir (deuda 56).
+
+## 9. El estado que caduca con el reloj, sin observador
+
+`reparte` se evalúa en el montaje y la relectura no lo aplica. Reproducido sin red: un
+pendiente entra fresco, pasan 25 h con la pestaña abierta, y **su ficha sigue en
+pantalla** prometiendo un envío de algo que el próximo arranque descartará en silencio.
+
+Nadie escribió y nada cambió: lo que se movió fue el reloj. No lo arregla releer —trae el
+mismo dato—, ni notificar —no hay nada que notificar—, ni el invariante de la escritura.
+Es una familia propia, y la más pequeña de las tres.

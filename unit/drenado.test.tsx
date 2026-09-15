@@ -53,12 +53,24 @@ vi.mock('@/lib/items', async (orig) => ({
   updateItem: (...a: unknown[]) => updateItem(...a),
   softDeleteItem: (...a: unknown[]) => softDeleteItem(...a),
 }))
+/**
+ * El canal por el que el almacén anuncia que la cola cambió. El doble deja que el
+ * test dispare la señal como si la hubiera emitido otra pestaña — y **no** aplica
+ * nada: quien la recibe tiene que releer, que es lo que se quiere probar.
+ */
+let oyentesDeLaCola: (() => void)[] = []
+const avisarDeOtraPestana = () => { for (const f of [...oyentesDeLaCola]) f() }
+
 vi.mock('@/lib/local', async (orig) => ({
   ...(await orig<typeof import('@/lib/local')>()),
   leerCola: (...a: unknown[]) => leerCola(...a),
   quitarDeCola: (...a: unknown[]) => quitarDeCola(...a),
   encolar: (...a: unknown[]) => encolar(...a),
   guardarLista: (...a: unknown[]) => guardarLista(...a),
+  alCambiarLaCola: (f: () => void) => {
+    oyentesDeLaCola.push(f)
+    return () => { oyentesDeLaCola = oyentesDeLaCola.filter(x => x !== f) }
+  },
   leerLista: vi.fn(async () => null),
   leerUltimoUsuario: vi.fn(async () => 'u1'),
   guardarUltimoUsuario: vi.fn(async () => {}),
@@ -114,6 +126,7 @@ const enVuelo = () => {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  oyentesDeLaCola = []
   sinRedAhora = false
   cola = []
   encolar.mockResolvedValue(true)
@@ -1518,15 +1531,110 @@ describe('duración · el aviso de la cola no sobrevive a su condición', () => 
   })
 
   /**
-   * RETIRADOS (2026-09-15) — «duracion-it1 DoD 1» y «DoD 1b» vigilaban que, si otra
-   * pestaña vacía la cola compartida, ésta retire su aviso y sus fichas. El
-   * comportamiento es real y el defecto también, pero **no es de esta spec**: sale
-   * de derivar la pantalla de un estado durable que cambia sin avisar, y el arreglo
-   * que se intentó aquí derivaba de una copia de la cola leída antes de tres
-   * `await` — borraba la ficha de lo apuntado sin red mientras seguía en la cola,
-   * medido 3/3.
+   * DoD 2 — **Dos instancias sobre la misma cola.** Los dos casos que la spec de
+   * la duración retiró, repuestos aquí, que es su sitio: la cola vive en IndexedDB
+   * y la comparten todas las pestañas (§D.3), pero nada avisaba del cambio.
    *
-   * Los dos casos se conservan como la primera comprobación en rojo de la spec
-   * «pantalla y estado durable», que es donde el problema tiene su sitio.
+   * Ahora avisa el almacén, y quien recibe **relee**: el mensaje es una señal de
+   * «mira otra vez», nunca un dato. Por eso el arnés deja que la vista relea de
+   * verdad en vez de aplicarle lo que otro dice.
    */
+  it('durable DoD 2: si otra pestaña vacía la cola, ésta retira su aviso', async () => {
+    vi.useFakeTimers()
+    try {
+      colaViva()
+      addItem.mockResolvedValueOnce({ data: null, clase: 'servidor', code: null })
+      addItem.mockResolvedValue({ data: fila('leche'), clase: null, code: null })
+      activeItems.mockResolvedValue({ data: [fila('leche')], clase: null, code: null })
+      const r = montar()
+      fireEvent.change(r.getByTestId('item-name'), { target: { value: 'leche' } })
+      await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
+      cola = [...cola, encolar.mock.calls[0][0] as Pendiente]
+      expect(r.queryByTestId('notice'), 'no llegó a avisar de la cola').not.toBeNull()
+
+      // Otra instancia la vacía y lo anuncia. Esta pestaña no ha tocado nada.
+      cola = []
+      await act(async () => { avisarDeOtraPestana(); await vi.advanceTimersByTimeAsync(50) })
+      expect(r.queryByTestId('notice')?.textContent ?? 'NINGUNO',
+        'se quedó prometiendo un envío que otra pestaña ya hizo').toBe('NINGUNO')
+    } finally { vi.useRealTimers() }
+  })
+
+  it('durable DoD 2b: y también retira sus fichas', async () => {
+    vi.useFakeTimers()
+    try {
+      colaViva()
+      addItem.mockResolvedValueOnce({ data: null, clase: 'servidor', code: null })
+      addItem.mockResolvedValue({ data: fila('leche'), clase: null, code: null })
+      activeItems.mockResolvedValue({ data: [fila('leche')], clase: null, code: null })
+      const r = montar()
+      fireEvent.change(r.getByTestId('item-name'), { target: { value: 'leche' } })
+      await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
+      cola = [...cola, encolar.mock.calls[0][0] as Pendiente]
+      expect(r.queryAllByTestId('item-pendiente'), 'no pintó la ficha').toHaveLength(1)
+
+      cola = []
+      await act(async () => { avisarDeOtraPestana(); await vi.advanceTimersByTimeAsync(50) })
+      expect(r.queryAllByTestId('item-pendiente'),
+        'sigue enseñando como pendiente algo que otra pestaña ya envió').toHaveLength(0)
+    } finally { vi.useRealTimers() }
+  })
+
+  /**
+   * DoD 3 — La señal sobrevive a no haberla oído. Un mensaje se pierde si lo
+   * escribió un contexto sin canal, o si el navegador no lo soporta; volver a la
+   * pestaña es el momento en que el usuario mira, y por tanto el momento en que lo
+   * que ve tiene que ser verdad.
+   */
+  it('durable DoD 3: al volver a la pestaña se relee la cola', async () => {
+    vi.useFakeTimers()
+    try {
+      colaViva()
+      addItem.mockResolvedValueOnce({ data: null, clase: 'servidor', code: null })
+      addItem.mockResolvedValue({ data: fila('leche'), clase: null, code: null })
+      activeItems.mockResolvedValue({ data: [fila('leche')], clase: null, code: null })
+      const r = montar()
+      fireEvent.change(r.getByTestId('item-name'), { target: { value: 'leche' } })
+      await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
+      cola = [...cola, encolar.mock.calls[0][0] as Pendiente]
+      expect(r.queryAllByTestId('item-pendiente')).toHaveLength(1)
+
+      // Otra instancia vacía la cola SIN que llegue el mensaje, y el usuario vuelve.
+      cola = []
+      await act(async () => {
+        Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+        document.dispatchEvent(new Event('visibilitychange'))
+        await vi.advanceTimersByTimeAsync(50)
+      })
+      expect(r.queryAllByTestId('item-pendiente'),
+        'se volvió a la pestaña y seguía enseñando lo que ya no está').toHaveLength(0)
+    } finally { vi.useRealTimers() }
+  })
+
+  /**
+   * DoD 2c — La otra mitad, y es la que impide aplicar el mensaje como dato: si
+   * la cola **no** se vació, la señal no debe llevarse nada. Sin releer, un aviso
+   * de «cambió» borraría lo que sigue pendiente.
+   */
+  it('durable DoD 2c: un aviso con la cola aún llena no se lleva nada', async () => {
+    vi.useFakeTimers()
+    try {
+      colaViva()
+      addItem.mockResolvedValueOnce({ data: null, clase: 'servidor', code: null })
+      addItem.mockResolvedValue({ data: fila('leche'), clase: null, code: null })
+      activeItems.mockResolvedValue({ data: [fila('leche')], clase: null, code: null })
+      const r = montar()
+      fireEvent.change(r.getByTestId('item-name'), { target: { value: 'leche' } })
+      await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
+      cola = [...cola, encolar.mock.calls[0][0] as Pendiente]
+
+      // Otra pestaña apunta lo suyo: la cola cambia, pero lo nuestro sigue ahí.
+      cola = [...cola, pendiente('pan de otra', 0)]
+      await act(async () => { avisarDeOtraPestana(); await vi.advanceTimersByTimeAsync(50) })
+      expect(r.queryByTestId('notice')?.textContent ?? 'NINGUNO',
+        'el aviso se fue con la cola todavía llena').not.toBe('NINGUNO')
+      expect(r.queryAllByTestId('item-pendiente').length,
+        'se llevó por delante una ficha que sigue pendiente').toBeGreaterThan(0)
+    } finally { vi.useRealTimers() }
+  })
 })

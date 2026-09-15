@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { readFileSync } from 'node:fs'
 
 /**
  * J6/J8 — La mitad del almacén que las funciones puras no cubren: qué contesta
@@ -268,5 +269,127 @@ describe('Spec C · cerrar sesión se lleva también el nombre del grupo', () =>
     expect(borradas).toContain('u1:g1:nombre')
     expect(borradas, 'se llevó por delante lo de otro usuario').not.toContain('u2:g9:nombre')
     expect(borradas).not.toContain('u2:g9')
+  })
+})
+
+/**
+ * Spec «pantalla y estado durable» / R2 — **El almacén publica.** La cola la
+ * comparten todas las instancias y IndexedDB no emite eventos de cambio, así que
+ * quien escribe tiene que decirlo. Va aquí y no en cada vista por una medida: los
+ * cuatro escritores de la cola pasan por estas dos funciones, y este módulo es el
+ * único que toca la tienda. Publicando aquí, un escritor nuevo no puede olvidarse.
+ *
+ * Capa (§E.1): el requisito habla del almacén, así que se ataca el almacén.
+ */
+describe('R2 el almacén avisa de lo que escribe en la cola', () => {
+  const conCanal = async (idb: unknown) => {
+    const oidos: unknown[] = []
+    class CanalFalso {
+      onmessage: ((e: { data: unknown }) => void) | null = null
+      constructor(public nombre: string) { canales.push(this) }
+      postMessage(d: unknown) { oidos.push({ canal: this.nombre, dato: d }) }
+      // Un canal cerrado no entrega: modelarlo es lo que hace observable que
+      // alguien se suelte, y sin eso el test de soltarse no podría fallar.
+      close() { this.onmessage = null }
+    }
+    const canales: CanalFalso[] = []
+    vi.stubGlobal('BroadcastChannel', CanalFalso)
+    const mod = await cargar(idb)
+    return { mod, oidos, canales }
+  }
+
+  it('encolar avisa después de escribir', async () => {
+    const { mod, oidos } = await conCanal(falso(['ok']))
+    expect(await mod.encolar(p), 'la escritura no entró').toBe(true)
+    expect(oidos, 'escribió en la cola y no lo dijo: otra pestaña no puede enterarse')
+      .toHaveLength(1)
+  })
+
+  it('quitarDeCola avisa después de escribir', async () => {
+    const { mod, oidos } = await conCanal(falso(['ok']))
+    expect(await mod.quitarDeCola('p1')).toBe(true)
+    expect(oidos).toHaveLength(1)
+  })
+
+  // Sonda (§E.2) — si la escritura no entra, no hay nada que anunciar: avisar de
+  // un cambio que no ocurrió haría releer a las demás para encontrar lo mismo, y
+  // peor, les diría que algo pasó cuando no pasó.
+  it('una escritura que el disco rechaza NO avisa', async () => {
+    const { mod, oidos } = await conCanal(falso(['ok'], 'error'))
+    expect(await mod.encolar(p), 'el doble no está rechazando').toBe(false)
+    expect(oidos, 'anunció un cambio que no llegó al disco').toHaveLength(0)
+  })
+
+  // Escribir no puede depender del canal: un navegador sin `BroadcastChannel`
+  // pierde la notificación, que es el estado de hoy, no uno peor.
+  it('sin BroadcastChannel se escribe igual', async () => {
+    vi.stubGlobal('BroadcastChannel', undefined)
+    const mod = await cargar(falso(['ok']))
+    expect(await mod.encolar(p), 'la falta de canal se llevó la escritura').toBe(true)
+  })
+
+  it('alCambiarLaCola avisa a quien escucha', async () => {
+    const { mod, canales } = await conCanal(falso(['ok']))
+    let oidas = 0
+    mod.alCambiarLaCola(() => { oidas++ })
+    canales[canales.length - 1].onmessage?.({ data: 1 })
+    expect(oidas, 'la vista no se entera de nada').toBe(1)
+  })
+
+  // La cicatriz N3 con otro traje: un oyente que sobrevive al desmontaje sigue
+  // trabajando sobre un árbol muerto. Quien se suscribe recibe cómo soltarse.
+  it('y deja de avisar cuando se suelta', async () => {
+    const { mod, canales } = await conCanal(falso(['ok']))
+    let oidas = 0
+    const soltar = mod.alCambiarLaCola(() => { oidas++ })
+    const c = canales[canales.length - 1]
+    soltar()
+    c.onmessage?.({ data: 1 })
+    expect(oidas, 'sigue escuchando después de soltarse').toBe(0)
+  })
+
+  // Las demás tiendas no son compartidas de esta forma: la instantánea y el nombre
+  // los reescribe su propia vista, y anunciarlos sería ruido que hace releer.
+  it('guardarLista no avisa: la cola es lo compartido', async () => {
+    const { mod, oidos } = await conCanal(falso(['ok']))
+    expect(await mod.guardarLista('u1', 'g1', [])).toBe(true)
+    expect(oidos).toHaveLength(0)
+  })
+})
+
+/**
+ * Spec «pantalla y estado durable» / R2, la parte estructural — **un escritor de la
+ * cola que no publique no puede existir.** Es la diferencia entre una convención
+ * que hay que recordar en cada sitio nuevo y una consecuencia de dónde vive el
+ * canal, y es lo que la spec eligió: publicar desde el almacén y no desde la vista.
+ *
+ * Capa (§E.1): el requisito habla del módulo, así que se lee el módulo. No hay
+ * instrumento más fino — un test de comportamiento sólo vería los escritores que
+ * hoy existen, y lo que se afirma es sobre los que alguien escriba mañana.
+ */
+describe('R2 ninguna escritura a la cola puede saltarse el aviso', () => {
+  const fuente = readFileSync('lib/local.ts', 'utf8')
+  /** Cada `escribir(COLA, …)` del módulo, con lo que venga encadenado detrás. */
+  const escriturasALaCola = (txt: string) =>
+    [...txt.matchAll(/escribir\(COLA,[\s\S]*?\}\)(\.then\([^\n]*)?/g)].map(m => m[0])
+
+  it('toda escritura a la cola encadena el aviso', () => {
+    const todas = escriturasALaCola(fuente)
+    expect(todas.length, 'no se encontró ninguna escritura: el lector no sirve').toBeGreaterThan(0)
+    const mudas = todas.filter(e => !e.includes('avisarDeLaCola'))
+    expect(mudas, 'una escritura a la cola no anuncia: otra pestaña no puede enterarse')
+      .toEqual([])
+  })
+
+  // Sonda (§E.2): el lector tiene que saber distinguir, o el test de arriba pasaría
+  // con cualquier fichero — incluido uno donde nadie avise.
+  it('el lector caza una escritura muda sembrada', () => {
+    const sembrado = fuente.replace(
+      'escribir(COLA, (t: IDBObjectStore) => { t.delete(id) }).then(ok => { if (ok) avisarDeLaCola(); return ok })',
+      'escribir(COLA, (t: IDBObjectStore) => { t.delete(id) })')
+    expect(sembrado, 'la siembra no cambió el fichero: la sonda no prueba nada')
+      .not.toBe(fuente)
+    const mudas = escriturasALaCola(sembrado).filter(e => !e.includes('avisarDeLaCola'))
+    expect(mudas, 'no cazó la escritura muda sembrada').toHaveLength(1)
   })
 })

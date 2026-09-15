@@ -732,3 +732,54 @@ línea haría que cualquier edición por encima lo moviera. El precio, medido: m
 una supresión dentro del mismo fichero y con la misma regla no se distingue.
 Importa para la Spec B, que reescribe justo `app/g/[id]/GroupView.tsx`. Está
 declarado en el propio fichero de la guarda.
+
+---
+
+## 55 — Afirmar por razonamiento lo que se comprueba ejecutando (2026-09-15)
+
+**No es deuda de producto: es de método, y se anota aquí porque todavía no tiene regla
+escrita.** Se deja con los tres casos nombrados para que, si vuelve a pasar, el
+argumento esté hecho y no haya que reconstruirlo.
+
+Tres veces en el mismo ciclo, la misma forma: una conclusión correcta en sus hechos y
+falsa en su alcance, sacada de enumerar el código en vez de ejecutarlo.
+
+1. **Retirar R6** (spec de la duración, §9b). Se enumeraron las dos escrituras de
+   `envio.current` y se concluyó que el camino era inalcanzable. Cierto **dentro de una
+   instancia**; falso en cuanto hay dos, que es lo que §D.3 obliga a asumir. La revisión
+   lo reprodujo 4 de 4.
+2. **Declarar no probado el camino 3** (spec «pantalla y estado durable», §3). Se
+   escribieron dos sondas, ninguna reprodujo, y se dedujo que hacía falta aislar tres
+   cosas. La revisión lo reprodujo cambiando dos: solapar las pulsaciones dentro de una
+   tarea, y que el doble de `encolar` **escribiera** en la cola. `encolar` 2, cola con
+   el producto duplicado.
+3. **El comentario de `app/sin-conexion/page.tsx`** que afirmaba que la cáscara no
+   necesitaba `visibilitychange` «porque el sondeo ya escucha la visibilidad». Medido
+   falso: el sondeo sólo recarga **cuando vuelve la red**, y esa pantalla existe porque
+   no hay red. Tras `visibilitychange`, cero relecturas.
+
+**Lo que los tres comparten:** la enumeración era correcta y la conclusión no, y en los
+tres el coste de ejecutarla era minutos. El primero costó una vuelta entera; el segundo
+selló una spec sobre una premisa falsa; el tercero dejó media pantalla sin arreglar.
+
+**Por qué no se escribe como regla todavía:** `spec` ya lleva la cicatriz de la
+inalcanzabilidad probada en un solo sitio, y ensancharla sin un cuarto caso sería
+escribir dos veces lo mismo con otras palabras. Si vuelve a ocurrir, esta entrada es el
+caso que lo justifica.
+
+## 56 — La regla de la ausencia vive donde se gradúa, no donde se escribe (2026-09-15)
+
+`review` lleva escrito que **una afirmación de ausencia no se comprueba con `grep`**:
+exige el instrumento estructural correspondiente. Pero esa regla está donde se gradúan
+afirmaciones, y las guardas de ausencia se **escriben** durante `build`.
+
+Medido en este ciclo: la sonda del ítem 6 de la spec «pantalla y estado durable»
+afirmaba que ningún escritor de la cola puede saltarse el aviso, leyendo el módulo con
+una expresión que sólo reconoce la forma `escribir(COLA, …)`. La revisión sembró
+`conTienda<undefined>(COLA, 'readwrite', t => t.clear())`: compila, lintea con cero
+avisos, y los 1.533 tests siguen verdes. La guarda afirma una ausencia y sólo mira una
+forma de estar presente.
+
+Queda anotado, sin regla, por el mismo motivo que la 55: un caso no basta para decidir
+si la regla debe mudarse a `build`, duplicarse, o si basta con que las guardas de
+ausencia enumeren sus formas.

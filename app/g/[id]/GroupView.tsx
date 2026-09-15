@@ -11,7 +11,7 @@ import { caducados, ESCRIBE_NOMBRE, esperasDeReintento, GONE, LISTA_EN_VIVO, men
   SIN_RED_ACCION, type Clase } from '@/lib/errors'
 import { avisoInicial, reducirAviso, visible, type Origen } from '@/lib/aviso'
 import { decidirEncolar } from '@/lib/cola'
-import { encolar, guardarLista, guardarNombre, leerCola, leerLista, quitarDeCola, reparte, siguienteEnCola,
+import { alCambiarLaCola, encolar, guardarLista, guardarNombre, leerCola, leerLista, quitarDeCola, reparte, siguienteEnCola,
   type Pendiente } from '@/lib/local'
 import { useGroupChannel } from '@/lib/useGroupChannel'
 import { createInviteAction, decideMemberAction, leaveGroupAction } from '@/app/actions'
@@ -515,6 +515,35 @@ export function GroupView({
    * Y la condición se lee **donde se observa la cola compartida**, no en el estado
    * local: `pendientes` es de esta instancia y no se entera de lo que hace otra.
    */
+  /**
+   * Spec «pantalla y estado durable» / R3 y R4 — **Releer cuando la cola cambió.**
+   *
+   * La cola vive en IndexedDB y la comparten todas las pestañas; IndexedDB no emite
+   * eventos, así que el almacén avisa por un canal. Lo que llega es una señal de
+   * «mira otra vez», **nunca un dato**: se relee y se re-deriva, porque aplicar el
+   * contenido sería confiar en la copia de otro.
+   *
+   * Y la señal sobrevive a no haberla oído: al volver la visibilidad se relee igual,
+   * por si el mensaje se perdió o lo escribió un contexto sin canal.
+   *
+   * Lo que se deriva es **todo lo que la cola sostiene**: las fichas y el aviso. Que
+   * el aviso sea un nivel es lo que permite retirarlo sin tocar nada más — lo cerró
+   * la spec de la duración y aquí se usa, no se modifica.
+   */
+  const releerLaCola = useCallback(async () => {
+    const cola = await leerCola(me.id)
+    const mios = cola.filter(x => x.grupo === group.id)
+    setPendientes(mios)
+    if (mios.length === 0) despachar({ tipo: 'retirar', origen: 'cola' })
+  }, [me.id, group.id])
+
+  useEffect(() => {
+    const dejarDeOir = alCambiarLaCola(() => { void releerLaCola() })
+    const alVolver = () => { if (document.visibilityState === 'visible') void releerLaCola() }
+    document.addEventListener('visibilitychange', alVolver)
+    return () => { dejarDeOir(); document.removeEventListener('visibilitychange', alVolver) }
+  }, [releerLaCola])
+
   const drenar = useCallback(async () => {
     if (drenando.current) { pedido.current = true; return }
     drenando.current = true
