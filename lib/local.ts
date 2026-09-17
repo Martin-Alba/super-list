@@ -1,4 +1,4 @@
-import type { Item } from '@/lib/items'
+import { mismoProducto, type Item } from '@/lib/items'
 
 /**
  * R5/R6 — Lo que la app guarda **en el dispositivo**: la cola de altas que aún no
@@ -195,8 +195,58 @@ const avisarDeLaCola = () => {
  * Y sólo avisa si entró: anunciar un cambio que el disco rechazó haría releer a
  * las demás para encontrar lo mismo, diciéndoles que pasó algo que no pasó.
  */
-export const encolar = (p: Pendiente): Promise<boolean> =>
-  escribir(COLA, (t: IDBObjectStore) => { t.put(p) }).then(ok => { if (ok) avisarDeLaCola(); return ok })
+/**
+ * Spec «el duplicado lo impide la escritura» / R1 — **El invariante lo hace cumplir el
+ * almacén, no el llamador** (§D.2). Dos instancias pueden leer la cola, decidir las dos
+ * que no hay duplicado, y escribir las dos: entre la lectura y la escritura hay un
+ * `await`, y en esa ventana la otra escribió. Reproducido con dos vistas montadas y las
+ * pulsaciones solapadas en una misma tarea.
+ *
+ * El re-chequeo va **dentro de la misma transacción**, que es lo que la hace atómica:
+ * `getAll` y, desde su `onsuccess`, el `put`. La transacción sigue viva porque la
+ * petición nueva sale de un manejador suyo — verificado en navegador real antes de
+ * elegir esta forma, frente a la alternativa de una clave derivada que obligaba a
+ * migrar la tienda y rompía el borrado por `id` en tres sitios.
+ *
+ * Y el resultado viaja en un **cierre**, no en lo que devuelve `escribir`: siete sitios
+ * usan `escribir`, cinco sobre otra tienda, y ensanchar su contrato los habría
+ * arrastrado a todos.
+ *
+ * El criterio no se inventa aquí: es el que `decidirEncolar` ya declara para la cola —
+ * mismo grupo y `mismoProducto`, o sea nombre normalizado—. Esto es la **red** para lo
+ * que aquella decisión no puede ver, no una segunda regla.
+ *
+ * Lo que NO hace, declarado: los duplicados **ya escritos** en disco se quedan. El
+ * invariante rige de aquí en adelante; limpiarlos sería una migración de la tienda, que
+ * es justo el coste que esta forma evita.
+ *
+ * **Lo que cuesta, que es el precio de no migrar:** cada alta lee la tienda **entera**,
+ * no sólo el grupo — `getAll()` sin rango, porque el `keyPath` es `id` y no hay índice
+ * por el que acotar; poner uno sería la migración que §3 descartó. O sea O(n) por alta y
+ * O(n²) para n altas seguidas, con n = **pendientes sin enviar de este dispositivo**, no
+ * productos de la lista: lo que se drena en cuanto vuelve la red y lo que `reparte`
+ * caduca a las 24 h. En una compra son decenas de filas pequeñas y no se nota. Si algún
+ * día n creciera a miles, la medida de §3 cambia de signo y la clave derivada vuelve a
+ * la mesa — con su migración.
+ */
+export type Encolado = 'entro' | 'ya-estaba' | 'rechazado'
+
+export const encolar = async (p: Pendiente): Promise<Encolado> => {
+  let yaEstaba = false
+  const ok = await escribir(COLA, (t: IDBObjectStore) => {
+    const q = t.getAll() as IDBRequest<Pendiente[]>
+    q.onsuccess = () => {
+      const hay = (q.result ?? []).some(x =>
+        x.usuario === p.usuario && x.grupo === p.grupo && mismoProducto(x.nombre, p.nombre))
+      if (hay) { yaEstaba = true; return }
+      t.put(p)
+    }
+  })
+  if (!ok) return 'rechazado'
+  if (yaEstaba) return 'ya-estaba'
+  avisarDeLaCola()
+  return 'entro'
+}
 
 export const leerCola = (usuario: string): Promise<Pendiente[]> =>
   conTienda<Pendiente[]>(COLA, 'readonly', (t: IDBObjectStore) => t.getAll() as IDBRequest<Pendiente[]>)

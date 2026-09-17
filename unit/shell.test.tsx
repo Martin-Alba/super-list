@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor, cleanup, act, fireEvent } from '@testing-library/react'
-import { SIN_INSTANTANEA, SIN_RED_FUERA } from '@/lib/errors'
+import { DUPLICADO, SIN_ALMACEN, SIN_INSTANTANEA, SIN_RED_FUERA } from '@/lib/errors'
 
 /**
  * K4/K5 — El shell, atacado donde vive. La mitad de navegador (DoD 49) prueba la
@@ -57,7 +57,7 @@ beforeEach(() => {
   leerLista.mockResolvedValue([{ id: 'i1', name: 'anchoas', quantity: null }])
   leerNombre.mockResolvedValue('Familia Alba')
   leerCola.mockResolvedValue([])
-  encolar.mockResolvedValue(true)
+  encolar.mockResolvedValue('entro')
   rutaActual = '/'
   window.history.replaceState({}, '', rutaActual)
 })
@@ -209,7 +209,7 @@ describe('Spec C · desde la cáscara se apunta, con la misma regla', () => {
 
   // J6 — si el almacén dice que no, no se pinta ficha.
   it('si el almacén rechaza, no se pinta el producto', async () => {
-    encolar.mockResolvedValue(false)
+    encolar.mockResolvedValue('rechazado')
     enGrupo()
     render(<SinConexion />)
     await waitFor(() => expect(screen.getByTestId('add-item')).toBeTruthy())
@@ -527,8 +527,8 @@ describe('Spec C · la cáscara sondea hasta que vuelve la red', () => {
    */
   it('iter4 DoD 6: no se recarga con un envío en vuelo', async () => {
     vi.useFakeTimers()
-    let soltar: (v: boolean) => void = () => {}
-    encolar.mockImplementation(() => new Promise<boolean>(r => { soltar = r }))
+    let soltar: (v: string) => void = () => {}
+    encolar.mockImplementation(() => new Promise<string>(r => { soltar = r }))
     enGrupo()
     render(<SinConexion />)
     // Con reloj falso, `waitFor` no avanza: se deja asentar el efecto de montaje
@@ -543,7 +543,7 @@ describe('Spec C · la cáscara sondea hasta que vuelve la red', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(2_100) })
     expect(recargas, 'recargó con una escritura a medias: el producto se pierde').toBe(0)
     // Y cuando el envío termina, la recarga sí ocurre.
-    await act(async () => { soltar(true) })
+    await act(async () => { soltar('entro') })
     await act(async () => { await vi.advanceTimersByTimeAsync(5_000) })
     expect(recargas, 'tras terminar el envío no se recuperó').toBe(1)
   })
@@ -607,8 +607,8 @@ describe('Spec C · apuntar en la cáscara se comporta como en la vista', () => 
     fireEvent.change(screen.getByTestId('item-name'), { target: { value: v } })
 
   it('iter2 DoD 3: doble toque encola una sola vez', async () => {
-    let soltar: (v: boolean) => void = () => {}
-    encolar.mockImplementation(() => new Promise<boolean>(r => { soltar = r }))
+    let soltar: (v: string) => void = () => {}
+    encolar.mockImplementation(() => new Promise<string>(r => { soltar = r }))
     enGrupo()
     render(<SinConexion />)
     await waitFor(() => expect(screen.getByTestId('add-item')).toBeTruthy())
@@ -622,7 +622,7 @@ describe('Spec C · apuntar en la cáscara se comporta como en la vista', () => 
      */
     escribir('vino')
     fireEvent.click(screen.getByTestId('add-item'))
-    await act(async () => { soltar(true) })
+    await act(async () => { soltar('entro') })
     /**
      * Fija **la pareja** de guardas: medido, quitar las dos lo pone rojo, y
      * quitar sólo la `ref` no, porque aquí `disabled` ya ha vuelto a pintar. El
@@ -633,8 +633,8 @@ describe('Spec C · apuntar en la cáscara se comporta como en la vista', () => 
   })
 
   it('DoD 4 (cicatriz I4): el campo se vacía ANTES de esperar al almacén', async () => {
-    let soltar: (v: boolean) => void = () => {}
-    encolar.mockImplementation(() => new Promise<boolean>(r => { soltar = r }))
+    let soltar: (v: string) => void = () => {}
+    encolar.mockImplementation(() => new Promise<string>(r => { soltar = r }))
     enGrupo()
     render(<SinConexion />)
     await waitFor(() => expect(screen.getByTestId('add-item')).toBeTruthy())
@@ -643,11 +643,11 @@ describe('Spec C · apuntar en la cáscara se comporta como en la vista', () => 
     await waitFor(() => expect(encolar).toHaveBeenCalled())
     expect((screen.getByTestId('item-name') as HTMLInputElement).value,
       'lo tecleado durante el await se pierde: apuntando seis entran tres').toBe('')
-    await act(async () => { soltar(true) })
+    await act(async () => { soltar('entro') })
   })
 
   it('y si el almacén dice que no, el texto vuelve al campo', async () => {
-    encolar.mockResolvedValue(false)
+    encolar.mockResolvedValue('rechazado')
     enGrupo()
     render(<SinConexion />)
     await waitFor(() => expect(screen.getByTestId('add-item')).toBeTruthy())
@@ -776,5 +776,39 @@ describe('R5 la cáscara sin red también se entera de que la cola cambió', () 
     await act(async () => { avisarDeOtraPestana() })
     await waitFor(() => expect(screen.queryAllByTestId('pendiente'),
       'se llevó una ficha que sigue pendiente').toHaveLength(1))
+  })
+})
+
+/**
+ * DoD 6, la otra pantalla — La cáscara entra en esta spec porque es uno de los dos
+ * llamadores de `encolar`. Dejarla con el contrato viejo la haría decir «no se pudo
+ * guardar» sobre algo que sí está guardado.
+ */
+describe('R2 la cáscara distingue «ya estaba» de «no se pudo guardar»', () => {
+  const apuntar = async (nombre: string) => {
+    haySesionLocal.mockReturnValue(true)
+    leerUltimoUsuario.mockResolvedValue('u1')
+    leerLista.mockResolvedValue(null)
+    leerNombre.mockResolvedValue('Familia')
+    leerCola.mockResolvedValue([])
+    enGrupo()
+    render(<SinConexion />)
+    await waitFor(() => expect(screen.getByTestId('item-name')).toBeTruthy())
+    fireEvent.change(screen.getByTestId('item-name'), { target: { value: nombre } })
+    await act(async () => { fireEvent.click(screen.getByTestId('add-item')) })
+  }
+
+  it('duplicado DoD 6b: «ya estaba» dice duplicado', async () => {
+    encolar.mockResolvedValue('ya-estaba')
+    await apuntar('leche')
+    expect(screen.queryByTestId('aviso-local')?.textContent ?? '',
+      'dijo que no se pudo guardar sobre un producto que ya estaba').toBe(DUPLICADO)
+    expect(screen.queryAllByTestId('pendiente')).toHaveLength(0)
+  })
+
+  it('y «rechazado» sigue diciendo que no se pudo guardar', async () => {
+    encolar.mockResolvedValue('rechazado')
+    await apuntar('leche')
+    expect(screen.queryByTestId('aviso-local')?.textContent ?? '').toBe(SIN_ALMACEN)
   })
 })

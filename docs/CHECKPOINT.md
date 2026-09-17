@@ -343,7 +343,7 @@ vez (2026-09-07) el documento decía 221 tests en 36 ficheros cuando eran 245 en
 37, y la guarda que debía impedirlo daba verde sobre un documento con cifras
 inventadas.
 
-- Ficheros de prueba unitaria: 64
+- Ficheros de prueba unitaria: 65
 - Ficheros de prueba de navegador: 16
 
 
@@ -999,3 +999,124 @@ vueltas aquí.
 | 6 | `carga > apertura` dejó apertura inalcanzable | Duración y peso, dos ejes; niveles con casilla propia |
 | 7 | R6 retirada sobre un camino no ejecutado | R6 repuesta; instrumento de mutación con recuento |
 | 8 | Lectura rancia de la cola: la ficha desaparecía | *(umbral: se para y se reparte en dos specs)* |
+
+
+---
+
+# Verificación del ciclo «el duplicado lo impide la escritura» (2026-09-17)
+
+Dos iteraciones sobre un invariante de una línea. El producto se arregló en la primera
+y no volvió a fallar; **todo lo demás del ciclo fue sostén**.
+
+## Qué se construyó
+
+**El invariante vive en el almacén, no en el llamador** (§D.2). Dos instancias podían
+leer la cola, decidir las dos que no había duplicado, y escribir las dos: entre la
+lectura y la escritura hay un `await`. El re-chequeo pasa a ir **dentro de la misma
+transacción** de IndexedDB —`getAll` y, desde su `onsuccess`, el `put`—, y `encolar`
+devuelve tres estados (`entro` · `ya-estaba` · `rechazado`) en vez de un booleano, para
+que las dos pantallas puedan distinguir «ya estaba» de «no se pudo guardar». La forma
+alternativa —clave derivada— se descartó midiendo: obligaba a migrar la tienda y rompía
+el borrado por `id` en tres sitios, uno de ellos cerrar sesión.
+
+## Los dos números del ciclo
+
+**28 hallazgos de revisión en tres vueltas. Uno era del producto.**
+
+| | Hallazgos |
+|---|---|
+| **De producto** | **1** — y de severidad LOW: al mudarse el `put` dentro del `onsuccess`, un `put` que lance sale como error no capturado en el callback en vez de por el `catch`. El resultado para el usuario no cambia (`rechazado` igual), sólo el ruido. **Abierto.** |
+| **De sostén** | **27** — guardas que prometían más de lo que cazaban, falsos infieles, instrumentos de medida que no distinguían «lo impidió» de «nunca ocurrió», y el orden en que se escriben las listas |
+
+**De los 27 de sostén: 16 se cerraron dentro del ciclo y 11 quedaron como deuda** (10
+tras cerrar hoy el de los artefactos). El reparto por vuelta:
+
+| Vuelta | Producto | Sostén | Sostén cerrados | Sostén en deuda |
+|---|---|---|---|---|
+| Revisión de la spec sellada → iteración 1 | 0 | 10 | 10 | 0 |
+| Revisión de la iteración 1 → iteración 2 | 1 | 8 | 6 | 2 |
+| Revisión de la iteración 2 → cierre | 0 | 9 | 0 | 9 |
+| **Total** | **1** | **27** | **16** | **11** |
+
+Dicho sin adornos: **el producto aguantó 24 mutaciones y las dos sondas de navegador; el
+andamio no aguantó una sola revisión que lo atacara en serio.** Ninguna de las tres
+vueltas encontró un fallo de comportamiento visible para un usuario.
+
+## Terminal
+
+| | Antes del ciclo | Después |
+|---|---|---|
+| Casos unitarios | 1.518 | **1.571** |
+| Ficheros unitarios | 64 | **65** |
+| Casos de navegador | 88 | **89** |
+
+Al cerrar, el 2026-09-17: `typecheck`, `lint` con cero avisos, `test`, `build` sobre
+`.next` borrado y `test:e2e`, los cinco con código de salida cero.
+
+## Runtime — qué se ejercitó y contra qué build
+
+La suite de navegador entera contra `next start` sobre un build con `.next` borrado, a
+390 px. El caso nuevo usa **dos páginas del mismo contexto** —no dos contextos, que
+están aislados y no comparten IndexedDB: ahí el invariante no llegaría a ejercitarse y
+el caso pasaría en verde sin invariante ninguno—. Las pulsaciones se alinean en un
+instante de reloj común y la CPU va frenada 20× para que la ventana entre lectura y
+escritura sea de milisegundos.
+
+**Las dos mitades del caso están demostradas por separado**, cada una con su mutación y
+repitiendo hasta ver que falla siempre (§E.4(c)), medido el 2026-09-16: quitar el
+invariante lo pone rojo 5 de 5; callar el aviso de duplicado lo pone rojo 3 de 3.
+
+## Qué NO se verificó, y qué se hizo en su lugar
+
+- **La pasada manual con el gesto, a 390 px, por una persona.** Tercer ciclo seguido sin
+  hacerla. La cubre estructuralmente la suite de navegador —ese viewport, ese build—,
+  pero no es lo mismo. Es la deuda 52 y sigue viva.
+- **Los nueve hallazgos de la última revisión** no se construyeron: el ciclo se cierra
+  con ellos anotados como deuda, no arreglados.
+
+## El hallazgo del ciclo: la escalada del instrumento tiene un techo
+
+Tres versiones de la misma guarda —«ninguna escritura a la cola se salta el aviso»— y
+las tres se quedaron cortas, cada una por menos:
+
+| Versión | Cazaba | Lo que se le escapó |
+|---|---|---|
+| Patrón `escribir(COLA, …)` | 2 de 7 | `let`, `async function`, transacción directa, alias, literal |
+| Inventario de menciones de línea | 7 de 11 | plantilla, comillas dobles, concatenación, y una coartada (`// VIDA_COLA_MS`) que además **no excluía nada**: era una puerta sin cerradura |
+| Lector AST (`typescript`) | 11 de 11 sembradas | un comentario o una cadena en el cuerpo que nombre `avisarDeLaCola`, y **un solo salto de indirección** |
+
+Cada vuelta subió el listón y cada vuelta encontró un escape nuevo, porque la afirmación
+que se intenta sostener es universal —«ninguna forma»— y el instrumento siempre es
+particular. **La conclusión que el ciclo se lleva no es «hace falta un parser mejor»:
+es que el enunciado debe acotarse a lo que el instrumento comprueba**, y decir en el
+propio test qué queda fuera — igual que un falso declara en qué no es fiel.
+
+Esto **decide la deuda 56**, que quedó anotada «sin regla» el 2026-09-15 porque un caso
+no bastaba. Ya son tres, medidos, en el mismo fichero.
+
+**Y decide dónde para el ciclo.** Los nueve hallazgos de la última revisión —los dos HIGH
+incluidos— quedan como deuda 57 en vez de abrir una cuarta iteración, por la regla de
+impacto: el producto lleva tres vueltas correcto y lo que se iteraría es el cuarto
+instrumento sobre el mismo enunciado universal. En su lugar se aplicó el veredicto del
+revisor, que cuesta una línea y no una vuelta: **la guarda acota su enunciado a lo que
+comprueba y declara lo que queda fuera** —comentarios y cadenas que nombren al avisador, y
+un salto de indirección—, escrito en la cabecera de su propio describe para que lo lea
+quien vaya a añadir un escritor. Una promesa falsa se convierte así en una comprobación
+honesta, que es lo que la 56 concluye.
+
+## La segunda señal: el clasificador que no podía dar negativo
+
+La pasada de mutación de la primera iteración (2026-09-16) dio **19 de 19 cazadas** y ese
+número no significaba nada: clasificaba «suite roja ⇒ cazada» sin comprobar antes que la suite
+estuviera verde. Demostrado a dos caras — la **misma** mutación neutra sale
+`SUPERVIVIENTE` con la suite verde y `CAZADA` con un solo fallo ajeno dentro. La regla
+está ahora en `build`, y la pasada lleva su propia sonda: una mutación neutra declarada
+que **debe** sobrevivir.
+
+## Trayectoria
+
+| Vuelta | Qué encontró la revisión | Qué cambió |
+|---|---|---|
+| 1 | — (construcción del invariante) | Re-chequeo dentro de la transacción; `encolar` con tres estados |
+| 2 | Las guardas prometen más de lo que cazan; las dos medidas no distinguen | Lector AST; control de dos pestañas; baseline en la pasada; falso causal |
+| 3 | Lo mismo, un nivel más abajo: el parser también tiene escapes | *(se cierra el ciclo y se anota como deuda)* |

@@ -348,15 +348,35 @@ export function GroupView({
       usuario: me.id, grupo: group.id, nombre, cantidad,
       visibles: items, cola, id: crypto.randomUUID(), ahora: Date.now(),
     })
-    if (decision.accion === 'duplicado') {
+    /**
+     * R4 — Un solo sitio para el duplicado, las dos veces que se detecta: la que
+     * `decidirEncolar` ve y la que sólo ve el almacén. El docstring de esta función
+     * existe porque este bloque **ya estuvo escrito dos veces y ya divergió** — «sin
+     * red un duplicado no se encolaba, y con el servidor caído sí, con ficha doble»—,
+     * y la vuelta anterior lo reintrodujo dentro de la propia función que lo
+     * documenta. Con un solo sitio la igualdad es estructural y no hay nada que
+     * comprobar a mano.
+     */
+    const esDuplicado = () => {
       devolver(nombre, cantidad, desde); void avisar('duplicado', '23505'); return false
     }
+    if (decision.accion === 'duplicado') return esDuplicado()
     const p: Pendiente = decision.pendiente
-    // J6 — si el almacén no admite la escritura no se pinta ficha: el usuario
-    // vería su producto, recargaría, y no estaría.
-    if (!(await encolar(p))) {
+    /**
+     * J6 — si el almacén no admite la escritura no se pinta ficha: el usuario vería
+     * su producto, recargaría, y no estaría.
+     *
+     * R2 — Y se distingue de «ya estaba». El almacén es la red para lo que
+     * `decidirEncolar` no pudo ver —lo que otra instancia escribió entre la lectura y
+     * la escritura—, así que cuando dice `ya-estaba` el mensaje es el del duplicado,
+     * no el del disco lleno. Decir «no se pudo guardar» cuando el producto está
+     * guardado es una pantalla mintiendo sobre la causa.
+     */
+    const puesto = await encolar(p)
+    if (puesto === 'rechazado') {
       devolver(nombre, cantidad, desde); avisarTexto(SIN_ALMACEN, 'generico', 'mutacion'); return false
     }
+    if (puesto === 'ya-estaba') return esDuplicado()
     setPendientes(prev => [...prev, p])
     return true
   }

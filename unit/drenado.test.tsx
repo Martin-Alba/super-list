@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, waitFor, cleanup, act, fireEvent } from '@testing-library/react'
 import type { Item } from '@/lib/items'
 import type { Pendiente } from '@/lib/local'
-import { claseDe, mensajeDe, SIN_ALMACEN, GONE, SIN_ACCESO, RELECTURA, type Clase } from '@/lib/errors'
+import { claseDe, DUPLICADO, mensajeDe, SIN_ALMACEN, GONE, SIN_ACCESO, RELECTURA, type Clase } from '@/lib/errors'
 
 /**
  * I7/I9 — El drenado, atacado en la capa donde vive: montado dentro de la vista.
@@ -129,7 +129,7 @@ beforeEach(() => {
   oyentesDeLaCola = []
   sinRedAhora = false
   cola = []
-  encolar.mockResolvedValue(true)
+  encolar.mockResolvedValue('entro')
   guardarLista.mockResolvedValue(undefined)
   leerCola.mockResolvedValue([])
   quitarDeCola.mockResolvedValue(undefined)
@@ -287,7 +287,7 @@ describe('J6 una cola que no admite la escritura lo dice', () => {
   }
 
   it('DoD 42: no se pinta ficha, se avisa, y lo tecleado sigue ahí', async () => {
-    encolar.mockResolvedValue(false)
+    encolar.mockResolvedValue('rechazado')
     const r = montar()
     await apuntarSinRed(r)
     expect(r.queryAllByTestId('item-pendiente'),
@@ -340,8 +340,8 @@ describe('K2 lo tecleado durante la espera no se pisa', () => {
   }
 
   it('DoD 47: con el almacén rechazando, lo nuevo sobrevive', async () => {
-    let soltar!: (v: boolean) => void
-    encolar.mockImplementation(() => new Promise<boolean>(r => { soltar = r }))
+    let soltar!: (v: string) => void
+    encolar.mockImplementation(() => new Promise<string>(r => { soltar = r }))
     sinRedAhora = true
     const r = montar()
     await tecleaYEnvia(r, 'lentejas')
@@ -349,7 +349,7 @@ describe('K2 lo tecleado durante la espera no se pisa', () => {
       'el campo no se liberó: apuntar dos cosas seguidas obliga a esperar').toBe('')
 
     fireEvent.change(r.getByTestId('item-name'), { target: { value: 'garbanzos' } })
-    await act(async () => { soltar(false) })
+    await act(async () => { soltar('rechazado') })
 
     expect((r.getByTestId('item-name') as HTMLInputElement).value,
       'la rama de fallo pisó lo que se estaba tecleando').toBe('garbanzos')
@@ -377,8 +377,8 @@ describe('K2 lo tecleado durante la espera no se pisa', () => {
    * la cantidad del anterior: pedía «pan» y le salía «pan, 2».
    */
   it('DoD 60: tecleando sólo el nombre, no aparece la cantidad del anterior', async () => {
-    let soltar!: (v: boolean) => void
-    encolar.mockImplementation(() => new Promise<boolean>(r => { soltar = r }))
+    let soltar!: (v: string) => void
+    encolar.mockImplementation(() => new Promise<string>(r => { soltar = r }))
     sinRedAhora = true
     const r = montar()
     fireEvent.change(r.getByTestId('item-name'), { target: { value: 'lentejas' } })
@@ -386,7 +386,7 @@ describe('K2 lo tecleado durante la espera no se pisa', () => {
     await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
 
     fireEvent.change(r.getByTestId('item-name'), { target: { value: 'pan' } })
-    await act(async () => { soltar(false) })
+    await act(async () => { soltar('rechazado') })
 
     expect((r.getByTestId('item-name') as HTMLInputElement).value).toBe('pan')
     expect((r.getByTestId('item-qty') as HTMLInputElement).value,
@@ -395,7 +395,7 @@ describe('K2 lo tecleado durante la espera no se pisa', () => {
 
   // La sonda: si nunca devolviera nada, los tres de arriba pasarían por vacío.
   it('y si nadie ha tecleado nada, lo que falló vuelve al campo', async () => {
-    encolar.mockResolvedValue(false)
+    encolar.mockResolvedValue('rechazado')
     sinRedAhora = true
     const r = montar()
     await tecleaYEnvia(r, 'lentejas')
@@ -532,7 +532,7 @@ describe('N1 un alta fallida por red se encola', () => {
 
   it('DoD 5: si el almacén rechaza, vuelve al campo, se avisa y no hay ficha', async () => {
     falloDeRed()
-    encolar.mockResolvedValue(false)
+    encolar.mockResolvedValue('rechazado')
     const r = montar()
     await apuntar(r, 'lentejas', '3')
     expect((r.getByTestId('item-name') as HTMLInputElement).value).toBe('lentejas')
@@ -1636,5 +1636,52 @@ describe('duración · el aviso de la cola no sobrevive a su condición', () => 
       expect(r.queryAllByTestId('item-pendiente').length,
         'se llevó por delante una ficha que sigue pendiente').toBeGreaterThan(0)
     } finally { vi.useRealTimers() }
+  })
+})
+
+/**
+ * Spec «el duplicado lo impide la escritura» / DoD 6 — La vista distingue las dos
+ * razones por las que el almacén no guardó. Decir «no se pudo guardar» cuando el
+ * producto SÍ está guardado es una pantalla mintiendo sobre la causa, y el aviso que
+ * toca es el del duplicado.
+ */
+describe('R2 la vista distingue «ya estaba» de «no se pudo guardar»', () => {
+  it('duplicado DoD 6: el almacén dice «ya estaba» y se avisa del duplicado', async () => {
+    encolar.mockResolvedValue('ya-estaba')
+    addItem.mockResolvedValue({ data: null, clase: 'servidor', code: null })
+    const r = montar()
+    fireEvent.change(r.getByTestId('item-name'), { target: { value: 'leche' } })
+    await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
+    expect(r.queryByTestId('notice')?.textContent ?? '',
+      'dijo que no se pudo guardar sobre un producto que ya estaba').toContain(DUPLICADO)
+    expect(r.queryAllByTestId('item-pendiente'), 'pintó ficha de algo que ya estaba').toHaveLength(0)
+  })
+
+  /**
+   * Y el camino **normal** del duplicado sigue avisando: el que `decidirEncolar`
+   * ve porque el producto ya está en pantalla. La pidió la pasada de mutación —
+   * quitar ese aviso dejaba los 72 verdes—. El invariante del almacén es la red
+   * para lo que la decisión no puede ver, no su sustituto.
+   */
+  it('duplicado DoD 6c: apuntar algo que ya está en la lista avisa del duplicado', async () => {
+    // Sin red: es el camino que pasa por `decidirEncolar`, que con red no se toca.
+    await ponerSinRed(true)
+    const r = render(vista(null, [fila('leche')]))
+    fireEvent.change(r.getByTestId('item-name'), { target: { value: 'leche' } })
+    await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
+    expect(r.queryByTestId('notice')?.textContent ?? '',
+      'el duplicado que la decisión sí ve dejó de avisar').toContain(DUPLICADO)
+    expect(encolar, 'lo encoló pese a estar ya en la lista').not.toHaveBeenCalled()
+  })
+
+  // Sonda (§E.2): el rechazo del disco sigue diciendo lo suyo. Sin este caso, el de
+  // arriba pasaría con las dos ramas dando el mismo mensaje.
+  it('y un rechazo del disco sigue diciendo que no se pudo guardar', async () => {
+    encolar.mockResolvedValue('rechazado')
+    addItem.mockResolvedValue({ data: null, clase: 'servidor', code: null })
+    const r = montar()
+    fireEvent.change(r.getByTestId('item-name'), { target: { value: 'leche' } })
+    await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
+    expect(r.queryByTestId('notice')?.textContent ?? '').toContain(SIN_ALMACEN)
   })
 })

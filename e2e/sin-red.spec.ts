@@ -1,7 +1,7 @@
 import { test, expect, type Browser, type BrowserContext, type Page } from '@playwright/test'
 import { nuevoFlujoPkce, nuevoTarro, paraNavegador } from './pkce'
 import { admin } from './fixtures'
-import { PENDIENTE, RED, SERVIDOR, SIN_INSTANTANEA, SIN_RED, SIN_RED_ACCION,
+import { DUPLICADO, PENDIENTE, RED, SERVIDOR, SIN_INSTANTANEA, SIN_RED, SIN_RED_ACCION,
   SIN_RED_FUERA, SIN_RED_CON_COPIA, SIN_RED_ESPERANDO } from '../lib/errors'
 import { addActiveMember, createUser, makeGroup, signedInContext } from './fixtures'
 import { appOrigin } from './appOrigin'
@@ -1001,3 +1001,119 @@ test('DoD 1 (iter 5): pulsar la salida sin red no despierta el sondeo del framew
     expect(heads, `el bucle del framework arrancó: ${heads} HEAD en 10 s`).toBe(0)
     await a.ctx.close()
   })
+
+/**
+ * Spec «el duplicado lo impide la escritura» / DoD 1 — **Dos pestañas de verdad sobre
+ * la misma cola.** El arnés unitario monta dos raíces sobre un solo módulo, o sea una
+ * sola conexión a IndexedDB: §E.4(b) dice que si el requisito nombra dos instancias,
+ * dos corrutinas no valen. Dos páginas del **mismo contexto** es lo que comparte
+ * almacenamiento, que es el modelo de dos pestañas del mismo navegador —y no dos
+ * contextos, que están aislados y tendrían una cola cada uno: ahí el invariante no
+ * llegaría a ejercitarse y el caso pasaría en verde sin invariante ninguno.
+ *
+ * Nace en verde y se declara: el producto ya lo hace, y esto es la red que se pone
+ * roja el día que alguien cambie la transacción del almacén por otra cosa — que es
+ * exactamente lo que un IndexedDB falso no puede detectar.
+ *
+ * **Por qué no basta con pulsar en las dos y ya (§E.4(c)).** La primera versión hacía
+ * `Promise.all` de dos `click()`, y medida sin el invariante **fallaba 3 de 5 veces**:
+ * cada `click` es un viaje de CDP de varios milisegundos y la ventana entre `leerCola`
+ * y `encolar` es de menos de uno, así que las dos altas se serializaban a menudo — y
+ * serializadas las para `decidirEncolar`, sin que el almacén tenga que hacer nada. Un
+ * test que caza el defecto la mitad de las veces es el que la constitución prohíbe dar
+ * por bueno por nombre. Se arregla atacando las dos mitades del solape:
+ *
+ * - **Alinear la salida:** el `click` lo dispara cada página por su cuenta al llegar a
+ *   un instante de reloj común, no un viaje de CDP por pulsación.
+ * - **Ensanchar la ventana:** con la CPU frenada 20× el hueco entre la lectura y la
+ *   escritura pasa de microsegundos a milisegundos, que es donde el solape ocurre de
+ *   verdad. Se frena sólo para pulsar y se suelta después.
+ * - **Y tres rondas**, porque una carrera nunca se gana el 100 % de las veces: sin el
+ *   invariante basta con que una doble.
+ *
+ * Medido tras el arreglo: sin el invariante falla **5 de 5**; con él, verde.
+ */
+test('DoD 1: dos pestañas apuntan el mismo producto sin red, y sólo entra uno', async ({ browser }) => {
+  const a = await entrar(browser, 'dup1')
+  const gid = await grupoCon(a.page, 'Duplicado')
+  await expect(a.page.getByTestId('channel-live')).toHaveCount(1)
+
+  // Segunda pestaña, MISMO contexto: misma IndexedDB, misma cola.
+  const b = await a.ctx.newPage()
+  await b.goto(`/g/${gid}`)
+  await expect(b.getByTestId('items')).toBeVisible()
+
+  await a.ctx.setOffline(true)
+  await expect(a.page.getByTestId('sin-red')).toBeVisible({ timeout: 20_000 })
+  await expect(b.getByTestId('sin-red')).toBeVisible({ timeout: 20_000 })
+
+  const cdp = await Promise.all([a.ctx.newCDPSession(a.page), a.ctx.newCDPSession(b)])
+  const frenar = (rate: number) =>
+    Promise.all(cdp.map(c => c.send('Emulation.setCPUThrottlingRate', { rate })))
+
+  /** Las dos teclean lo mismo y pulsan **en el mismo instante de reloj**. */
+  const apuntarALaVez = async (nombre: string) => {
+    await a.page.getByTestId('item-name').fill(nombre)
+    await b.getByTestId('item-name').fill(nombre)
+    await frenar(20)
+    const cuando = Date.now() + 1_500
+    const pulsaron = await Promise.all([a.page, b].map(p => p.evaluate(async (t: number) => {
+      await new Promise(r => setTimeout(r, Math.max(0, t - Date.now())))
+      const boton = document.querySelector<HTMLElement>('[data-testid="add-item"]')
+      if (!boton) return false
+      boton.click()
+      return true
+    }, cuando)))
+    await frenar(1)
+    /**
+     * iter2 / R1 — La primera mitad del control: que las **dos** llegaran a pulsar. El
+     * `?.click()` de antes se tragaba en silencio un `data-testid` renombrado.
+     */
+    expect(pulsaron, 'una de las dos pestañas no pulsó: el caso dejaría de ser de dos pestañas')
+      .toEqual([true, true])
+  }
+
+  /**
+   * iter2 / R1 — La segunda mitad, y la que de verdad faltaba: **exactamente una** de las
+   * dos tiene que estar enseñando el aviso de duplicado. Es la prueba de que la segunda
+   * pestaña no sólo pulsó, sino que su alta **llegó al almacén y fue rechazada** — el
+   * control que §E.2 pide para distinguir «lo impidió el invariante» de «nunca ocurrió»,
+   * y que el arnés unitario tenía y éste no.
+   *
+   * Medido antes de escribirlo: sin este control, quitar la segunda pestaña del
+   * `Promise.all` dejaba el caso pasando **3/3 en verde** con el nombre intacto.
+   *
+   * Una y no dos: quien gana la carrera limpia su aviso al entrar (`limpiarAviso`), y
+   * quien pierde se queda con el de duplicado —que es «de una vez» y tapa al de la cola—,
+   * así que el recuento sigue siendo uno ronda tras ronda aunque se alternen.
+   */
+  const conAvisoDeDuplicado = async () => {
+    let n = 0
+    for (const pg of [a.page, b]) {
+      const aviso = pg.getByTestId('notice')
+      if (await aviso.count() > 0 && ((await aviso.textContent()) ?? '').includes(DUPLICADO)) n++
+    }
+    return n
+  }
+
+  for (const [i, nombre] of ['lentejas', 'garbanzos', 'alubias'].entries()) {
+    await apuntarALaVez(nombre)
+    // Una ficha por ronda, no dos: el almacén impidió el segundo.
+    await expect(a.page.getByTestId('item-pendiente'),
+      `la ronda de «${nombre}» dejó el producto dos veces en la cola`)
+      .toHaveCount(i + 1, { timeout: 15_000 })
+    await expect(async () => {
+      expect(await conAvisoDeDuplicado(),
+        `en la ronda de «${nombre}» nadie vio el duplicado: la segunda pestaña no llegó al almacén`)
+        .toBe(1)
+    }).toPass({ timeout: 15_000 })
+  }
+
+  // Y al volver la red, un solo producto de cada uno en la base.
+  await a.ctx.setOffline(false)
+  await expect(a.page.getByTestId('item-pendiente')).toHaveCount(0, { timeout: 30_000 })
+  const filas = await admin.from('items').select('name').eq('group_id', gid).is('deleted_at', null)
+  expect([...(filas.data ?? [])].map(x => x.name).sort(), 'entró algo dos veces')
+    .toEqual(['alubias', 'garbanzos', 'lentejas'])
+  await a.ctx.close()
+})

@@ -783,3 +783,106 @@ forma de estar presente.
 Queda anotado, sin regla, por el mismo motivo que la 55: un caso no basta para decidir
 si la regla debe mudarse a `build`, duplicarse, o si basta con que las guardas de
 ausencia enumeren sus formas.
+
+**DECIDIDA (2026-09-17), y la respuesta no era ninguna de las tres.** El ciclo «el
+duplicado lo impide la escritura» dio los otros dos casos, en el mismo fichero y sobre la
+misma afirmación: el inventario de menciones de línea que sustituyó al patrón cazaba 7 de
+11 —se le escapaban plantilla, comillas dobles, concatenación y una coartada—, y el lector
+AST que sustituyó al inventario caza las once sembradas pero se le escapan un comentario o
+una cadena que nombren `avisarDeLaCola` en el cuerpo, y **un solo salto de indirección**.
+
+Tres instrumentos, cada uno mejor que el anterior, y los tres cortos. Lo que decide no es
+dónde vive la regla: es que **una afirmación de ausencia universal no la sostiene ningún
+instrumento particular**, así que la guarda debe **acotar su enunciado a lo que comprueba**
+y declarar qué queda fuera, igual que un falso declara en qué no es fiel. Enumerar formas
+—la tercera opción de arriba— es la carrera que el que escribe código gana siempre.
+
+
+## 57 — Lo que la revisión de la iteración 2 dejó sin construir (2026-09-17)
+
+Nueve hallazgos, **todos de sostén**, anotados al cerrar el ciclo «el duplicado lo impide
+la escritura». Ninguno toca A.1, A.2, A.3 ni ningún *hard fail*: el producto pasó las tres
+revisiones sin un solo hallazgo de comportamiento.
+
+**Por qué no entran en una cuarta vuelta, incluidos los dos HIGH.** La regla de impacto
+manda parar: el producto lleva **tres vueltas correcto** —24 mutaciones cazadas, las dos
+mitades del caso de navegador rojas sin su mecanismo— y lo que se iteraría es el **cuarto
+instrumento sobre el mismo enunciado universal**, después de que los tres anteriores se
+quedaran cortos. Una cuarta versión encontraría su propio escape, que es lo que dice la
+56. Lo que sí se hizo en su lugar, y cuesta una línea en vez de una vuelta: **acotar el
+enunciado de la guarda a lo que de verdad comprueba y declarar lo que queda fuera**
+(`unit/almacen.test.ts`, cabecera del describe de R3). Las dos formas que se le escapan
+—57.1 y 57.2— están escritas ahí, en el sitio donde alguien las va a leer antes de
+añadir un escritor, y no sólo aquí.
+
+Un guarda que promete lo que cubre vale más que uno que promete el universo y se lo cree.
+
+### 57.1 El lector AST da por anunciada una escritura si el texto de su función menciona al avisador
+`unit/almacen.test.ts:489` — `anuncia` es `getText().includes('avisarDeLaCola')`, o sea un
+substring sobre el **texto fuente**. Probado: un comentario dentro del cuerpo
+(`/* no hace falta avisarDeLaCola */`) y una cadena (`const nota = 'no llamamos a
+avisarDeLaCola'`) marcan como anunciada una escritura muda. Es la clase de defecto
+—comentarios y cadenas engañando al escáner— que motivó tirar la guarda léxica, dentro del
+parser que vino a arreglarla.
+**Qué lo contiene:** las once siembras, que sí se cazan; y que ninguna escritura real del
+módulo usa esa forma.
+**Arreglo:** resolver el aviso por AST — una `CallExpression` cuyo callee sea el
+identificador— en vez de por texto. Dos líneas.
+
+### 57.2 Un salto de indirección derrota al lector entero
+`unit/almacen.test.ts:442` — `const guardar = (t, f) => escribir(t, f)` seguido de
+`guardar(COLA, cb)` produce **cero sitios**: sólo se ven llamadas directas a las cuatro
+puertas con nombre resoluble.
+**Qué lo contiene:** hoy no existe esa indirección en el módulo, y la sonda del propio
+lector afirma las tres puertas reales.
+**Arreglo — y aquí la recomendación es NO perseguir la forma:** acotar el enunciado del
+test a lo que comprueba y declarar lo que queda fuera. Ver la 56, que este ciclo decide.
+
+### 57.3 La sonda del clasificador puede desaparecer en silencio
+`pasada.sh:275-279` — la comprobación de que la mutación NEUTRA sobrevive sólo recorre la
+lista de cazadas. Si la NEUTRA cae en «no aplicables» porque su ancla se movió, nadie dice
+nada y la pasada se da por buena **sin sonda de clasificador**.
+**Arreglo:** afirmar que la NEUTRA está *en* supervivientes, no que falta de cazadas.
+
+### 57.4 Falso positivo del lector sobre lecturas por transacción cruda
+`unit/almacen.test.ts:483` — `db.transaction(COLA,'readonly')` + `tx.objectStore(COLA)`
+sale marcada como escritura muda: el sitio de `objectStore` no lleva modo y se clasifica
+como escritura (fallar cerrado). Una lectura legítima futura pondría la guarda roja con un
+mensaje que señala otra cosa.
+**Arreglo:** heredar el modo de la transacción que envuelve.
+
+### 57.5 Una sombra local de `COLA` ciega al lector
+`unit/almacen.test.ts:445` — el mapa de constantes es plano, sin ámbito: un
+`const COLA = 'otra'` local en cualquier función deja el lector sin ver la cola.
+**Qué lo contiene:** la sonda del propio lector se pone roja (afirma las tres puertas),
+así que no es un hueco silencioso — pero el mensaje apunta al sitio equivocado.
+
+### 57.6 El falso de `almacen.test.ts` no declara en qué no es fiel
+`unit/almacen.test.ts:44-52` — ahora modela la vida de la transacción, pero no dice que
+`put`/`delete` **no** cuentan como peticiones vivas, al revés que IndexedDB real. El otro
+falso de la suite sí lleva su declaración desde la iteración 1.
+
+### 57.7 `viva` no libera si `hacer` lanza
+`unit/almacen.test.ts:52` — se incrementa antes de llamar; una excepción dejaría la
+transacción sin cerrar y el caso colgado hasta el timeout de 20 s en vez de fallar legible.
+
+### 57.8 El `3` del punto fijo no dice por qué 3
+`unit/almacen.test.ts:461` — medido: las cadenas de alias en orden de fuente resuelven en
+una vuelta, así que es holgura sin justificar.
+
+### 57.9 La lista del DoD admite una lectura generosa de su propio orden
+`scratchpad/dod-iter2.md:5` — dice «no se había corrido `typecheck && lint && test &&
+build`», que se lee como que `typecheck` no corrió. Corrió suelto, como comprobación de
+compilación, antes de cerrar la lista. El instrumento contra el maquillaje no puede
+permitirse una redacción elástica.
+
+## 58 — Un `put` que lanza sale como error no capturado (2026-09-17)
+
+**El único hallazgo de producto de todo el ciclo, y es de ruido.** `lib/local.ts:229-237`
+— al mudarse el `put` dentro del `onsuccess` del `getAll`, dejó de estar cubierto por el
+`try/catch` de `escribir`: un `put` que lance (cuota, por ejemplo) sale como excepción no
+capturada en el callback en vez de por el `catch`.
+**Qué lo contiene:** el resultado para el usuario **no cambia** —la transacción aborta,
+`onabort` resuelve `false`, `encolar` devuelve `rechazado` y la vista avisa—; lo único que
+se añade es una excepción suelta en la consola.
+**Arreglo:** envolver el cuerpo del `onsuccess` en su propio `try/catch`.

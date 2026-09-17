@@ -290,10 +290,22 @@ export default function SinConexion() {
         visibles: items ?? [], cola,
         id: crypto.randomUUID(), ahora: Date.now(),
       })
-      if (decision.accion === 'duplicado') { devolver(); setAviso(DUPLICADO); return }
-      // J6 — si el almacén no admite la escritura no se pinta ficha: el usuario
-      // vería su producto, recargaría, y no estaría.
-      if (!(await encolar(decision.pendiente))) { devolver(); setAviso(SIN_ALMACEN); return }
+      // R4 — Un solo sitio para el duplicado, igual que en la vista del grupo: lo
+      // ve `decidirEncolar` o lo ve el almacén, y el usuario lee lo mismo.
+      const esDuplicado = () => { devolver(); setAviso(DUPLICADO) }
+      if (decision.accion === 'duplicado') { esDuplicado(); return }
+      /**
+       * J6 — si el almacén no admite la escritura no se pinta ficha: el usuario vería
+       * su producto, recargaría, y no estaría.
+       *
+       * R2 — Y se distingue de «ya estaba», igual que en la vista del grupo: el
+       * almacén es la red para lo que `decidirEncolar` no pudo ver. Esta pantalla entra
+       * en la spec porque es uno de los dos llamadores; dejarla con el contrato viejo
+       * la haría decir «no se pudo guardar» sobre algo que sí está guardado.
+       */
+      const puesto = await encolar(decision.pendiente)
+      if (puesto === 'rechazado') { devolver(); setAviso(SIN_ALMACEN); return }
+      if (puesto === 'ya-estaba') { esDuplicado(); return }
       setPendientes(prev => [...prev, decision.pendiente])
     } catch {
       // R3 — sin esto, un throw del almacén se llevaba lo tecleado sin decir
