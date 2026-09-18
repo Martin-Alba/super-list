@@ -49,6 +49,15 @@ const enGrupo = (id = '8f1f1f7a-0000-4000-8000-000000000000') => {
   window.history.replaceState({}, '', rutaActual)
 }
 
+/**
+ * Spec C / iter2 — La entrada **nueva**: la guarda de ruta manda aquí cuando no puede
+ * comprobar la sesión, y el grupo al que se iba viaja en `next`, no en la ruta.
+ */
+const porLaGuarda = (id = '8f1f1f7a-0000-4000-8000-000000000000', next?: string) => {
+  rutaActual = `/sin-conexion?next=${encodeURIComponent(next ?? `/g/${id}`)}`
+  window.history.replaceState({}, '', rutaActual)
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   oyentesDeLaCola = []
@@ -245,18 +254,24 @@ const EN_REGIMEN = 8
 
 describe('Spec C · la cáscara sondea hasta que vuelve la red', () => {
   let recargas = 0
+  let navegadoA: string | null = null
   beforeEach(() => {
     recargas = 0
+    navegadoA = null
     sessionStorage.clear()
     vi.stubGlobal('fetch', vi.fn(async () => respuesta(false)))
     Object.defineProperty(window, 'location', {
       configurable: true,
       value: {
         // La ruta se lee **cuando se usa**, no cuando se sustituye el objeto.
-        get pathname() { return rutaActual },
+        // La ruta se lee **cuando se usa**; `search` y `assign` hacen falta desde que
+        // la guarda de ruta puede traer aquí con el destino en `next` (Spec C / iter3).
+        get pathname() { return rutaActual.split('?')[0] },
+        get search() { const i = rutaActual.indexOf('?'); return i < 0 ? '' : rutaActual.slice(i) },
         get href() { return `http://localhost${rutaActual}` },
         get origin() { return 'http://localhost' },
         reload: () => { recargas += 1 },
+        assign: (u: string) => { navegadoA = u },
       },
     })
     Object.defineProperty(document, 'visibilityState', {
@@ -278,6 +293,58 @@ describe('Spec C · la cáscara sondea hasta que vuelve la red', () => {
    * `unstubAllGlobals`: sin esta restauración, los casos del bloque siguiente
    * corrían sobre el sustituto de éste. Probado: envenenarlo los ponía rojos.
    */
+  /**
+   * Spec C / iter3 R1 — **La entrada nueva es la primera vez que esta pantalla se alcanza
+   * con red.** La guarda manda aquí con el destino en `next`, y `/sin-conexion` es ruta
+   * pública: preguntarle al servidor por la URL actual la contesta 200 siempre. Medido en
+   * la app real: 4–5 recargas en 20–30 s, lo tecleado perdido en cada una, y sin volver al
+   * grupo ni con la API ya de vuelta.
+   */
+  describe('iter3 · desde la entrada de la guarda, se sondea y se vuelve AL DESTINO', () => {
+    const GRUPO = '/g/8f1f1f7a-0000-4000-8000-000000000000'
+
+    // DoD 1 — se pregunta por el destino, no por la URL actual.
+    it('la sonda pregunta por el grupo, no por /sin-conexion', async () => {
+      rutaActual = `/sin-conexion?next=${encodeURIComponent(GRUPO)}`
+      window.history.replaceState({}, '', '/')
+      vi.useFakeTimers()
+      render(<SinConexion />)
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_100) })
+      const pedidas = (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls.map(c => String(c[0]))
+      expect(pedidas.some(u => u.includes(GRUPO)),
+        `la sonda preguntó por la cáscara y no por el destino: ${pedidas.join(' · ')}`).toBe(true)
+      expect(pedidas.every(u => !u.endsWith('/sin-conexion')), 'preguntó por la ruta pública').toBe(true)
+    })
+
+    // DoD 2 — y al haber salida se navega al grupo, no se recarga encima.
+    it('al volver la API se navega al grupo, no se recarga la cáscara', async () => {
+      rutaActual = `/sin-conexion?next=${encodeURIComponent(GRUPO)}`
+      window.history.replaceState({}, '', '/')
+      vi.stubGlobal('fetch', vi.fn(async () => respuesta(true, 'text/html', `http://localhost${GRUPO}`)))
+      vi.useFakeTimers()
+      render(<SinConexion />)
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_100) })
+      expect(navegadoA, 'no se navegó al destino').toBe(`http://localhost${GRUPO}`)
+      expect(recargas, 'se recargó la cáscara sobre sí misma').toBe(0)
+    })
+
+    /**
+     * Y la mitad que cierra el bucle: mientras la API siga caída, el destino **redirige
+     * aquí**, y terminar en la cáscara no es haber salido. Sin esto, la redirección al
+     * mismo origen contaba como salida y la recarga volvía a empezar.
+     */
+    it('si el destino redirige a la cáscara, no cuenta como salida', async () => {
+      rutaActual = `/sin-conexion?next=${encodeURIComponent(GRUPO)}`
+      window.history.replaceState({}, '', '/')
+      vi.stubGlobal('fetch', vi.fn(async () =>
+        respuesta(true, 'text/html', 'http://localhost/sin-conexion?next=%2Fg%2F8f1f1f7a-0000-4000-8000-000000000000')))
+      vi.useFakeTimers()
+      render(<SinConexion />)
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_100) })
+      expect([navegadoA, recargas], 'volvió a la cáscara creyendo que había salida').toEqual([null, 0])
+    })
+  })
+
   const locationReal = Object.getOwnPropertyDescriptor(window, 'location')
   const visibilidadReal = Object.getOwnPropertyDescriptor(document, 'visibilityState')
   afterEach(() => {
@@ -810,5 +877,104 @@ describe('R2 la cáscara distingue «ya estaba» de «no se pudo guardar»', () 
     encolar.mockResolvedValue('rechazado')
     await apuntar('leche')
     expect(screen.queryByTestId('aviso-local')?.textContent ?? '').toBe(SIN_ALMACEN)
+  })
+})
+
+
+/**
+ * Spec C / iteración 2 — **La cáscara tiene que saber qué grupo enseñar cuando se llega
+ * por la entrada que la guarda abrió.** Medido con el gesto, por identidad de elemento:
+ * llegando a `/sin-conexion?next=/g/<id>` con la copia en el dispositivo, la cáscara decía
+ * «necesitas conexión» y pintaba cero fichas. El grupo salía de la **ruta**, y en esa
+ * entrada la ruta es `/sin-conexion`.
+ */
+describe('iter2 · la cáscara lee el grupo del destino conservado', () => {
+  const GRUPO = '8f1f1f7a-0000-4000-8000-000000000000'
+
+  const conCopiaDe = (usuario: string) => {
+    haySesionLocal.mockReturnValue(true)
+    leerUltimoUsuario.mockResolvedValue(usuario)
+    leerLista.mockImplementation(async (u: string, g: string) =>
+      u === usuario && g === GRUPO ? [{ id: 'i1', name: 'anchoas', quantity: null }] : null)
+    leerNombre.mockImplementation(async (u: string, g: string) =>
+      u === usuario && g === GRUPO ? 'Familia Alba' : null)
+    leerCola.mockResolvedValue([])
+  }
+
+  // DoD 1 — el caso que la pasada con el gesto encontró en rojo.
+  it('llegando por la guarda, pinta la lista del grupo al que se iba', async () => {
+    conCopiaDe('u1')
+    porLaGuarda(GRUPO)
+    render(<SinConexion />)
+    await waitFor(() => expect(screen.queryByText('anchoas')).toBeTruthy())
+    expect(screen.getByText('Familia Alba')).toBeTruthy()
+  })
+
+  /**
+   * DoD 3 y 4 — La valla, y es la razón por la que leer `next` no abre nada: la clave de
+   * la instantánea lleva **dentro** al usuario del dispositivo, así que `next` sólo dice
+   * *qué buscar*, nunca *qué se puede leer*. Un `next` fabricado hacia el grupo de otra
+   * persona no encuentra clave.
+   */
+  it('con `next` a un grupo del que este usuario no tiene copia, no pinta nada', async () => {
+    conCopiaDe('u1')
+    porLaGuarda('99999999-0000-4000-8000-000000000000')
+    render(<SinConexion />)
+    await waitFor(() => expect(screen.getByTestId('sin-red')).toBeTruthy())
+    expect(screen.queryByText('anchoas'), 'pintó la lista de otro grupo').toBeNull()
+  })
+
+  it('sin marca de último usuario, un `next` cualquiera no pinta nada', async () => {
+    haySesionLocal.mockReturnValue(false)
+    leerUltimoUsuario.mockResolvedValue(null)
+    leerLista.mockResolvedValue([{ id: 'i1', name: 'anchoas', quantity: null }])
+    leerNombre.mockResolvedValue('Familia Alba')
+    leerCola.mockResolvedValue([])
+    porLaGuarda(GRUPO)
+    render(<SinConexion />)
+    await waitFor(() => expect(screen.getByTestId('sin-red')).toBeTruthy())
+    expect(screen.queryByText('anchoas'),
+      'sin sesión en el dispositivo se pintó la lista de alguien').toBeNull()
+  })
+
+  /**
+   * iter4 R2 y R3 — Y el banner **se desdice** en cuanto la sonda ni sale: llegar por la
+   * guarda probaba que el servidor contestó *entonces*, y una URL sobrevive a una recarga
+   * en la que no participó. Medido en la app: cortando la red y recargando, el service
+   * worker servía la cáscara de caché y el banner seguía culpando al servicio.
+   */
+  it('si la sonda ni sale, el texto deja de culpar al servicio', async () => {
+    conCopiaDe('u1')
+    porLaGuarda(GRUPO)
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch') }))
+    render(<SinConexion />)
+    await waitFor(() => expect(screen.queryByText('anchoas')).toBeTruthy())
+    await waitFor(() => {
+      const banner = screen.getByTestId('sin-red').textContent ?? ''
+      expect(banner, 'siguió diciendo que el servicio no responde con la red caída')
+        .not.toContain('El servicio no responde')
+    }, { timeout: 4_000 })
+  })
+
+  /**
+   * iter3 R6 — Llegando por la guarda, la red está en pie: quien no contesta es el
+   * servicio. Decir «sin conexión» ahí es la pantalla mintiendo sobre el estado.
+   */
+  it('llegando por la guarda, el texto habla del servicio y no de la conexión', async () => {
+    conCopiaDe('u1')
+    porLaGuarda(GRUPO)
+    render(<SinConexion />)
+    await waitFor(() => expect(screen.queryByText('anchoas')).toBeTruthy())
+    const banner = screen.getByTestId('sin-red').textContent ?? ''
+    expect(banner, 'dijo «sin conexión» con la red en pie').toContain('El servicio no responde')
+  })
+
+  // DoD 5 — `next` pasa por `safeNext`, como en los otros sitios que lo consumen.
+  it('un `next` que apunta fuera del sitio no se sigue', async () => {
+    conCopiaDe('u1')
+    porLaGuarda(GRUPO, '//example.com/g/8f1f1f7a-0000-4000-8000-000000000000')
+    render(<SinConexion />)
+    await waitFor(() => expect(screen.getByTestId('sin-red')).toBeTruthy())
+    expect(screen.queryByText('anchoas'), 'siguió un destino de otro dominio').toBeNull()
   })
 })

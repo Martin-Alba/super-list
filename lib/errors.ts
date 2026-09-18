@@ -94,10 +94,25 @@ export const SIN_RED_ESPERANDO =
  * no se sabe de quién sería la cola: en los dos casos el banner no ofrece nada
  * que esta pantalla no pueda cumplir.
  */
+/**
+ * Spec C / iter3 R6 — El estado **nuevo**: la red está en pie y quien no contesta es el
+ * servicio de datos. Decir «sin conexión» ahí es la pantalla mintiendo sobre el estado, que
+ * es lo que §A.3 prohíbe en el servidor y no tiene más sentido aquí. Y la diferencia se
+ * nota: con la red caída no hay nada que hacer; con el servicio caído, lo que apuntes sale
+ * en cuanto vuelva, y nadie tiene que mirar el wifi.
+ */
+export const SERVICIO_CAIDO_CON_COPIA =
+  'El servicio no responde: esto es lo último que vimos. Puedes apuntar productos y se enviarán en cuanto vuelva.'
+export const SERVICIO_CAIDO_SIN_COPIA =
+  'El servicio no responde y no hay copia de este grupo. Puedes apuntar productos y se enviarán en cuanto vuelva.'
+
 export const bannerSinRed = (
-  estado: { enUnGrupo: boolean; haySesion: boolean; hayCopia: boolean },
+  estado: { enUnGrupo: boolean; haySesion: boolean; hayCopia: boolean; servicioCaido?: boolean },
 ): string => {
   if (!estado.enUnGrupo || !estado.haySesion) return SIN_RED_ESPERANDO
+  if (estado.servicioCaido) {
+    return estado.hayCopia ? SERVICIO_CAIDO_CON_COPIA : SERVICIO_CAIDO_SIN_COPIA
+  }
   return estado.hayCopia ? SIN_RED_CON_COPIA : SIN_RED_SIN_COPIA
 }
 
@@ -106,6 +121,17 @@ export const SIN_RED_FUERA = 'Necesitas conexión para entrar y ver tus grupos.'
 
 /** I2 / borde 5 — Un grupo que nunca se llegó a abrir no se puede enseñar. */
 export const SIN_INSTANTANEA = 'Necesitas conexión para ver este grupo por primera vez.'
+/**
+ * iter4 R3 — El gemelo. R6 desdobló el banner y dejó a éste diciendo «Necesitas conexión»
+ * **dos líneas debajo** de «El servicio no responde»: la contradicción que este fichero ya
+ * tenía escrita de una iteración anterior, reabierta por el estado nuevo.
+ */
+export const SIN_INSTANTANEA_SERVICIO =
+  'El servicio no responde. Para ver este grupo por primera vez hace falta que vuelva.'
+
+/** El texto de «no hay copia de este grupo», según quién esté fallando. */
+export const sinInstantanea = (servicioCaido: boolean): string =>
+  servicioCaido ? SIN_INSTANTANEA_SERVICIO : SIN_INSTANTANEA
 
 /** R3 — Lo que se ve junto a un producto que aún no ha llegado al servidor. */
 export const PENDIENTE = 'Se enviará al volver la conexión'
@@ -218,6 +244,27 @@ export function claseDe(
   if (!codigo) return 'servidor'
   const mensaje = typeof e.message === 'string' ? e.message : String(error)
   return clasificar(codigo, mensaje, opciones.haySesion ?? true)
+}
+
+/**
+ * Spec C / R1 — **«No he podido comprobarlo» frente a «no tienes sesión».** Vive aquí y
+ * no en la guarda de ruta por la misma razón que todo lo demás de este fichero: el error
+ * crudo de la base no sale, y quien pregunta recibe una respuesta, no un objeto.
+ *
+ * La frontera está **medida** contra el cliente real, no supuesta: sin sesión devuelve
+ * `AuthSessionMissingError` con status 400; una sesión inválida con la API viva,
+ * `AuthApiError` con 403; y una sesión real con la API caída, `AuthRetryableFetchError`
+ * con status **0**. Sólo la última es «no he podido comprobarlo».
+ *
+ * `status === 0` es la señal de un fallo de transporte, que no llega a tener status HTTP;
+ * el nombre cubre además los 5xx, que el cliente entrega con esa misma clase. Lo que no encaja aquí devuelve `false`, y quien pregunta cae a su destino cerrado:
+ * enumerar lo seguro y mandar el resto al camino que ya deniega es lo que permite que
+ * esta lista no tenga que estar completa.
+ */
+export function noSePudoComprobar(error: unknown): boolean {
+  if (!error) return false
+  const e = error as { status?: unknown; name?: unknown }
+  return e.status === 0 || e.name === 'AuthRetryableFetchError'
 }
 
 /**

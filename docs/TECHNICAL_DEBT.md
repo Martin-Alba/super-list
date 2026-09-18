@@ -886,3 +886,27 @@ capturada en el callback en vez de por el `catch`.
 `onabort` resuelve `false`, `encolar` devuelve `rechazado` y la vista avisa—; lo único que
 se añade es una excepción suelta en la consola.
 **Arreglo:** envolver el cuerpo del `onsuccess` en su propio `try/catch`.
+
+
+## 59 — Lo que el ciclo de la guarda de ruta dejó abierto (2026-09-18)
+
+### 59.1 Una copia local sobrevive a dejar de ser miembro
+`lib/local.ts:303` — nada borra la instantánea `<usuario>:<grupo>` cuando ese usuario deja de
+ser miembro `active`: `olvidarTodo` sólo corre al cambiar de usuario y al salir. Hallazgo
+adyacente, **preexistente**, reportado y no entrado en el ciclo.
+**Qué cambió, y por eso se anota ahora:** la entrada nueva hace esa copia alcanzable **con el
+servidor vivo**, no sólo bajo un corte total. Si §A.1 alcanza o no a una copia local de lo
+que la persona vio legítimamente no está escrito en ningún sitio; la alcanzabilidad sí
+cambió.
+
+### 59.2 El ítem 2 de la Spec C no tiene guarda automática
+El requisito es que **el servidor**, al no poder comprobar la sesión, mande a la cáscara. El
+arnés de navegador no puede cortar lo que el servidor de Next le pide a Supabase, y hacerlo
+exigiría parar un contenedor desde la suite. Guardado en su capa por unidad y cruzado a mano
+en la pasada con el gesto; **lo que falta es la red que se pone roja sola dentro de un año.**
+
+### 59.3 La API colgada no está cubierta, y el destino depende de la edad del token
+Medido: token vigente → cáscara a los 10.004 ms; token caducado → login a los 12.005 ms, con
+la misma API colgada. Está declarado en la Spec C §8b antes de cerrarla, y es el hueco que la
+**Spec D** (en el roadmap) existe para cerrar. No es deuda de ejecución: es un requisito que
+falta.

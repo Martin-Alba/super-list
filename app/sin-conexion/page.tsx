@@ -4,7 +4,8 @@ import { useEffect, useRef, useState } from 'react'
 import { alCambiarLaCola, encolar, leerCola, leerLista, leerNombre, leerUltimoUsuario } from '@/lib/local'
 import { haySesionLocal } from '@/lib/sesionLocal'
 import { decidirEncolar } from '@/lib/cola'
-import { bannerSinRed, DUPLICADO, ESCRIBE_NOMBRE, esperaDeSondeo, SIN_ALMACEN, SIN_INSTANTANEA,
+import { safeNext } from '@/lib/routes'
+import { bannerSinRed, DUPLICADO, ESCRIBE_NOMBRE, esperaDeSondeo, sinInstantanea, SIN_ALMACEN,
   SIN_RED_FUERA } from '@/lib/errors'
 import type { Item } from '@/lib/items'
 import type { Pendiente } from '@/lib/local'
@@ -65,7 +66,46 @@ const oculta = () => document.visibilityState === 'hidden'
  * a la red. Si se sirviera de caché acertaría siempre sin red, y sería un bucle
  * de recargas.
  */
-async function haySalida(): Promise<boolean> {
+/**
+ * Spec C / iter3 R1 — **A dónde queremos llegar**, que desde la entrada nueva no es donde
+ * estamos. La guarda de ruta manda aquí con el destino en `next`, y `/sin-conexion` es ruta
+ * **pública**: preguntarle al servidor por la URL actual la contesta 200 siempre, así que la
+ * pantalla se recargaba sobre sí misma en bucle —medido: 4–5 recargas en 20–30 s, y lo que
+ * la persona estaba escribiendo perdido en cada una— sin volver al grupo ni con la API ya
+ * de vuelta.
+ */
+/**
+ * iter3 R6 — Haber llegado **por la guarda** es prueba de que el servidor de la app
+ * contestó: fue él quien redirigió aquí. O sea que la red está en pie y quien no responde
+ * es el servicio de datos, y el banner puede decirlo en vez de hablar de conexión.
+ */
+function nextConservado(): string {
+  return safeNext(new URLSearchParams(window.location.search).get('next'))
+}
+
+function destinoDeSalida(): string {
+  if (window.location.pathname !== '/sin-conexion') return window.location.href
+  const next = nextConservado()
+  /**
+   * #8 — Un `next` que apunta a la **propia cáscara** no es un destino: sondearlo da una
+   * respuesta que el criterio de abajo descarta por su ruta, y la pantalla no se recupera
+   * jamás. La guarda nunca lo escribe, pero a mano se alcanza.
+   */
+  if (next === '/' || next.startsWith('/sin-conexion')) return window.location.href
+  return new URL(next, window.location.origin).href
+}
+
+/** #9 — El mismo hecho, derivado y no releído: dos lecturas podían discrepar. */
+const llegadaPorLaGuarda = (): boolean => destinoDeSalida() !== window.location.href
+
+/**
+ * iter4 R2 — La sonda dice **por qué**, no sólo sí o no. `sin-red` es el caso en que la
+ * petición ni sale: es la única señal fiable de que la red se fue, y con ella el banner
+ * puede dejar de afirmar que el servidor contestó.
+ */
+type Desenlace = 'salida' | 'sin-salida' | 'sin-red'
+
+async function haySalida(): Promise<Desenlace> {
   const ctrl = new AbortController()
   const reloj = setTimeout(() => ctrl.abort(), 2_000)
   try {
@@ -74,8 +114,8 @@ async function haySalida(): Promise<boolean> {
      * revisión: con la sonda en `/`, un origen que contesta mientras `/g/<id>`
      * sigue cayendo recarga cada 2 s para siempre.
      */
-    const res = await fetch(window.location.href, { cache: 'no-store', signal: ctrl.signal })
-    if (!res.ok) return false
+    const res = await fetch(destinoDeSalida(), { cache: 'no-store', signal: ctrl.signal })
+    if (!res.ok) return 'sin-salida'
     /**
      * No se rechaza *toda* redirección: sin sesión, `proxy.ts` manda `/g/<id>` a
      * `/login`, y exigir `!res.redirected` dejaba la cáscara encerrada para
@@ -83,7 +123,13 @@ async function haySalida(): Promise<boolean> {
      * destino siga siendo **nuestro origen**: un portal cautivo que redirige
      * fuera sigue rechazado, y el login propio no.
      */
-    if (new URL(res.url).origin !== window.location.origin) return false
+    if (new URL(res.url).origin !== window.location.origin) return 'sin-salida'
+    /**
+     * iter3 R1 — Y acabar **en la cáscara** no es haber salido. Con la API caída, el
+     * destino redirige aquí: aceptarlo como salida es el bucle de recargas que esta
+     * iteración cierra.
+     */
+    if (new URL(res.url).pathname === '/sin-conexion') return 'sin-salida'
     /**
      * R5 — Un portal cautivo contesta 200 a todo, y este repositorio ya paga esa
      * defensa dos veces en el worker. Límite escrito: un portal que sirva 200 y
@@ -91,9 +137,10 @@ async function haySalida(): Promise<boolean> {
      * cada sonda, y eso cuesta más de lo que ahorra; el daño duradero —guardar su
      * HTML— lo impide el worker, que es donde estaba el problema.
      */
-    return /text\/html/i.test(res.headers.get('content-type') ?? '')
+    return /text\/html/i.test(res.headers.get('content-type') ?? '') ? 'salida' : 'sin-salida'
   } catch {
-    return false
+    // Ni salió la petición: la red se fue. Distinto de «salió y no hay salida».
+    return 'sin-red'
   } finally {
     clearTimeout(reloj)
   }
@@ -119,6 +166,7 @@ export default function SinConexion() {
   const [listo, setListo] = useState(false)
   const [nombreGrupo, setNombreGrupo] = useState<string | null>(null)
   const [grupo, setGrupo] = useState<string | null>(null)
+  const [porLaGuarda, setPorLaGuarda] = useState(false)
   const [usuario, setUsuario] = useState<string | null>(null)
   const [pendientes, setPendientes] = useState<Pendiente[]>([])
   const [texto, setTexto] = useState('')
@@ -133,7 +181,24 @@ export default function SinConexion() {
       // rechazo aquí dejaba el shell en blanco: ni lista, ni «necesitas
       // conexión». La guarda vive donde vive el daño, además de en el módulo.
       try {
-        const g = /\/g\/([0-9a-f-]{36})/i.exec(window.location.pathname)?.[1] ?? null
+        /**
+         * Spec C / iteración 2 — El grupo sale de la ruta **o del destino conservado**.
+         * La guarda de ruta manda aquí cuando no puede comprobar la sesión, y entonces la
+         * ruta es `/sin-conexion`: el grupo al que se iba viaja en `next`. Medido con el
+         * gesto: sin esto la cáscara decía «necesitas conexión» teniendo la copia delante.
+         *
+         * `next` es **intención, no autoridad** (§B.5). Sólo dice *qué buscar*: lo que
+         * decide qué se puede leer sigue siendo la marca de último usuario, porque la
+         * clave de la instantánea lleva dentro al usuario del dispositivo
+         * (`<usuario>:<grupo>`). Un `next` fabricado hacia el grupo de otra persona no
+         * encuentra clave. Y pasa por `safeNext` como en los otros sitios que lo consumen.
+         */
+        // #11 — anclado: el requisito dice «éste es el destino», no «en algún sitio de esta
+        // cadena». Sin el ancla, `next=/login?volver=/g/<uuid>` entregaba ese grupo.
+        const delCamino = (ruta: string) => /^\/g\/([0-9a-f-]{36})/i.exec(ruta)?.[1] ?? null
+        setPorLaGuarda(llegadaPorLaGuarda())
+        const g = delCamino(window.location.pathname)
+          ?? delCamino(nextConservado())
         setGrupo(g)
         /**
          * K4 — La marca dice de quién es la instantánea; no dice quién está
@@ -194,10 +259,19 @@ export default function SinConexion() {
 
     const ciclo = async (mia: number) => {
       if (!vivo || mia !== generacion || oculta()) return
-      const hay = await haySalida()
+      const desenlace = await haySalida()
+      const hay = desenlace === 'salida'
       // Se vuelve a mirar **después** del await: la pestaña pudo ocultarse, el
       // componente desmontarse, o esta rama quedar obsoleta mientras se esperaba.
       if (!vivo || mia !== generacion || oculta()) return
+      /**
+       * iter4 R2 — Llegar por la guarda probaba que el servidor contestó **entonces**, y
+       * una URL sobrevive a una recarga en la que no participó: medido, cortando la red y
+       * recargando, el service worker sirve la cáscara de caché y el banner seguía
+       * afirmando que el servicio era el que fallaba. La primera sonda que ni sale lo
+       * desmiente, y cuesta menos de un ciclo (≤2 s).
+       */
+      if (desenlace === 'sin-red') setPorLaGuarda(false)
       if (hay) {
         /**
          * R5 — Pero no encima de una escritura a medias. Recargar entre
@@ -216,7 +290,11 @@ export default function SinConexion() {
          * repetir a los mismos 2 s indefinidamente.
          */
         guardarIntento(intento + 1)
-        window.location.reload()
+        // iter3 R1 — Se navega **al destino**, no se recarga la URL actual: recargar
+        // `/sin-conexion?next=…` vuelve a la cáscara aunque la API ya conteste.
+        const destino = destinoDeSalida()
+        if (destino === window.location.href) window.location.reload()
+        else window.location.assign(destino)
         return
       }
       intento += 1
@@ -345,7 +423,8 @@ export default function SinConexion() {
 
       <p role="status" data-testid="sin-red"
          className="rounded-xl bg-amber-50 p-3 text-sm text-amber-800">
-        {bannerSinRed({ enUnGrupo: !!grupo, haySesion: !!usuario, hayCopia: items !== null })}
+        {bannerSinRed({ enUnGrupo: !!grupo, haySesion: !!usuario, hayCopia: items !== null,
+          servicioCaido: porLaGuarda })}
       </p>
 
       {sePuedeApuntar && (
@@ -372,7 +451,7 @@ export default function SinConexion() {
         */}
       {listo && items === null && !pendientes.length && (
         <p data-testid="sin-instantanea" className="text-neutral-500">
-          {grupo ? SIN_INSTANTANEA : SIN_RED_FUERA}
+          {grupo ? sinInstantanea(porLaGuarda) : SIN_RED_FUERA}
         </p>
       )}
 

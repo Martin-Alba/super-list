@@ -50,11 +50,32 @@ describe('J4 toda llamada de red tiene cota', () => {
   it.each(FACTORIES)('%s construye su cliente con el fetch acotado', (file) => {
     const src = readFileSync(file, 'utf8')
     expect(src).toContain('boundedFetch')
-    expect(src).toMatch(/global:\s*\{\s*fetch:\s*boundedFetch\(\)/)
+    // iter4 R4 — Y el patrón se ciñe a lo que promete: medido, la versión anterior
+    // aceptaba `NETWORK_TIMEOUT_MS * 100` —cota de 1.000 s, o sea ninguna—, `+ 3_600_000`
+    // y hasta otro identificador que empezara igual. Las tres están abajo como sondas.
+    // Spec C / iter3 R2 — Se acepta también `boundedFetch(NETWORK_TIMEOUT_MS, …)`: la
+    // guarda de ruta le pasa además una señal de corte para abortar la operación entera
+    // cuando vence el veredicto. Se admite la constante declarada, **no** un número
+    // cualquiera: un `boundedFetch(999_999)` sigue poniendo esto rojo.
+    expect(src).toMatch(/global:\s*\{\s*fetch:\s*boundedFetch\(\s*(\)|NETWORK_TIMEOUT_MS\s*[,)])/)
   })
 
   it('control positivo: el patrón detecta su ausencia', () => {
     const sinCota = 'const c = createServerClient(url, key, { cookies })'
-    expect(sinCota).not.toMatch(/global:\s*\{\s*fetch:\s*boundedFetch\(\)/)
+    expect(sinCota).not.toMatch(/global:\s*\{\s*fetch:\s*boundedFetch\(\s*(\)|NETWORK_TIMEOUT_MS\s*[,)])/)
+
+    /**
+     * iter4 R4 — Sondas (§E.2): tres formas que **parecen** la cota declarada y no lo son.
+     * El control de arriba sólo probaba que el patrón exige la palabra `boundedFetch`, así
+     * que no distinguía el patrón estrecho del ancho: éstas sí.
+     */
+    for (const falsa of [
+      'global: { fetch: boundedFetch(NETWORK_TIMEOUT_MS * 100) }',
+      'global: { fetch: boundedFetch(NETWORK_TIMEOUT_MS + 3_600_000) }',
+      'global: { fetch: boundedFetch(NETWORK_TIMEOUT_MSX) }',
+    ]) {
+      expect(falsa, `la guarda acepta una cota que no es la declarada: ${falsa}`)
+        .not.toMatch(/global:\s*\{\s*fetch:\s*boundedFetch\(\s*(\)|NETWORK_TIMEOUT_MS\s*[,)])/)
+    }
   })
 })

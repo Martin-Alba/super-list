@@ -343,7 +343,7 @@ vez (2026-09-07) el documento decía 221 tests en 36 ficheros cuando eran 245 en
 37, y la guarda que debía impedirlo daba verde sobre un documento con cifras
 inventadas.
 
-- Ficheros de prueba unitaria: 65
+- Ficheros de prueba unitaria: 67
 - Ficheros de prueba de navegador: 16
 
 
@@ -1120,3 +1120,115 @@ que **debe** sobrevivir.
 | 1 | — (construcción del invariante) | Re-chequeo dentro de la transacción; `encolar` con tres estados |
 | 2 | Las guardas prometen más de lo que cazan; las dos medidas no distinguen | Lector AST; control de dos pestañas; baseline en la pasada; falso causal |
 | 3 | Lo mismo, un nivel más abajo: el parser también tiene escapes | *(se cierra el ciclo y se anota como deuda)* |
+
+
+---
+
+# Verificación del ciclo «una API que no contesta no te deja fuera de tu propia lista» (2026-09-18)
+
+Cuatro iteraciones y dos revisiones sobre la guarda de ruta. Sale de la primera pasada
+manual en nueve días, y **es el primer ciclo de los tres en que el producto pesa tanto como
+el sostén**.
+
+## Qué se construyó
+
+La guarda de ruta (`lib/supabase/middleware.ts`) resolvía «no hay sesión» y «no he podido
+comprobarla» en el mismo `user = null` y mandaba las dos al login. Con el plan gratuito
+pausado —la web responde, la base no— eso deja a quien **sí** tiene sesión fuera de una
+lista que su dispositivo ya guarda, y en una pantalla desde la que tampoco puede entrar.
+
+Ahora lee el `error` que descartaba y sólo la señal de red desvía a la cáscara; la cáscara
+deriva el grupo del destino conservado y puede enseñar la lista; el sondeo pregunta por ese
+destino en vez de por sí misma; y los textos distinguen «no hay red» de «el servicio no
+responde». Las tres clases de error que lo sostienen están **medidas contra el cliente
+real**, no supuestas.
+
+## Los dos números del ciclo
+
+**22 hallazgos de revisión en dos vueltas: 11 de producto y 11 de sostén.**
+
+| Vuelta | Producto | Sostén |
+|---|---|---|
+| Revisión de base + iteraciones 1 y 2 | 7 | 5 |
+| Revisión de la iteración 3 | 4 | 6 |
+| **Total** | **11** | **11** |
+
+**La proporción se movió, y mucho.** Comparado con los dos ciclos anteriores:
+
+| Ciclo | Producto | Sostén |
+|---|---|---|
+| «El duplicado lo impide la escritura» (2026-09-17) | **1** | 27 |
+| «Una API que no contesta…» (2026-09-18) | **11** | 11 |
+
+Y la explicación no es que se revisara mejor: es **qué se tocó**. El ciclo del duplicado
+añadía un invariante de tres líneas bajo una superficie madura, así que casi no había
+producto donde equivocarse y los hallazgos caían todos en el andamio. Éste cambió una
+**guarda de ruta** —por la que pasa el sitio entero— y abrió un **camino de usuario que no
+existía**: la cáscara alcanzada con red. Donde hay superficie nueva, hay producto que
+romper, y se rompió: un bucle de recargas que borraba lo tecleado, una rotación de token
+abandonada que cerraba la sesión, dos textos que mentían sobre el estado.
+
+Dicho de otro modo: **la proporción no mide la calidad del trabajo, mide cuánta superficie
+nueva tocó.** Conviene recordarlo antes de leerla como una nota.
+
+## Terminal
+
+| | Antes del ciclo | Después |
+|---|---|---|
+| Casos unitarios | 1.571 | **1.605** |
+| Ficheros unitarios | 65 | **67** |
+| Casos de navegador | 89 | 89 |
+
+Al cerrar, el 2026-09-18: `typecheck`, `lint` con cero avisos, `test`, `build` sobre `.next`
+borrado y `test:e2e`, los cinco con código de salida cero. Pasada de mutación con baseline
+verde: **16 mutaciones, 16 cazadas, 0 no aplicables**, una superviviente que es la sonda
+NEUTRA del propio clasificador, y **3 retiradas que el informe nombra con su motivo**.
+
+## Runtime — qué se ejercitó y contra qué build
+
+La suite de navegador entera contra `next start` sobre un build con `.next` borrado. Y la
+pasada con el gesto, **por identidad de elemento y nunca por coordenada** (la razón está en
+`skills/DEBT.md` §3): con la API parada y el servidor vivo, recargar dentro del grupo lleva
+a la cáscara con las 15 fichas y el texto nuevo, y **un producto a medio escribir sobrevive
+38 segundos sin una sola recarga** — antes se perdía cuatro o cinco veces. Con la API de
+vuelta, la sonda apunta al grupo y da salida.
+
+## Qué NO se verificó, y qué se hizo en su lugar
+
+- **La navegación automática de vuelta al grupo.** La ventana no estaba visible para el
+  sistema y el sondeo se pausa a propósito cuando la pestaña no se ve. Se midió en su lugar
+  el veredicto de la sonda —apunta al grupo, 200, no acaba en la cáscara—; la navegación en
+  sí la cubren, a 2026-09-18, `unit/shell.test.tsx` y `e2e/sin-red.spec.ts:777`.
+- **El ítem 2 de la base no tiene guarda automática** (2026-09-18): el arnés de navegador no
+  puede cortar lo que el servidor de Next le pide a Supabase. Guardado en su capa por
+  unidad, y cruzado a mano.
+- **La API colgada no está cubierta**, y está declarado en la spec antes de cerrarla. Ver
+  abajo.
+
+## El hallazgo que cierra el ciclo: un reloj no es evidencia
+
+Tres revisiones seguidas, tres HIGH, **la misma forma**:
+
+| Vuelta | El defecto |
+|---|---|
+| 1 | La cota de 3 s leía «tarda» como «no contesta» |
+| 2 | Agotar la cota **desviaba**, y eso relajaba la condición que no se negocia |
+| 3 | La cota por encima del transporte hace que el reloj del transporte **fabrique** la señal de red |
+
+Cada arreglo movió el problema en vez de cerrarlo. La causa no es el valor: es que **el
+enunciado pide acotar el veredicto sin dar forma de saber quién cortó** —el reloj propio, el
+del transporte, o un rechazo real—, y los tres llegan como el mismo objeto. Mientras eso
+siga así, cualquier valor de cota reparte mal alguno de los tres casos.
+
+Por eso **sale a spec propia** en vez de a una quinta iteración, y por eso la Spec C declara
+en su §8b, antes de cerrarse, que **la API colgada no está cubierta y que su comportamiento
+depende de la edad del token** —medido: 10.004 ms a la cáscara con token vigente, 12.005 ms
+al login con token caducado—. Que nadie la lea como si el caso estuviera resuelto.
+
+## La otra lección, esta del método
+
+Declaré un caso «imposible de guardar en esta capa» y **no lo era**: la revisión lo
+construyó en veinte líneas. El error fue de encuadre —miré el reintento, que el doble no
+puede producir, cuando el requisito hablaba de la petición en vuelo, que sí se observa en la
+señal inyectada—. Hoy ese cableado ya no se puede borrar en silencio. Un «no se puede
+probar» se gana midiendo, no razonando.
