@@ -40,12 +40,23 @@ export function reparte(cola: Pendiente[], ahora: number): {
 }
 
 /**
- * El siguiente a enviar de un grupo: el más antiguo. Uno cada vez — dos envíos
- * simultáneos sobre el mismo grupo son la carrera que D.2 prohíbe resolver en
- * memoria del proceso.
+ * El siguiente a enviar de un grupo: el más antiguo **que todavía vale**. Uno cada
+ * vez — dos envíos simultáneos sobre el mismo grupo son la carrera que D.2 prohíbe
+ * resolver en memoria del proceso.
+ *
+ * Spec B / iteración 1 — `ahora` es obligatorio y la elección pasa por `reparte`,
+ * que es la misma función que decide el descarte. La regla de las 24 h vivía sólo
+ * en el efecto de apertura de la vista, así que el drenado podía **publicar al
+ * grupo entero** un producto que la app promete descartar: medido en el navegador,
+ * `["caducado"]` en la base en 4 de 4 corridas, y también sin montaje de por medio
+ * cuando la entrada la escribía otra pestaña. Con una sola función pura decidiendo
+ * las dos cosas, el resultado no depende de qué efecto gane una carrera.
+ *
+ * El reloj entra por parámetro y no se lee aquí, por la misma razón que en
+ * `lib/cola.ts`: dos fuentes de tiempo son dos políticas.
  */
-export function siguienteEnCola(cola: Pendiente[], grupo: string): Pendiente | null {
-  const suyos = cola.filter(p => p.grupo === grupo)
+export function siguienteEnCola(cola: Pendiente[], grupo: string, ahora: number): Pendiente | null {
+  const suyos = reparte(cola, ahora).vivos.filter(p => p.grupo === grupo)
   if (!suyos.length) return null
   return suyos.reduce((a, b) => (a.creado <= b.creado ? a : b))
 }

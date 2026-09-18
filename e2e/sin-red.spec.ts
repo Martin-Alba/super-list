@@ -1,7 +1,7 @@
-import { test, expect, type Browser, type BrowserContext, type Page } from '@playwright/test'
+import { test, expect, type Browser, type BrowserContext, type Page, type WebSocketRoute } from '@playwright/test'
 import { nuevoFlujoPkce, nuevoTarro, paraNavegador } from './pkce'
 import { admin } from './fixtures'
-import { DUPLICADO, PENDIENTE, RED, SERVIDOR, SIN_INSTANTANEA, SIN_RED, SIN_RED_ACCION,
+import { DUPLICADO, EN_COLA, PENDIENTE, RED, SERVIDOR, SIN_INSTANTANEA, SIN_RED, SIN_RED_ACCION,
   SIN_RED_FUERA, SIN_RED_CON_COPIA, SIN_RED_ESPERANDO } from '../lib/errors'
 import { addActiveMember, createUser, makeGroup, signedInContext } from './fixtures'
 import { appOrigin } from './appOrigin'
@@ -207,11 +207,20 @@ test('DoD 1 y 2: el aviso distingue tu red del servidor de datos', async ({ brow
   await expect(a.page.getByTestId('item')).toHaveCount(1)
 
   // (a) La base no contesta, pero la red del usuario está bien.
+  /**
+   * Spec B / R3 — El alta encolada tiene texto propio: `SERVIDOR` dice «lo
+   * reintentamos solo», y pasados 23 s no lo reintenta nadie. Lo que se afirma
+   * sigue siendo que **no se culpa a la conexión del usuario**, que es lo que este
+   * caso guarda desde que se escribió, y ahora además que se dice dónde quedó el
+   * producto.
+   */
   await a.page.route(/\/rest\/v1\/items/, r => r.abort('connectionfailed'))
   await apuntar(a.page, 'pimienta')
-  await expect(a.page.getByTestId('notice')).toContainText(SERVIDOR)
+  await expect(a.page.getByTestId('notice')).toContainText(EN_COLA)
   await expect(a.page.getByTestId('notice'), 'culpó a la conexión del usuario')
     .not.toContainText(RED)
+  await expect(a.page.getByTestId('notice'), 'sigue prometiendo un reintento que muere a los 23 s')
+    .not.toContainText(SERVIDOR)
 
   // (b) La red del usuario, caída de verdad: entonces sí es suya, y lo que se
   // bloquea es corregir, no apuntar.
@@ -232,7 +241,7 @@ test('DoD 3: cuando el servidor vuelve, la app se recupera sin que nadie pulse',
   let dormido = true
   await a.page.route(/\/rest\/v1\/items/, r => (dormido ? r.abort('connectionfailed') : r.continue()))
   await apuntar(a.page, 'arroz')
-  await expect(a.page.getByTestId('notice')).toContainText(SERVIDOR)
+  await expect(a.page.getByTestId('notice')).toContainText(EN_COLA)
 
   // Alguien más añade algo mientras el servicio estaba dormido para esta pestaña.
   const dueno = (await admin.from('group_members').select('user_id').eq('group_id', gid).single()).data!
@@ -312,6 +321,15 @@ test('DoD 9: lo que lleva más de un día se descarta y se dice cuánto', async 
   await expect(a.page.getByTestId('notice')).toContainText(/se descartó 1 producto/i)
   await expect(a.page.getByTestId('item-pendiente')).toHaveCount(0)
   expect(await colaEn(a.page), 'la entrada caducada sigue en el disco').toEqual([])
+  /**
+   * Spec B / iteración 2 · i2-R3 — **Y el daño, no sólo el síntoma.** Las tres
+   * aserciones de arriba las cumple también una implementación que **publica** el
+   * producto caducado y anuncia el descarte después: aviso puesto, cero fichas, cola
+   * vacía. Medido en la revisión, eso es exactamente lo que pasaba —`["caducado"]`
+   * en la base en 4 de 4 corridas—, y esta fila no lo veía.
+   */
+  expect(((await admin.from('items').select('name').eq('group_id', gid)).data ?? []).map(x => x.name),
+    'se publicó al grupo entero un producto que la regla manda descartar').toEqual([])
   await a.ctx.close()
 })
 
@@ -1115,5 +1133,104 @@ test('DoD 1: dos pestañas apuntan el mismo producto sin red, y sólo entra uno'
   const filas = await admin.from('items').select('name').eq('group_id', gid).is('deleted_at', null)
   expect([...(filas.data ?? [])].map(x => x.name).sort(), 'entró algo dos veces')
     .toEqual(['alubias', 'garbanzos', 'lentejas'])
+  await a.ctx.close()
+})
+
+/**
+ * Spec B / R1 · DoD 6 — **Muerto el bucle, la cola sale sola cuando el servicio
+ * vuelve.** Es la medición del 2026-09-18 convertida en caso: con la API parada y
+ * la pestaña abierta, `reintentarEnvio` da cinco intentos en 23 s
+ * (`esperasDeReintento()`) y se rinde; a partir de ahí los únicos disparadores
+ * eran montar la vista y un cambio de `sinRed` que en este escenario no ocurre
+ * nunca, y la cola se quedó **seis minutos** en disco con el servicio contestando.
+ *
+ * Se cae el servicio **entero** —el REST y el socket—, que es lo que pasa cuando
+ * se para la pasarela: un corte sólo del REST deja el canal vivo, no hay
+ * transición, y esa mitad está declarada fuera de lo que R1 promete.
+ *
+ * La espera de 26 s no es un margen de nervios: es la condición del caso. Mientras
+ * el bucle viva, quien drene sería él, y esto no probaría el disparador nuevo.
+ */
+test('DoD 6: muerto el bucle de reintento, la cola sale sola al volver el servicio', async ({ browser }) => {
+  test.setTimeout(180_000)
+  const a = await entrar(browser, 'redB1')
+
+  let caido = false
+  const abiertos: WebSocketRoute[] = []
+  await a.page.routeWebSocket(/\/realtime\/v1\//, (ws) => {
+    if (caido) { ws.close(); return }
+    ws.connectToServer()
+    abiertos.push(ws)
+  })
+  await a.page.route(/\/rest\/v1\/items/, r => (caido ? r.abort('connectionfailed') : r.continue()))
+
+  const gid = await grupoCon(a.page, 'Vuelve')
+  // El camino feliz primero: sin él, «no se afirma» y «está roto» no se distinguen.
+  await expect(a.page.getByTestId('channel-live')).toHaveCount(1)
+
+  caido = true
+  for (const s of abiertos) s.close()
+  await expect(a.page.getByTestId('channel-degraded')).toBeVisible({ timeout: 30_000 })
+
+  await apuntar(a.page, 'lejia')
+  await expect(a.page.getByTestId('item-pendiente')).toHaveCount(1)
+  await expect(a.page.getByTestId('notice')).toContainText(EN_COLA)
+  // R2 — con un pendiente sin enviar, la app no afirma estar al día.
+  await expect(a.page.getByTestId('channel-live'),
+    'anuncia «Lista en vivo» con un producto parado en disco').toHaveCount(0)
+
+  await a.page.waitForTimeout(26_000)
+  expect(((await admin.from('items').select('name').eq('group_id', gid)).data ?? []).length,
+    'algo lo mandó antes de que el bucle muriera: el caso no mide el disparador nuevo').toBe(0)
+  await expect(a.page.getByTestId('item-pendiente'),
+    'la ficha se fue sin que el producto llegara a ninguna parte').toHaveCount(1)
+
+  // El servicio vuelve. Nadie recarga, nadie pulsa, nadie cambia de pestaña.
+  caido = false
+  await expect(a.page.getByTestId('item-pendiente'),
+    'la cola se quedó en disco con el servicio ya contestando').toHaveCount(0, { timeout: 60_000 })
+  const filas = (await admin.from('items').select('name').eq('group_id', gid)).data ?? []
+  expect(filas.map(x => x.name), 'el producto no llegó a la base').toEqual(['lejia'])
+  // Y vaciada la cola, la afirmación vuelve: R2 calla mientras hay pendientes, no siempre.
+  await expect(a.page.getByTestId('channel-live')).toHaveCount(1, { timeout: 30_000 })
+  await a.ctx.close()
+})
+
+/**
+ * Spec B / iteración 4 · i4-R4 — **El callejón del duplicado, en el navegador.**
+ *
+ * El defecto se encontró aquí, a mano, y su única evidencia era esa pasada — que
+ * además leyó como éxito lo que la revisión midió como fallo. Con una entrada de 25 h
+ * en la cola y la pantalla ya montada, apuntar ese mismo producto daba «Ese producto
+ * ya está en la lista» sobre algo que ninguna pantalla enseña, y el rechazo no escribe
+ * en la cola, así que no dispara relectura: repetirlo daba lo mismo, sin salida.
+ */
+test('DoD i4-7: una caducada del mismo nombre no bloquea volver a apuntarlo', async ({ browser }) => {
+  const a = await entrar(browser, 'redB2')
+  const gid = await grupoCon(a.page, 'Caduca2')
+  const usuario = (await admin.from('group_members').select('user_id').eq('group_id', gid).single()).data!.user_id
+
+  // La API cae DESPUÉS de cargar: con ella caída, la guarda manda a la cáscara.
+  await a.page.route(/\/rest\/v1\/items/, r => r.abort('connectionfailed'))
+
+  // Sembrada con la pantalla ya montada: es el caso que no dispara ninguna relectura.
+  await a.page.evaluate(({ gid, usuario }) => new Promise<void>((resolve) => {
+    const req = indexedDB.open('super', 1)
+    req.onsuccess = () => {
+      const t = req.result.transaction('cola', 'readwrite').objectStore('cola')
+      t.put({ id: 'viejo-e2e', usuario, grupo: gid, nombre: 'salvia', cantidad: null,
+              creado: Date.now() - 25 * 60 * 60 * 1000 })
+      t.transaction.oncomplete = () => resolve()
+    }
+  }), { gid, usuario })
+
+  await apuntar(a.page, 'salvia')
+  await expect(a.page.getByTestId('notice'),
+    'rechaza un producto legítimo contra una entrada que ninguna pantalla enseña')
+    .not.toContainText(/ya está en la lista/i)
+  await expect(a.page.getByTestId('item-pendiente')).toHaveCount(1)
+  await expect(a.page.getByTestId('item-pendiente')).toContainText(/salvia/i)
+  expect((await colaEn(a.page) as { nombre: string }[]).map(x => x.nombre),
+    'la caducada sigue en disco, o el producto nuevo no entró').toEqual(['salvia'])
   await a.ctx.close()
 })

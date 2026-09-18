@@ -910,3 +910,143 @@ Medido: token vigente → cáscara a los 10.004 ms; token caducado → login a l
 la misma API colgada. Está declarado en la Spec C §8b antes de cerrarla, y es el hueco que la
 **Spec D** (en el roadmap) existe para cerrar. No es deuda de ejecución: es un requisito que
 falta.
+
+## 60 — El docstring de `useSinRed` describe un sondeo que Next no hace (2026-09-18)
+
+El docstring de `useSinRed` dice que `useOffline()` «sondea el origen de la app y **cuenta como en
+línea** cualquier petición que siga pendiente a los 200 ms: eso es lo que le permite cazar un
+portal cautivo». Leído en el código de Next
+(`node_modules/next/dist/esm/client/components/offline.js`), es falso en la parte que importa:
+`useOffline()` es un contexto que sólo cambia por `dispatchOfflineChange`, y a `notifyOffline()`
+se entra por **dos** puertas — el evento `offline` del sistema, que es la misma señal que
+`navigator.onLine`, y `checkOfflineError(err)`, que sólo llaman los fetch del router de Next.
+El sondeo de 200 ms existe, pero **sólo corre cuando ya se está en estado offline**, para salir
+de él; nunca entra.
+
+**Consecuencia:** las «dos señales independientes» del hook son **una sola** mientras nadie
+navegue, y el portal cautivo no lo caza nadie hasta que el router pide algo.
+
+**Por qué es deuda y no requisito:** medido el 2026-09-18, con la API caída y `sinRed` en
+`false` todo el rato, la app **encoló, pintó la ficha y avisó igual** — la clasificación por
+`refinarSinRed` acierta sin necesidad de `sinRed`. No hay comportamiento roto que cerrar: hay
+un comentario que dice de un mecanismo ajeno lo que ese mecanismo no hace, y que es
+exactamente lo que induciría a apoyarse en él la próxima vez. Declarado fuera de alcance en la
+Spec B §3.
+
+## 61 — «si la sonda ni sale…» de `unit/shell.test.tsx` pasa 3 de 5 veces, y es de la Spec C (2026-09-18)
+
+**Medido.** `npx vitest run unit/shell.test.tsx` cinco veces seguidas: **2 rojas**, siempre el
+mismo caso —«si la sonda ni sale, el texto deja de culpar al servicio»— y siempre agotando su
+`waitFor` de 4 s (4012 ms, 4015 ms). El mismo caso **solo**, con `-t`, pasa **6 de 6**: lo que
+falla es la interferencia con los otros 54 casos del fichero, no el caso.
+
+**No lo introdujo el ciclo de la Spec B.** `unit/shell.test.tsx` y `app/sin-conexion/page.tsx`
+están byte a byte como en `HEAD`; lo único que cambió en su cadena de importación es una
+constante exportada nueva en `lib/errors.ts`, que esa pantalla no usa. El fallo existe desde
+el ciclo de la guarda de ruta y su corrida de cierre lo pasó por suerte.
+
+**CERRADA el 2026-09-18, y mi diagnóstico era el equivocado.** Escribí que apuntaba a
+`document.visibilityState`. Medido por la revisión sobre una copia limpia de `HEAD`: la causa
+es la **siembra de `sessionStorage`**. El caso «DoD 10: tras una recarga que vuelve a caer, la
+cadencia sigue donde estaba» siembra `sin-red:intento` con `{n: 4}`, y vive en el único bloque
+cuyo `beforeEach` hacía `sessionStorage.clear()`; los bloques posteriores la heredaban. Con
+`n = 4`, `esperaDeSondeo(4)` son 30 s, así que la primera sonda de ese caso salía fuera
+de su `waitFor` de 4 s. Y sólo mientras durase `VIGENCIA_INTENTO`, que es por qué dependía de
+lo rápido que corriera el fichero: **5 rojas de 8** sin el arreglo, **8 verdes de 8** con
+`sessionStorage.clear()` en el `beforeEach` de fichero. Arreglado ahí.
+
+**Lo que la decisión de anotar y parar acertó y en qué falló.** Acertó en no arrastrar un
+fichero ajeno a la iteración. Falló en el motivo escrito: dije «perseguirlo es ensanchar el
+alcance» apoyándome en un diagnóstico que no había medido, y el arreglo real era **una línea**.
+Un motivo para no hacer algo también es una afirmación, y también hay que medirla.
+
+**La forma canónica, que es lo que vale para la próxima.** Un test que pasa la mitad de las
+veces es el espejo de lo que §E.4(c) prohíbe: allí se exige ver un rojo **siempre** antes de
+creerse una guarda; aquí un verde intermitente se contó como guarda durante un ciclo entero.
+Las dos mitades son la misma regla — **una corrida no es una medida** — y ninguna de las dos
+la vigila nada automático hoy.
+
+
+## 62 — La cáscara sin red no conoce la regla de caducidad (2026-09-18)
+
+`app/sin-conexion/page.tsx` lee la cola **cruda** y se la da a `decidirEncolar`: no importa
+`reparte`, ni `VIDA_COLA_MS`, ni `caducados` — verificado en su lista de importaciones, que es
+el instrumento estructural de ese fichero, y con una sonda de la revisión. Consecuencias
+medidas ahí:
+
+- Apuntar un producto del que queda una entrada de 25 h se rechaza con «Ese producto ya está en
+  la lista», y `encolar` no llega a llamarse. **Allí el callejón es permanente:** esa pantalla
+  no descarta nunca, así que ninguna señal lo cura.
+- Pinta la entrada caducada como ficha pendiente, prometiendo «Se enviará al volver la
+  conexión» un envío que `siguienteEnCola` garantiza que no va a ocurrir.
+
+**Por qué no entró en la Spec B.** Es otra pantalla, y arreglar la regla sitio a sitio es
+exactamente lo que llevó tres iteraciones descubriendo el siguiente sitio. La forma canónica:
+**la regla de caducidad no tiene dueño**. Está escrita en `lib/local.ts` como función pura y
+aplicada a mano en cada lector — tres veces en la vista (unificadas en la iteración 4 de la
+Spec B) y **cero** en la cáscara. Mientras la aplicación siga siendo responsabilidad de cada
+lector, cada lector nuevo nace sin ella.
+
+Eso es una spec —la regla con un solo dueño, sobre las dos pantallas—, y está en el roadmap.
+Lo que se anota aquí es que **hoy**, en producción, la cáscara tiene ese callejón.
+
+
+*(Las citas por número que quedan en las entradas 52–59 son de ciclos anteriores y algunas ya
+están desfasadas. Se reportan y no se arrastran: la lección de citar por nombre la estrenó el
+ciclo de la Spec B en su valla y en sus propias entradas.)*
+
+## 63 — Con el almacén rechazando escrituras, la caducada bloquea volver a apuntar (2026-09-18)
+
+**Medido en navegador real por la revisión de la iteración 5**, con el `delete` de la tienda
+`cola` rechazando: la entrada caducada **se despinta igual** —`releerLaCola` y el efecto de
+apertura pintan `vivos`, que la excluye se haya podido borrar o no, así que la resta que
+`leerColaViva` hace queda pisada—, no hay aviso, la entrada sigue en disco, y al apuntar ese
+producto sale **«Ese producto ya está en la lista.» frente a una lista vacía**.
+
+La iteración 5 sí cerró la mitad que perseguía: el aviso dejó de mentir, no se anuncia un
+descarte que no ocurrió, y esa guarda es real. Lo que no cerró es el callejón, y **el argumento
+con que lo di por aceptable era falso**: escribí «con la ficha todavía en pantalla, "ya está en
+la lista" deja de ser falso», y la ficha no se queda.
+
+**Dos formas de cerrarlo, sin medir cuál cuesta menos:** que `vivos` deje fuera sólo lo
+confirmado —y entonces la ficha, que promete un envío imposible, necesita otro texto—, o que el
+mensaje del `'ya-estaba'` sobre una caducada no borrada sea `SIN_ALMACEN` en vez de
+`DUPLICADO`, que es lo que de verdad está pasando.
+
+## 64 — El drenado ignora el mismo booleano, y ahí la consecuencia es peor (2026-09-18)
+
+`drenarUnaVez` hace `await quitarDeCola(p.id)` tras un envío aceptado y **descarta el
+resultado**, igual que hacía `leerColaViva` antes de la iteración 5. Si el almacén rechaza ese
+borrado, la fila sobrevive en disco y una pasada posterior **la reenvía**. Y como
+`items_nombre_unico` es **parcial** —`WHERE deleted_at IS NULL`, comprobado en el catálogo—, un
+reenvío después de que alguien tache el producto **crea fila nueva**: resurrección visible para
+todo el grupo.
+
+Es exactamente la forma que la iteración 2 de la Spec B documentó como defecto al retirar un
+arreglo equivocado, alcanzable por otra puerta que nadie miró. No entró porque el techo del
+ciclo ya se había alcanzado.
+
+## 65 — La pasada de mutación no es reproducible, y eso la vuelve del revés (2026-09-18)
+
+Tres corridas del mismo `pasada.sh` sobre una copia fiel dieron **20/1, 20/1 y 19/2**. El
+mutante en disputa es la NEUTRA de renombrado, que aplicada a solas **sobrevive 6 de 6** y con
+la suite sin mutar da verde 14 de 14. O sea que en una de las tres corridas un rojo que el
+mutante no causó se apuntó como «cazada».
+
+**Y ése es el sentido que importa:** el error hace *parecer presente* una guarda que está
+ausente. Con 21 mutantes, las 19 «cazadas» descansan hoy en una muestra de una. El arreglo es
+el mismo que §E.4(c) exige para los rojos —repetir hasta que el veredicto sea estable— más
+registrar **qué test** caza a cada mutante, que es lo que convierte «cazada» en comprobable.
+
+## 66 — Nada vigila las citas `fichero:línea` (2026-09-18)
+
+Dos vueltas seguidas fallaron su propia fila de citas, y el desplazamiento **lo causaba el
+mismo ciclo que las escribía**: `lib/errors.ts` cita `unit/drenado.test.tsx:798` y este ciclo
+metió 13 líneas más arriba en ese fichero, así que el caso está en `:811` y `:798` cae dentro de
+otro. `.claude/fathom/spec-b/dod.md` conserva 29 citas por número, y al menos cuatro resuelven a
+una línea en blanco o al test equivocado.
+
+La valla de la spec se pasó a **citar por nombre** y eso no se desplaza. Lo que falta es la
+guarda: una prueba que extraiga `ruta:NNN` del árbol y falle si la línea está vacía o si el
+nombre citado no aparece cerca —con su sonda, que debe ser cazada—, o directamente que prohíba
+la cita por número en los comentarios. Sin ella, la lección se va con la spec que se borra.

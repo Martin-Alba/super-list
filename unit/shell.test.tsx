@@ -60,6 +60,21 @@ const porLaGuarda = (id = '8f1f1f7a-0000-4000-8000-000000000000', next?: string)
 
 beforeEach(() => {
   vi.clearAllMocks()
+  /**
+   * Spec B / iteración 2 · i2-R6 — **La siembra de un caso no se hereda.**
+   * el caso «DoD 10: tras una recarga que vuelve a caer…» siembra `sin-red:intento` con `{n: 4}` para probar que la cadencia no
+   * se reinicia, y vivía en el único bloque con un `beforeEach` que limpiaba; los
+   * bloques de después la heredaban. Con `n = 4`, `esperaDeSondeo(4)` son 30 s, así
+   * que la primera sonda del caso «si la sonda ni sale, el texto deja de culpar al servicio» salía fuera de su `waitFor` de 4 s y el
+   * caso caía **2 de 5 veces** — y sólo mientras durase `VIGENCIA_INTENTO`, que es
+   * por qué dependía de lo rápido que corriera el fichero.
+   *
+   * Medido sobre una copia limpia de `HEAD`: 5 rojas de 8 sin esta línea, 8 verdes
+   * de 8 con ella. Un test que pasa la mitad de las veces es el espejo de lo que
+   * §E.4(c) prohíbe: allí se exige ver el rojo **siempre** antes de creerse una
+   * guarda; aquí un verde intermitente se contó como guarda durante un ciclo entero.
+   */
+  sessionStorage.clear()
   oyentesDeLaCola = []
   haySesionLocal.mockReturnValue(true)
   leerUltimoUsuario.mockResolvedValue('u1')

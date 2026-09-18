@@ -138,131 +138,70 @@ no está medido.
 
 ---
 
-### Spec B — La app sabe cuándo no la escuchan, y lo pendiente sale solo
+### Spec B — SELLADA el 2026-09-18, acotada al medirla
 
-**SIN SELLAR.** Draft del 2026-09-17.
+El borrador entero está en el historial de este fichero (commit anterior a esta línea). Lo
+que se selló vive en `docs/spec.md` como **«Lo pendiente sale solo, y la pantalla no dice lo
+contrario»**, con tres requisitos: los disparadores del drenado, la afirmación «Lista en
+vivo», y el texto del aviso de lo encolado.
 
-## 1. El problema
+**Lo que se cayó al medirlo con el teclado**, y por qué esto queda escrito aquí: la fila
+«cuatro de cinco productos desaparecen» era **el mismo artefacto de clics por coordenada que
+devolvió la Spec A**. Medido hoy, con la API caída, «Lejia» y «Vinagre» se encolan, pintan su
+ficha y avisan. La vista no pierde nada.
 
-La app sólo reconoce **«el sistema operativo dice que no hay red»**. No reconoce el caso
-más probable de esta familia: **hay wifi, y el servidor no contesta** — el plan gratuito
-pausado, el despliegue caído, el portal cautivo del súper. En ese estado la app se cree
-conectada, no encola, no avisa, y lo que se teclea se pierde. Y lo que sí llegó a la cola
-se queda ahí **minutos**, mientras la pantalla dice **«Lista en vivo»**.
+### Local primero, retirada de la Spec B y sin decidir
 
-*Corregido respecto al primer informe:* la cola **no** se queda parada para siempre —
-«Mostaza» y «Papel film» llegaron a la base unos 13 minutos después de volver la red. El
-defecto no es que no drene: es que **drena cuando le toca a un disparador que la persona
-no provoca ni ve**, y que mientras tanto la pantalla afirma estar al día.
+La decisión de hacer la vista local-primero **se retira**: su argumento era que con la
+conexión muerta la vista pierde lo tecleado y la cáscara no, y eso es falso. Vuelve aquí como
+opción abierta, con la única pregunta que le queda viva y que **no está medida**:
 
-## 2. Lo medido
+> Contra una API que **cuelga** en vez de rechazar, el alta espera hasta la cota del
+> transporte (10 s) con el botón deshabilitado antes de pintar la ficha. Contra un puerto
+> cerrado son 54 ms, medidos. ¿Cuánto es contra la Supabase hospedada desde un móvil, y es
+> ese hueco suficiente para tocar el camino feliz del alta?
 
-Con el servidor de la app y la API de Supabase parados, y la pestaña ya abierta:
+Medir eso es el paso previo a volver a plantearla. Si el hueco es pequeño, la opción muere.
 
-| Qué hice | Qué esperaba | Qué pasó |
+---
+
+### Spec E — La regla de caducidad con un solo dueño, sobre las dos pantallas
+
+**SIN SELLAR.** Sale del ciclo de la Spec B (2026-09-18), y sale **medida**.
+
+**El diagnóstico, que es el motivo de que sea spec propia.** Tres iteraciones seguidas
+arreglaron un sitio y descubrieron el siguiente:
+
+| Vuelta | El sitio | Lo que se descubrió al arreglarlo |
 |---|---|---|
-| Esperar 36 s | El aviso de sin red | **Nada.** `sinRed` nunca se activó. `fetch('/')` falla en **6 ms**; `navigator.onLine` sigue en `true` |
-| Apuntar «Lejia» | Ficha pendiente y «se enviará al volver la red» | Campo vacío, sin ficha, sin pendiente, sin mensaje. Perdido |
-| Apuntar «Mostaza» | Lo mismo | **Sí** se encoló, con aviso «El servicio está despertando…» |
-| Apuntar «Vinagre» | Lo mismo | Perdido |
-| **Recargar** | — | La cáscara aparece y **hace todo bien**: avisa, conserva, deja apuntar, y marca lo pendiente con borde discontinuo |
-| Restaurar la red entera | Que la cola saliera sola | A los **2,5 minutos**: cola intacta en disco, nada en la base, pantalla diciendo «Lista en vivo». Salió sola **unos 13 minutos** después, por un disparador que el usuario no provoca ni ve |
+| iter 1 | El drenado enviaba lo caducado | …y la relectura lo seguía contando como pendiente |
+| iter 2 | La relectura | …y el duplicado se decidía contra la cola cruda |
+| iter 3 | El duplicado | …y la cáscara no conoce la regla en absoluto |
 
-**El mecanismo de la detección, medido:** `lib/useSinRed.ts` une dos señales —
-`navigator.onLine`, que es `true` porque la máquina sí tiene red, y `useOffline()` de
-Next, que **no se disparó en 36 s** pese a que el origen falla rápido. El único aviso que
-salió fue el del canal: *«Sin conexión en vivo: puede que no veas los cambios de los
-demás»* — tranquilizador y falso por omisión, porque tampoco se puede **guardar**.
+**La causa no es ninguno de los cuatro sitios: es que la regla no tiene dueño.**
+`reparte`/`VIDA_COLA_MS` viven en `lib/local.ts` como función pura, y **aplicarla es
+responsabilidad de cada lector**. Así que cada lector nuevo nace sin ella. La iteración 4
+unificó los tres de la vista en una función; la cáscara sigue fuera, y con ella un callejón
+permanente (deuda 62).
 
-**El mecanismo del drenado, medido:** ver «Por qué dos y no tres» arriba.
+**Lo que la spec tendría que decidir:** si la cola se lee siempre por una puerta que ya
+devuelve lo vivo —de modo que leer lo caducado sea imposible en vez de improbable—, y qué pasa
+con quien la lea desde un contexto sin React. Medir antes de fijar: hay al menos dos formas
+—la puerta en `lib/local.ts` devolviendo ya sólo lo vivo, o un tipo que distinga «cola cruda»
+de «cola viva»— y cuál cuesta menos no está medido.
 
-## 3. Alcance
+**Lo que el ciclo deja medido y que esta spec hereda** (no vive sólo en la spec borrada):
 
-**Entra:** la detección de «no me contestan», el disparador del drenado, y los textos de
-los avisos implicados.
-
-**No entra:** la guarda que se traga las altas (Spec A). Tampoco el tiempo de reintento ni
-la caducidad de la cola.
-
-## 4. Requisitos (borrador)
-
-**R1 — «No me contestan» es un estado que la app reconoce.** Una API que no responde pone
-a la app en el mismo modo que la falta de red: encola, avisa y lo dice. La señal no puede
-depender sólo de `navigator.onLine`, que es `true` exactamente en el caso que más importa.
-
-**R2 — El drenado se dispara cuando la cola cambia**, no sólo al montar o cuando `sinRed`
-cambia. Una fila que entra en la cola por el camino de fallo con red tiene hoy **cero**
-disparadores hasta el próximo arranque.
-
-**R3 — La pantalla no dice «Lista en vivo» mientras haya pendientes sin enviar.** Decir
-que la lista está viva con dos productos parados en disco es la pantalla mintiendo sobre
-el estado, que es lo que §A.3 prohíbe en el servidor y no tiene sentido permitir aquí.
-
-**R4 — Los mensajes describen la causa y el remedio reales.** «El servicio está
-despertando. Suele tardar unos segundos; lo reintentamos solo» se enseñó con la conexión
-muerta: promete un reintento que no llegó, y **no dice lo único que tranquiliza** — que el
-producto está guardado en el móvil y saldrá al volver la red.
-
-## 5. La decisión de forma: local primero (DECIDIDA, con su coste)
-
-**La vista pasa a ser local-primero, como la cáscara.** Escribir en la cola, pintar la
-ficha como pendiente, y drenar. No «intentar el servidor y caer a la cola si acierto a
-clasificar el fallo».
-
-**El argumento, y no es de elegancia:** la cáscara no puede equivocarse clasificando
-**porque no hay fallo que clasificar** — nunca llama al servidor
-(`app/sin-conexion/page.tsx` no importa `addItem`). La vista lleva **dos fallos seguidos
-por esa misma dependencia**, ambos escritos en el propio código: `'red'` era una rama
-inalcanzable y hubo que sustituirla por `'servidor'` (`GroupView.tsx:982`), y ahora
-`'servidor'` tampoco se alcanza cuando la API no contesta. Cada arreglo ha sido **acertar
-la clasificación una vez más**. Local primero **elimina la clase**: no hay nada que
-acertar, porque el producto ya está guardado antes de que el servidor opine.
-
-Es también lo que la pasada manual enseñó del modo más crudo: con la **misma** conexión
-muerta, antes de recargar la vista pierde lo que escribes; después de recargar, la cáscara
-te lo guarda y te lo dice. No son dos situaciones: es el mismo estado con dos
-implementaciones, y sólo una funciona.
-
-### El coste, declarado
-
-- **Cambia el camino feliz**, que es el que usa todo el mundo y el único que no ha dado un
-  solo hallazgo en tres revisiones. El checkpoint tiene cicatrices de tocar justo eso.
-- **Cambia el orden en que el usuario ve su producto**: primero local, luego confirmado.
-- Los dos caminos ya comparten la **regla** (`lib/cola.ts`) pero no los **efectos** — el
-  reparto que la spec del duplicado señaló como causa de escribir dos veces el mismo
-  defecto. Unificar los efectos es precisamente lo que faltaba.
-
-Se acepta a cambio de **eliminar la clase de fallo**, no de acertar la clasificación a la
-tercera.
-
-### La pregunta que hay que contestar antes de construir — MEDIDA
-
-**¿Qué ve el usuario entre que apunta y que se guarda, y es eso peor que lo de hoy?**
-
-Medido en el navegador contra Supabase **local** —el mejor caso posible, misma máquina,
-sin salto de red— cronometrando desde la pulsación hasta que la ficha aparece, con un
-observador del DOM y no con temporizadores:
-
-| Muestra | Campo vacío | Ficha en pantalla |
-|---|---|---|
-| 1 | 1 ms | **401 ms** |
-| 2 | 1 ms | **445 ms** |
-| 3 | 1 ms | **397 ms** |
-
-**El parpadeo que me preocupaba no aparece, y el argumento se da la vuelta.** Cuatrocientos
-milisegundos es el **suelo** —contra la Supabase hospedada, desde un móvil en el súper, son
-múltiplos de eso— y está muy por encima del umbral en que algo se percibe instantáneo. Un
-pendiente que dura 400 ms no es un destello: es medio segundo de información.
-
-Y lo que hay hoy en esos 400 ms **es nada**: el campo se vacía en 1 ms y luego no ocurre
-absolutamente nada hasta que la fila aparece. Local primero no añadiría un estado a un
-hueco vacío: lo **llenaría**.
-
-`[OPEN]` Lo que sigue sin medir, y no bloquea la decisión pero sí el diseño:
-- Con una red muy rápida y una lista larga, ¿el reordenado al confirmar da un salto visual?
-- Si el envío lo rechaza el servidor —no por red, sino por regla—, ¿qué pasa con una ficha
-  que la persona ya vio en su lista? La cáscara nunca ha tenido ese caso, porque no habla
-  con el servidor.
+- **Dos lecturas crudas quedan en la vista**, y están ahí a propósito: `drenarUnaVez` lee cruda
+  y su corte lo pone `siguienteEnCola`; `reintentarEnvio` pregunta «¿queda algo de este grupo?»
+  sobre la cruda. La segunda **sí gira en vano** cuando el almacén rechaza el borrado: medido,
+  10 lecturas en 25 s frente a 2 cuando la entrada se pudo borrar. Se dejó por coste, no por
+  inexistente.
+- **No hay guarda estructural** que impida una lectura cruda nueva. La fila i4-5 de la Spec B
+  declaró esa capa y nadie la atacó; la afirmación se retiró.
+- **Aplicar la regla no es haberla aplicado** (deudas 63 y 64): los dos sitios que borran de la
+  cola descartan el booleano del almacén, y uno de ellos —el drenado— puede resucitar con eso un
+  producto tachado, porque el índice único es parcial.
 
 ---
 

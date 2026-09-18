@@ -28,6 +28,31 @@ export const SERVIDOR = 'El servicio está despertando. Suele tardar unos segund
 export const GENERICO = 'No se ha podido completar la operación.'
 
 /**
+ * Spec B / R3 — **El texto del hecho «encolado», que no es el de `SERVIDOR`.**
+ *
+ * `SERVIDOR` lo pintaban tres hechos distintos: una carga fallida, una edición
+ * fallida y un alta encolada. Sólo en el tercero el producto está guardado en el
+ * dispositivo; decirle «está guardado» a quien acaba de perder una edición sería
+ * mentirle. Por eso este texto es propio y `SERVIDOR` se queda como estaba.
+ *
+ * Y no promete un reintento activo. Medido el 2026-09-18: `esperasDeReintento()`
+ * suma 23 s y después no reintenta nadie, así que «lo reintentamos solo» era falso
+ * a partir del segundo 23 — y seguía en pantalla con el servicio ya contestando.
+ * Lo que sí es cierto, y es lo único que tranquiliza, es que el producto está en
+ * el móvil y que sale sin que haya que pulsar nada.
+ *
+ * **Y no nombra culpable, a propósito.** La primera versión decía «el servicio no
+ * contesta», y el caso de `unit/drenado.test.tsx:798` la puso roja con razón: si
+ * la red del usuario cae entre pulsar y responder, el servicio no tiene la culpa,
+ * y el aviso de `sin-red` ya está en pantalla diciendo cuál es la causa. Dos
+ * mensajes señalando a dos sitios distintos es la cicatriz N5 de `GroupView`. Lo
+ * que sí es cierto en los dos casos es dónde está el producto y qué va a pasar con
+ * él, y eso es lo único que este texto dice.
+ */
+export const EN_COLA =
+  'Guardado en este dispositivo. Se envía solo en cuanto se pueda, sin que tengas que apuntarlo otra vez.'
+
+/**
  * AF7 — `'No se ha podido recargar la lista.'` vivía suelto en `GroupView.tsx`,
  * o sea un octavo texto de usuario fuera del fichero que se declara «la única
  * fuente de texto». Aquí está, con los otros.

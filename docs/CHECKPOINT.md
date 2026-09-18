@@ -329,6 +329,131 @@ alcanzable por un usuario se arregló en la octava.
 
 ---
 
+# 2026-09-18 — Lo pendiente sale solo, y la pantalla no dice lo contrario (Spec B, base + 5 iteraciones)
+
+Sexto ciclo. Sale de la pasada manual de la deuda 52 y se selló **acotando el borrador al
+medirlo**: la afirmación que lo sostenía —«lo que se teclea se pierde, cuatro de cinco
+productos desaparecen»— resultó ser **el mismo artefacto de clics por coordenada que devolvió
+la Spec A**. Con el teclado, nada se pierde.
+
+## Qué se construyó
+
+**Producto.** Dos disparadores nuevos del drenado —la cola que cambia, y el canal que vuelve a
+estar vivo— · «Lista en vivo» calla mientras haya pendientes sin enviar · texto propio para el
+hecho «encolado», que no promete un reintento muerto ni culpa a nadie · lo caducado deja de
+publicarse al grupo · el aviso de lo encolado y el del descarte se anuncian como **estado**, no
+como alerta roja · una sola puerta de lectura de la cola en la vista · y el descarte deja de
+anunciarse cuando el almacén no lo aceptó.
+
+**Lo que se retiró del borrador, por medición.** «Local primero» entera: su argumento era que
+la vista pierde lo tecleado y la cáscara no, y las dos hacen lo mismo. Vuelve al roadmap con la
+única pregunta que le queda viva y sin medir.
+
+## Decisiones que conviene no volver a discutir
+
+- **El disparador del canal es evidencia, no un reloj.** La suscripción aceptada es el servidor
+  contestando. Es la distinción que la Spec D lleva tres vueltas pagando, y aquí salió gratis.
+- **R1 promete un intento por disparador, no una cola siempre vacía.** El límite está escrito
+  en el requisito, y por eso ninguna vuelta intentó alargar el bucle de reintento.
+- **El aviso que gana es el que contesta al gesto.** De las tres salidas de `meterEnCola`, el
+  descarte sólo se anuncia donde no compite. Escrito con su argumento, no heredado.
+- **El índice `items_nombre_unico` es PARCIAL.** `WHERE deleted_at IS NULL`. La iteración 1
+  metió un arreglo justificado por escrito con lo contrario —«el reenvío choca con 23505»— y
+  con el producto tachado ese reenvío **crea fila nueva**: resurrección. Lo peor es que
+  `unit/duplicados.test.ts` ya lo afirmaba **y explicaba por qué**, doce meses antes de que yo
+  escribiera lo contrario sin leerlo.
+
+## Los dos números del ciclo
+
+**51 hallazgos de revisión en cinco vueltas: 22 de producto y 29 de sostén.** (La clasificación
+es mía, no del revisor.)
+
+| Vuelta revisada | Producto | Sostén |
+|---|---|---|
+| base | 3 | 4 |
+| iteración 1 | 5 | 6 |
+| iteración 3 | 4 | 7 |
+| iteración 4 | 5 | 6 |
+| iteración 5 | 5 | 6 |
+| **Total** | **22** | **29** |
+
+**La iteración 2 no tiene revisión independiente**, y se declara: quien encontró su defecto fue
+**la comprobación a mano**, que midió falsa la frase «con i2-R2 el callejón se cierra». Ese es
+el argumento más fuerte que deja este ciclo a favor de la pasada manual.
+
+## Terminal
+
+| | Antes del ciclo | Después |
+|---|---|---|
+| Casos unitarios | 1.605 | **1.639** |
+| Ficheros unitarios | 67 | **68** |
+| Casos de navegador | 89 | **91** |
+
+Medido el **2026-09-18**, al cerrar: `pnpm typecheck` 0 · `pnpm lint` 0 warnings ·
+`pnpm test` 1.639 de 1.639 · `pnpm build` 0 con `.next` borrado · `pnpm test:e2e` 91 de 91,
+exit 0. Y la suite unitaria verde en **tres corridas seguidas** (2026-09-18), tras cerrar la no
+determinación de `unit/shell.test.tsx` (deuda 61).
+
+**Pasada de mutación:** 21 mutantes, 19 cazados, 2 supervivientes —las dos NEUTRA declaradas—,
+0 no aplicables, con baseline verde comprobado antes de mutar. **Y una segunda pasada, de
+navegador**, que la de unidad no puede alcanzar: apaga cada disparador por separado y corre la
+única fila que prueba R1 en su capa. Medido el 2026-09-18: sin el disparador del canal, **roja las tres vueltas**; sin el de la
+cola, verde las tres — o sea que esa fila no depende de él, y ahora está **dicho** en vez de
+supuesto.
+
+## Runtime — qué se ejercitó y contra qué build
+
+Siempre contra `next start` sobre un `pnpm build` con `.next` borrado, con Supabase local
+entero, y **direccionando cada elemento por identidad, nunca por coordenada**.
+
+- **El defecto original, reproducido:** API parada, producto apuntado con el teclado, 72 s con
+  la cola llena —el bucle de reintento dura 23—, la API vuelve, y a los **5 segundos** el
+  producto está en la base sin que nadie recargue ni pulse. Antes: **seis minutos** de muestreo
+  continuo con la cola intacta, el canal vivo y un alta nueva viajando por esa misma conexión.
+- **El callejón del duplicado**, encontrado a mano y cerrado: una caducada del mismo nombre ya
+  no bloquea volver a apuntar el producto.
+- **El reparto de avisos**: con una caducada de por medio y el servicio caído, en pantalla queda
+  `EN_COLA` —la respuesta al gesto— y no el descarte.
+
+## Qué NO se verificó, y qué se hizo en su lugar
+
+- **La rama «sin red» de la decisión de avisos no se pudo forzar desde la página** (haría falta
+  `navigator.onLine` en `false`). Cubierta en unidad por i4-1 y cazada por la pasada.
+- **La cáscara sin red no se tocó.** No conoce la regla de caducidad y allí el callejón es
+  permanente. Deuda 62 y **Spec E**.
+- **El bundle viejo costó una medición.** La primera vuelta de la comprobación a mano midió
+  sobre la pestaña abierta desde antes del `build` y dio un falso negativo. Es la cicatriz del
+  bundle mutado, pagada entera.
+
+## El hallazgo que cierra el ciclo: aplicar la regla no es haberla aplicado
+
+Cinco vueltas, la misma familia: **la regla de caducidad no tiene dueño.** Vive como función
+pura en `lib/local.ts` y **aplicarla es responsabilidad de cada lector**, así que cada lector
+nuevo nace sin ella. Cada iteración arregló un sitio y descubrió el siguiente: el drenado, la
+relectura, el duplicado, el reparto de avisos, y por fin **el comprobante** — los dos sitios que
+borran de la cola descartaban el booleano del almacén.
+
+Ahí se alcanzó el techo y se escaló. El usuario acotó a una vuelta más. Lo que queda —el
+callejón con el almacén rechazando (63), la resurrección por el drenado (64)— sale como deuda y
+tiene su marco en la **Spec E**, que es el diagnóstico y no el síntoma.
+
+## La otra lección, esta del método
+
+**Una referencia que se dirige por posición mide otra cosa en cuanto el fichero se reflowa.** Es
+la misma forma que el artefacto de coordenadas de la Spec A, y este ciclo la pagó cuatro veces:
+siete de las doce filas de la valla se rompieron cuando una iteración añadió diez líneas a un
+fichero de tests; una acabó señalando la aserción del test contrario; la pasada de navegador
+arrancó gritando «baseline rojo» sobre un árbol bueno porque se dirigía al caso por número; y la
+vuelta que arregló las citas se dejó 29 en su propio registro. La valla se pasó a **citar por
+nombre de test**, que no se desplaza. Lo que falta es la guarda automática: deuda 66.
+
+Y la segunda: **un motivo para no hacer algo también es una afirmación.** Declaré que perseguir
+un test intermitente era «ensanchar el alcance», apoyándome en un diagnóstico que no había
+medido; el arreglo real era **una línea**, y el diagnóstico escrito era falso.
+
+
+---
+
 <!-- ESTADO-VERIFICABLE -->
 ## Estado verificable
 
@@ -343,7 +468,7 @@ vez (2026-09-07) el documento decía 221 tests en 36 ficheros cuando eran 245 en
 37, y la guarda que debía impedirlo daba verde sobre un documento con cifras
 inventadas.
 
-- Ficheros de prueba unitaria: 67
+- Ficheros de prueba unitaria: 68
 - Ficheros de prueba de navegador: 16
 
 

@@ -6,7 +6,7 @@ import { useSinRed } from '@/lib/useSinRed'
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
 import { activeItems, addItem, mergeItems, mismoProducto, softDeleteItem, updateItem, type Item } from '@/lib/items'
-import { caducados, ESCRIBE_NOMBRE, esperasDeReintento, GONE, LISTA_EN_VIVO, mensajeDe,
+import { caducados, EN_COLA, ESCRIBE_NOMBRE, esperasDeReintento, GONE, LISTA_EN_VIVO, mensajeDe,
   PENDIENTE, refinarSinRed, refinarSinSesion, RELECTURA, SIN_ALMACEN, SIN_CONEXION_LISTA, SIN_RED,
   SIN_RED_ACCION, type Clase } from '@/lib/errors'
 import { avisoInicial, reducirAviso, visible, type Origen } from '@/lib/aviso'
@@ -18,6 +18,15 @@ import { createInviteAction, decideMemberAction, leaveGroupAction } from '@/app/
 
 type Member = { user_id: string; status: string; role: string }
 type Profile = { id: string; display_name: string | null }
+
+/**
+ * Spec B / iteración 2 · i2-R4 — Los orígenes cuyo aviso **no es un fallo**: lo
+ * encolado dice dónde quedó el producto, y el descarte por caducidad es la app
+ * informando de su propia regla. Los demás sí perdieron algo, y siguen siendo
+ * alertas. Se discrimina por origen y no por `clase`: `'servidor'` la comparten la
+ * carga y la edición fallidas, que son errores de verdad.
+ */
+const ES_ESTADO = new Set<Origen>(['cola', 'apertura'])
 
 export function GroupView({
   group, initialItems, members, profiles, me, loadClase,
@@ -334,10 +343,69 @@ export function GroupView({
    * fallo→aviso en las dos ramas, escrito en distinto orden, que es justo la
    * deriva que unificar la puerta venía a matar.
    */
+  /**
+   * Spec B / iteración 4 · i4-R2 — **La única lectura de la cola en esta vista.**
+   *
+   * Lee, descarta lo que la regla de las 24 h condena, lo quita de `pendientes`, y
+   * devuelve lo vivo con la cuenta de lo que cayó. Había **tres** copias de este
+   * bloque y ya habían divergido en tres cosas —quién anuncia, si el `Promise.all`
+   * va guardado, y si se toca `pendientes`—; la tercera divergencia dejaba en
+   * pantalla una ficha prometiendo enviar algo que esa misma pestaña acababa de
+   * borrar. El docstring N3 de este fichero existe porque este bloque ya estuvo
+   * escrito dos veces y ya divergió: iban tres.
+   *
+   * **No habla** (i4-R1). Quién anuncia el descarte lo decide quien llama, que es el
+   * único que sabe qué otro mensaje hay en juego: con el servicio caído gana
+   * `EN_COLA`, con un duplicado gana el duplicado, y sin red —donde no hay ningún
+   * otro— gana el descarte.
+   */
+  const leerColaViva = useCallback(async (): Promise<{ vivos: Pendiente[]; descartadas: number }> => {
+    const bruta = await leerCola(me.id)
+    const { vivos, caducados: viejos } = reparte(bruta, Date.now())
+    /**
+     * Spec B / iteración 5 · i5-R1 — **Sólo cuenta lo que el almacén confirmó.**
+     *
+     * `quitarDeCola` puede devolver `false` —transacción abortada, conexión cerrada
+     * entre la lectura y la escritura, que es lo que K5/L2 documentan en
+     * `lib/local.ts`— y dar el borrado por hecho abría el peor estado de todos:
+     * medido en sonda, la app quitaba la ficha, **anunciaba un descarte que no había
+     * ocurrido**, y `encolar` seguía viendo la entrada, así que el alta se rechazaba
+     * con «ya está en la lista» sin escribir nada, sin señal y sin relectura. El
+     * callejón de la iteración 3, reabierto y permanente.
+     *
+     * Lo que no se pudo borrar **no se anuncia y no se despinta**: con su ficha
+     * todavía en pantalla, «ya está en la lista» deja de ser mentira. Se reintenta en
+     * la lectura siguiente. Lo que sí desaparece es el estado imposible.
+     *
+     * `vivos` no cambia: lo caducado está condenado se haya podido borrar o no, y
+     * `decidirEncolar` no debe verlo en ningún caso.
+     */
+    const idas = viejos.length
+      ? (await Promise.all(viejos.map(async x => (await quitarDeCola(x.id)) ? x : null)))
+          .filter((x): x is Pendiente => x !== null)
+      : []
+    if (idas.length) setPendientes(prev => prev.filter(p => !idas.some(v => v.id === p.id)))
+    return { vivos, descartadas: idas.length }
+  }, [me.id])
+
   const meterEnCola = async (
     nombre: string, cantidad: string | null, desde: number,
-  ): Promise<boolean> => {
-    const cola = await leerCola(me.id)
+  ): Promise<{ ok: boolean; descartadas: number }> => {
+    /**
+     * Spec B / iteración 3 · i3-R1 — **Lo caducado se quita antes de decidir.**
+     *
+     * Éste era el tercer sitio que leía la cola cruda, y el único que quedaba.
+     * Medido a mano: con una entrada de 25 h del mismo producto, apuntarlo daba «Ese
+     * producto ya está en la lista» sobre algo que ninguna pantalla enseña — y el
+     * rechazo no escribe en la cola, así que no dispara relectura y el intento
+     * siguiente da lo mismo. Sin salida salvo recargar.
+     *
+     * Se **quita**, no sólo se filtra: filtrando, el almacén la seguiría viendo en
+     * `encolar` y devolvería `'ya-estaba'` sobre lo que `decidirEncolar` acababa de
+     * aprobar. La regla de `lib/cola.ts` no se toca: sigue siendo pura y sigue
+     * decidiendo sobre la lista que se le da.
+     */
+    const { vivos: cola, descartadas } = await leerColaViva()
     /**
      * Spec C / R3 — La **regla** vive en `lib/cola.ts` porque la cáscara sin red
      * tiene que decidir lo mismo. Lo que se queda aquí son los efectos: devolver
@@ -358,7 +426,8 @@ export function GroupView({
      * comprobar a mano.
      */
     const esDuplicado = () => {
-      devolver(nombre, cantidad, desde); void avisar('duplicado', '23505'); return false
+      devolver(nombre, cantidad, desde); void avisar('duplicado', '23505')
+      return { ok: false, descartadas }
     }
     if (decision.accion === 'duplicado') return esDuplicado()
     const p: Pendiente = decision.pendiente
@@ -374,11 +443,12 @@ export function GroupView({
      */
     const puesto = await encolar(p)
     if (puesto === 'rechazado') {
-      devolver(nombre, cantidad, desde); avisarTexto(SIN_ALMACEN, 'generico', 'mutacion'); return false
+      devolver(nombre, cantidad, desde); avisarTexto(SIN_ALMACEN, 'generico', 'mutacion')
+      return { ok: false, descartadas }
     }
     if (puesto === 'ya-estaba') return esDuplicado()
     setPendientes(prev => [...prev, p])
-    return true
+    return { ok: true, descartadas }
   }
 
   /**
@@ -423,10 +493,13 @@ export function GroupView({
     // dejaba el bucle vaciando la cola entera sobre un árbol muerto.
     const mio = envio.current
     let envioHecho = false
+    // Un solo reloj por pasada: `siguienteEnCola` decide con la misma regla que el
+    // descarte de apertura, así que lo caducado no se envía aunque siga en disco.
+    const ahora = Date.now()
     let cola = await leerCola(me.id)
     for (;;) {
       if (mio !== envio.current) return
-      const p = siguienteEnCola(cola, group.id)
+      const p = siguienteEnCola(cola, group.id, ahora)
       /**
        * N4 — Quien **vacía** la cola retira el aviso, no quien la encuentra
        * vacía: el drenado corre también al montar y en cada cambio de red, y
@@ -488,6 +561,22 @@ export function GroupView({
       // primero conserva el orden, que es lo que el usuario apuntó.
       if (r.clase && r.code !== '23505') return
       envioHecho = true
+      /**
+       * Spec B / iteración 2 · i2-R1 — **Aquí NO se mira la generación**, y está
+       * escrito para que nadie lo vuelva a añadir.
+       *
+       * La iteración 1 lo añadió razonando que el reenvío devolvería `23505`. Es
+       * falso: `items_nombre_unico` es **parcial** —`WHERE deleted_at IS NULL`,
+       * verificado en el catálogo y afirmado desde antes en
+       * `unit/duplicados.test.ts:19`, que además explica por qué tiene que serlo—,
+       * así que en cuanto alguien tacha el producto el reenvío **crea fila nueva**.
+       * Un desmontaje a mitad de envío resucitaba lo que alguien había quitado.
+       *
+       * Los dos chequeos que sí se quedan —al empezar la vuelta y tras la
+       * relectura— impiden que un drenado de un árbol muerto **siga drenando**, que
+       * es lo que la cicatriz N3 protege. Rematar una vuelta cuyo envío el servidor
+       * ya aceptó no es eso: `quitarDeCola` va por `id` y es idempotente.
+       */
       await quitarDeCola(p.id)
       cola = cola.filter(x => x.id !== p.id)
       setPendientes(prev => prev.filter(x => x.id !== p.id))
@@ -551,18 +640,20 @@ export function GroupView({
    * la spec de la duración y aquí se usa, no se modifica.
    */
   const releerLaCola = useCallback(async () => {
-    const cola = await leerCola(me.id)
-    const mios = cola.filter(x => x.grupo === group.id)
+    /**
+     * Spec B / iteraciones 1, 2 y 4 — Por la función única: descarta lo que la regla
+     * condena y devuelve lo vivo. Aquí **sí** se anuncia, porque esta relectura no la
+     * provoca un gesto que esté esperando su propia respuesta: no compite con nadie.
+     *
+     * `quitarDeCola` vuelve a emitir y esto se ejecuta otra vez: la segunda vuelta ya
+     * no encuentra caducadas, no anuncia nada, y para.
+     */
+    const { vivos, descartadas } = await leerColaViva()
+    const mios = vivos.filter(x => x.grupo === group.id)
     setPendientes(mios)
+    if (descartadas) despachar({ tipo: 'avisar', origen: 'apertura', texto: caducados(descartadas), clase: 'texto' })
     if (mios.length === 0) despachar({ tipo: 'retirar', origen: 'cola' })
-  }, [me.id, group.id])
-
-  useEffect(() => {
-    const dejarDeOir = alCambiarLaCola(() => { void releerLaCola() })
-    const alVolver = () => { if (document.visibilityState === 'visible') void releerLaCola() }
-    document.addEventListener('visibilitychange', alVolver)
-    return () => { dejarDeOir(); document.removeEventListener('visibilitychange', alVolver) }
-  }, [releerLaCola])
+  }, [leerColaViva, group.id])
 
   const drenar = useCallback(async () => {
     if (drenando.current) { pedido.current = true; return }
@@ -574,6 +665,34 @@ export function GroupView({
       } while (pedido.current)
     } finally { drenando.current = false }
   }, [drenarUnaVez])
+
+  /**
+   * Spec B / R1 — **La cola que cambia también drena, no sólo se relee.**
+   *
+   * Hasta aquí, una fila que entraba por el camino de fallo con red tenía dos
+   * disparadores: el bucle acotado de `reintentarEnvio` —`esperasDeReintento()`
+   * suma 23 s— y el próximo montaje. Medido el 2026-09-18 contra el build de
+   * producción: agotado el bucle, con la API ya contestando, el canal vivo y un
+   * alta nueva viajando por esa misma conexión, la cola se quedó **seis minutos**
+   * en disco.
+   *
+   * Vale también para lo que escribe esta pestaña: `BroadcastChannel` entrega a
+   * cualquier otro objeto del mismo canal, incluido uno de este documento, y
+   * `alCambiarLaCola` crea el suyo (comprobado en el navegador). La vuelta que
+   * produce vaciar la cola encuentra la cola vacía y para.
+   *
+   * `sinRedVivo` y no `sinRed`: el valor del render en que se suscribió estaría
+   * caducado cuando llegue la señal, que es la cicatriz N5 de este fichero.
+   */
+  useEffect(() => {
+    const dejarDeOir = alCambiarLaCola(() => {
+      void releerLaCola()
+      if (!sinRedVivo.current) void drenar()
+    })
+    const alVolver = () => { if (document.visibilityState === 'visible') void releerLaCola() }
+    document.addEventListener('visibilitychange', alVolver)
+    return () => { dejarDeOir(); document.removeEventListener('visibilitychange', alVolver) }
+  }, [releerLaCola, drenar])
 
 
   /**
@@ -616,11 +735,9 @@ export function GroupView({
       // **toda** página desde el layout: un segundo usuario del mismo dispositivo
       // entra por la portada o por una invitación, no por aquí. Por eso este
       // efecto no comprueba el cambio de usuario: cuando llega, ya está hecho.
-      const cola = await leerCola(me.id)
-      const { vivos, caducados: viejos } = reparte(cola, Date.now())
-      await Promise.all(viejos.map(x => quitarDeCola(x.id)))
+      const { vivos, descartadas } = await leerColaViva()
       setPendientes(vivos.filter(x => x.grupo === group.id))
-      if (viejos.length) avisarTexto(caducados(viejos.length), 'texto', 'apertura')
+      if (descartadas) avisarTexto(caducados(descartadas), 'texto', 'apertura')
       const guardada = await leerLista(me.id, group.id)
       if (guardada?.length) setItems(prev => (prev.length ? prev : guardada))
     })()
@@ -831,6 +948,30 @@ export function GroupView({
   })
 
   /**
+   * Spec B / R1 — **El servicio que vuelve también drena.**
+   *
+   * El canal quedando suscrito es el servidor contestando: **evidencia**, no un
+   * reloj. Es la distinción que la Spec D lleva tres vueltas pagando, y aquí sale
+   * gratis porque el estado ya está calculado.
+   *
+   * Cuelga de la **transición**, no del nivel: del nivel se dispararía en cada
+   * render con el canal vivo, y del cambio a secas se dispararía también al
+   * degradarse, que es exactamente cuando no hay a quién mandar nada.
+   *
+   * Lo que este disparador promete es **un intento por vuelta del canal**, no una
+   * cola siempre vacía: un servicio que acepta la suscripción y rechaza la
+   * escritura consume el disparo sin vaciar nada, y espera al siguiente cambio de
+   * cola. Alargar el bucle de reintento cerraría ese resto y está fuera de alcance.
+   */
+  const canalPrevio = useRef(channelState)
+  useEffect(() => {
+    const antes = canalPrevio.current
+    canalPrevio.current = channelState
+    if (channelState !== 'live' || antes === 'live' || sinRedVivo.current) return
+    void drenar()
+  }, [channelState, drenar])
+
+  /**
    * R5 — El borrador ya no se suelta ANTES de saber si la escritura fue bien.
    * Se soltaba, y entonces el campo volvía al valor del servidor mientras el
    * aviso decía "inténtalo otra vez": no quedaba nada que reintentar, porque lo
@@ -939,8 +1080,17 @@ export function GroupView({
       const cantidadAhora = quantity.trim() || null
       setName(''); setQuantity(''); setBusy(true)
       try {
-        if (!(await meterEnCola(trimmed, cantidadAhora, desde))) return
+        const r = await meterEnCola(trimmed, cantidadAhora, desde)
+        if (!r.ok) return
         limpiarAviso()
+        /**
+         * Spec B / iteración 4 · i4-R1 — **Después de `limpiarAviso()`, no antes.**
+         * `apertura` es `una-vez` y `limpiar` se lleva el `una-vez`: anunciarlo dentro
+         * de `meterEnCola` lo borraba esta misma línea, y una entrada caducada
+         * desaparecía en silencio. Aquí no compite con nadie —sin red el alta que
+         * entra no pinta aviso propio—, así que aquí es donde se dice.
+         */
+        if (r.descartadas) avisarTexto(caducados(r.descartadas), 'texto', 'apertura')
       } finally { setBusy(false) }
       return
     }
@@ -985,7 +1135,15 @@ export function GroupView({
            * código. `'red'` aquí era una rama inalcanzable, igual que la que
            * `lib/items.ts:62` ya retiró una vez.
            */
-          if (!(await meterEnCola(trimmed, cantidadAhora, desde))) return
+          /**
+           * Spec B / iteración 4 · i4-R1 — Aquí el descarte **no se anuncia**, y se
+           * acepta con su argumento: el aviso que la persona necesita es el de su
+           * gesto —`EN_COLA`, que le dice dónde quedó su producto—, y la
+           * desaparición de lo caducado ya se ve, porque su ficha se fue con ella.
+           * Anunciarlo taparía `EN_COLA`: `apertura` es `una-vez` y `cola` es
+           * `nivel`, y lo de una vez gana.
+           */
+          if (!(await meterEnCola(trimmed, cantidadAhora, desde)).ok) return
           /**
            * N4 — El aviso se pinta directo, sin `avisar`. `avisar` lanza además
            * un `reintentar` de **carga**, y con `reintentarEnvio` ya en marcha
@@ -995,13 +1153,23 @@ export function GroupView({
            * devuelve el propio `addItem`.
            */
           /**
-           * N5 — Refinado por red como todos. Sin esto, si la red del usuario cae
-           * entre pulsar y responder —el caso exacto que esta deuda cierra— se le
-           * enseñaba a la vez «Sin conexión» y «el servicio está despertando»,
-           * culpando al servidor de su propia red.
+           * Spec B / R3 — **Texto propio del hecho «encolado».** Antes se pintaba
+           * `mensajeDe` refinado por red, y eso eran dos problemas en una línea.
+           *
+           * Uno: `SERVIDOR` dice «lo reintentamos solo», y el reintento dura 23 s
+           * —`esperasDeReintento()`— y después no lo reintenta nadie; el aviso
+           * seguía en pantalla con el servicio ya contestando.
+           *
+           * Dos: el refinado existía (N5) para no enseñar «Sin conexión» y «el
+           * servicio está despertando» a la vez cuando la red caía entre pulsar y
+           * responder. Con un texto que no culpa ni a la red ni al servicio de
+           * datos —sólo dice dónde está el producto y que sale solo— esa colisión
+           * no puede volver: no hay a quién culpar mal.
+           *
+           * Y `SERVIDOR` se queda intacto para la carga y la edición fallidas, que
+           * es donde sigue siendo cierto que no hay nada guardado.
            */
-          const suya = refinarSinRed('servidor', !sinRedVivo.current) ?? 'servidor'
-          despachar({ tipo: 'avisar', origen: 'cola', texto: mensajeDe(suya) ?? '', clase: suya })
+          despachar({ tipo: 'avisar', origen: 'cola', texto: EN_COLA, clase: 'servidor' })
           void reintentarEnvio(++envio.current)
           return
         }
@@ -1064,7 +1232,18 @@ export function GroupView({
       {/* N2 — señal POSITIVA: sólo existe cuando el canal está vivo. Afirmar
           la ausencia del aviso de degradado se resuelve en el instante inicial,
           cuando el estado aún es `connecting`, y pasa con el servicio parado. */}
-      {channelState === 'live' && (
+      {/**
+        * Spec B / R2 — **Y sin pendientes de este grupo.** `channelState` es un
+        * hecho sobre el canal y no dice nada de lo que está parado en disco:
+        * medido, el canal se reconectó a los 13:53:59 y la app anunció estar al
+        * día con dos productos de la persona sin enviar. Afirmar un estado que no
+        * se puede sostener es lo que §A.3 prohíbe.
+        *
+        * `pendientes` lo mantiene `releerLaCola` desde la cola compartida —no es
+        * una copia local que se entere sola—, y ya viene acotado a este grupo
+        * tanto al montar como en cada señal.
+        */}
+      {channelState === 'live' && pendientes.length === 0 && (
         <span role="status" data-testid="channel-live" className="sr-only">{LISTA_EN_VIVO}</span>
       )}
       <span data-testid="eventos-membresia-peligrosos" data-n={eventosPeligrosos} className="sr-only" />
@@ -1088,8 +1267,34 @@ export function GroupView({
         </p>
       )}
 
+      {/**
+        * Spec B / iteración 2 · i2-R4 — Y son **dos** los orígenes que no son
+        * fallos: lo encolado («está guardado en el móvil») y el descarte por
+        * caducidad («se descartó 1 producto»), que es la app informando de su
+        * propia política. El segundo es el único anuncio que la iteración 1
+        * decidió conservar, y se quedó pintado como error.
+        *
+        * La `key` distingue los dos registros: React parcheaba el `role` **en el
+        * mismo nodo**, y un `role` que cambia en sitio no lo recogen de forma
+        * fiable las ayudas técnicas. Sin ella, i1-7 afirmaba el atributo y no el
+        * anuncio, que es lo que el requisito promete.
+        */}
+      {/**
+        * Spec B / iteración 1 · i1-R4 — **El registro, no sólo las palabras.** R3
+        * cambió el texto de lo encolado y dejó el `role="alert"` rojo: a quien usa
+        * lector de pantalla se le anunciaba de forma asertiva, como un fallo, un
+        * mensaje que dice que su producto está guardado.
+        *
+        * Discrimina por `origen` y no por `clase`: `'servidor'` la comparten la
+        * carga y la edición fallidas, que sí son errores y sí pierden algo.
+        * `'cola'` tiene un solo escritor.
+        */}
       {notice && (
-        <p role="alert" data-testid="notice" className="rounded-xl bg-red-50 p-3 text-sm text-red-700">
+        <p key={ES_ESTADO.has(notice.origen) ? 'estado' : 'alerta'}
+           role={ES_ESTADO.has(notice.origen) ? 'status' : 'alert'} data-testid="notice"
+           className={ES_ESTADO.has(notice.origen)
+             ? 'rounded-xl bg-amber-50 p-3 text-sm text-amber-800'
+             : 'rounded-xl bg-red-50 p-3 text-sm text-red-700'}>
           {notice.texto}
           {/* R4 — "tu sesión ha caducado" sin manera de volver a entrar es un
               callejón: el usuario se queda en una pantalla que ya no puede usar.

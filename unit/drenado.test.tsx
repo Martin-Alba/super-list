@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, waitFor, cleanup, act, fireEvent } from '@testing-library/react'
 import type { Item } from '@/lib/items'
 import type { Pendiente } from '@/lib/local'
-import { claseDe, DUPLICADO, mensajeDe, SIN_ALMACEN, GONE, SIN_ACCESO, RELECTURA, type Clase } from '@/lib/errors'
+import { claseDe, DUPLICADO, EN_COLA, mensajeDe, SIN_ALMACEN, GONE, SIN_ACCESO, RELECTURA, type Clase } from '@/lib/errors'
 
 /**
  * I7/I9 — El drenado, atacado en la capa donde vive: montado dentro de la vista.
@@ -108,7 +108,10 @@ const montar = () => render(vista())
 let cola: Pendiente[] = []
 const colaViva = () => {
   leerCola.mockImplementation(async () => cola)
-  quitarDeCola.mockImplementation(async (id: string) => { cola = cola.filter(x => x.id !== id) })
+  // Devuelve `boolean`, como el de verdad: desde Spec B / i5-R1 la vista distingue el
+  // borrado que entró del que el almacén rechazó, y un doble que devuelve `undefined`
+  // le está diciendo «rechazado» sin querer.
+  quitarDeCola.mockImplementation(async (id: string) => { cola = cola.filter(x => x.id !== id); return true })
 }
 /** Un `addItem` que se queda parado hasta que el test lo suelta. */
 const enVuelo = () => {
@@ -132,7 +135,7 @@ beforeEach(() => {
   encolar.mockResolvedValue('entro')
   guardarLista.mockResolvedValue(undefined)
   leerCola.mockResolvedValue([])
-  quitarDeCola.mockResolvedValue(undefined)
+  quitarDeCola.mockResolvedValue(true)
   addItem.mockResolvedValue({ data: fila('x'), clase: null, code: null })
   activeItems.mockResolvedValue({ data: [], clase: null, code: null })
   softDeleteItem.mockResolvedValue({ data: 1, clase: null, code: null })
@@ -157,6 +160,16 @@ describe('R4/I7 el drenado va en orden, uno cada vez y sin solaparse', () => {
     expect(solapado, 'dos envíos a la vez: D.2 lo prohíbe').toBe(false)
     const nombres = addItem.mock.calls.map(c => c[3])
     expect(nombres, 'no salió el más antiguo primero').toEqual(['pronto', 'tarde'])
+    /**
+     * Spec B / iteración 2 · i2-R1 — **Y se espera a que la pasada termine.** El
+     * caso salía en cuanto veía los dos `addItem`, con el segundo todavía en vuelo;
+     * su `quitarDeCola('p-tarde')` caía dentro del caso de abajo, que afirma que
+     * NADIE lo llamó. La suite fallaba 2 de 5 corridas por eso, y la iteración 1 lo
+     * tapó metiendo una guarda en el producto — un test que se protege cambiando lo
+     * que prueba está midiendo su propio andamio. La aserción es de más, no de
+     * menos: las dos entradas salen de la cola.
+     */
+    await waitFor(() => expect(quitarDeCola).toHaveBeenCalledTimes(2))
   })
 
   /**
@@ -806,9 +819,21 @@ describe('N5 el aviso de la cola es suyo, se refina, y resuelve la carga', () =>
     // La red cae mientras el alta viaja.
     await ponerSinRed(true)
     await act(async () => { acabar({ data: null, clase: 'servidor', code: '' }) })
-    expect(r.getByTestId('notice').textContent,
+    /**
+     * Spec B / R3 — La guarda es la misma y es más fuerte: lo que no puede pasar
+     * es que a quien se ha quedado sin red se le culpe al servidor, ni que se le
+     * mande reintentar a mano algo que ya está en la cola. Antes se comprobaba
+     * pidiendo el texto de `'red'`; ahora el hecho «encolado» tiene texto propio
+     * que no señala a nadie, y se afirman los dos negativos explícitamente.
+     */
+    const texto = r.getByTestId('notice').textContent
+    expect(texto,
       'se le enseña «el servicio está despertando» a quien se ha quedado sin red')
-      .toBe(mensajeDe('red'))
+      .not.toBe(mensajeDe('servidor'))
+    expect(texto,
+      'se le manda reintentar a mano un producto que ya está guardado en la cola')
+      .not.toBe(mensajeDe('red'))
+    expect(texto, 'el aviso de lo encolado no dice dónde quedó el producto').toBe(EN_COLA)
   })
 })
 
@@ -1628,6 +1653,11 @@ describe('duración · el aviso de la cola no sobrevive a su condición', () => 
       await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
       cola = [...cola, encolar.mock.calls[0][0] as Pendiente]
 
+      // Spec B / R1 — La señal ahora **también drena**, así que el servicio se
+      // queda caído durante toda esta parte: si dejara de estarlo, lo que vaciaría
+      // la cola sería el envío y no habría nada que mirar. Lo que este caso guarda
+      // es que la señal se relee, no se aplica como dato.
+      addItem.mockResolvedValue({ data: null, clase: 'servidor', code: null })
       // Otra pestaña apunta lo suyo: la cola cambia, pero lo nuestro sigue ahí.
       cola = [...cola, pendiente('pan de otra', 0)]
       await act(async () => { avisarDeOtraPestana(); await vi.advanceTimersByTimeAsync(50) })

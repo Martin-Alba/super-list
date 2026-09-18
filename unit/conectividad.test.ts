@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { claseDe, clasificar, mensajeDe, refinarSinRed, esperasDeReintento, traducirError,
-  SERVIDOR, RED } from '../lib/errors'
+  EN_COLA, SERVIDOR, RED } from '../lib/errors'
 
 /**
  * R1 / DoD 1 — Los tres estados. La clase **no se puede decidir por el texto**:
@@ -111,5 +111,43 @@ describe('I6 una acción de servidor con el proyecto pausado lo dice', () => {
 
   it('y con código sigue mandando el código', () => {
     expect(traducirError({ message: 'duplicate key', code: '23505' }).clase).toBe('duplicado')
+  })
+})
+
+/**
+ * Spec B / R3 — **El hecho «encolado» tiene texto propio.**
+ *
+ * `SERVIDOR` lo pintaban tres hechos: una carga fallida, una edición fallida y un
+ * alta encolada. Sólo en el tercero el producto está guardado, así que un texto
+ * para los tres o miente en dos o no tranquiliza en ninguno. Y «lo reintentamos
+ * solo» era falso a partir del segundo 23 en los tres, porque eso es lo que dura
+ * `esperasDeReintento()`.
+ */
+describe('R3 el aviso de lo encolado no comparte texto con lo que no se guardó', () => {
+  it('DoD 12: es una constante propia, y `SERVIDOR` se queda donde estaba', () => {
+    expect(EN_COLA, 'volvió a ser el mismo texto que la carga fallida').not.toBe(SERVIDOR)
+    expect(EN_COLA, 'volvió a ser el texto que culpa a la conexión del usuario').not.toBe(RED)
+    expect(mensajeDe('servidor'),
+      'se movió el texto de la clase en vez de darle uno propio a la cola').toBe(SERVIDOR)
+  })
+
+  /**
+   * DoD 14 — Las tres cosas que este texto no puede volver a hacer, cada una con su
+   * sonda: el predicado tiene que **cazar** la versión mala, o no distingue nada.
+   */
+  const promeseReintento = (t: string) => /reintent|inténtalo|intentalo/i.test(t)
+  const culpaALaRed = (t: string) => /conexi[oó]n|sin red|wifi/i.test(t)
+  const diceDondeEsta = (t: string) => /guardad[oa]/i.test(t)
+
+  it('DoD 14: no promete un reintento, no culpa a la red, y dice dónde quedó', () => {
+    expect(promeseReintento(EN_COLA), 'promete un reintento que muere a los 23 s').toBe(false)
+    expect(culpaALaRed(EN_COLA), 'culpa a la conexión de quien puede tenerla perfecta').toBe(false)
+    expect(diceDondeEsta(EN_COLA), 'no dice lo único que tranquiliza: dónde está el producto').toBe(true)
+  })
+
+  it('y las sondas: los tres predicados cazan la versión mala', () => {
+    expect(promeseReintento(SERVIDOR), 'el predicado no caza «lo reintentamos solo»').toBe(true)
+    expect(culpaALaRed(RED), 'el predicado no caza «No hay conexión»').toBe(true)
+    expect(diceDondeEsta(SERVIDOR), 'el predicado da por bueno un texto que no dice dónde').toBe(false)
   })
 })

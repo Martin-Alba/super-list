@@ -35,16 +35,50 @@ describe('R5 lo que pasa de 24 horas se descarta', () => {
  * mismo grupo son la carrera que D.2 prohíbe resolver en memoria.
  */
 describe('R4 se drena en orden y de uno en uno', () => {
+  const hoy = 1_000_000_000_000
   it('sale el más antiguo del grupo, no el primero de la lista', () => {
-    const cola = [p('c', 300), p('a', 100), p('b', 200)]
-    expect(siguienteEnCola(cola, 'g1')?.id).toBe('a')
+    const cola = [p('c', hoy - 300), p('a', hoy - 500), p('b', hoy - 400)]
+    expect(siguienteEnCola(cola, 'g1', hoy)?.id).toBe('a')
   })
 
   it('no saca nada de otro grupo', () => {
-    expect(siguienteEnCola([p('x', 100, 'otro')], 'g1')).toBeNull()
+    expect(siguienteEnCola([p('x', hoy - 100, 'otro')], 'g1', hoy)).toBeNull()
   })
 
   it('con la cola vacía no hay siguiente', () => {
-    expect(siguienteEnCola([], 'g1')).toBeNull()
+    expect(siguienteEnCola([], 'g1', hoy)).toBeNull()
+  })
+})
+
+/**
+ * Spec B / iteración 1 · i1-R1 — **Lo caducado no se envía.**
+ *
+ * La regla de las 24 h vivía sólo en el efecto de apertura, así que el drenado
+ * podía publicar al grupo entero un producto que la app promete descartar. Medido
+ * en el navegador por la revisión: con una entrada de 25 h sembrada, `["caducado"]`
+ * en la base en 4 de 4 corridas, y también **sin montaje de por medio** cuando la
+ * escribía otra pestaña. Se cierra donde vive la política, no donde se vio: la
+ * misma función pura decide lo que se descarta y lo que se puede enviar.
+ */
+describe('i1-R1 el siguiente a enviar nunca es uno caducado', () => {
+  const hoy = 1_000_000_000_000
+  const viejo = hoy - VIDA_COLA_MS - 1
+  const nuevo = hoy - 1_000
+
+  it('i1-3: una cola sólo de caducadas no tiene siguiente', () => {
+    expect(siguienteEnCola([p('viejo', viejo)], 'g1', hoy),
+      'el drenado publicaría un producto que la regla manda descartar').toBeNull()
+  })
+
+  it('i1-3: con mezcla sale la viva, aunque la caducada sea más antigua', () => {
+    expect(siguienteEnCola([p('viejo', viejo), p('nuevo', nuevo)], 'g1', hoy)?.id,
+      'el FIFO se impuso a la caducidad y salió la vieja').toBe('nuevo')
+  })
+
+  // Sonda (§E.2): justo por debajo del límite todavía se envía. Sin esto, un
+  // filtro que rechazara todo pasaría los dos casos de arriba.
+  it('i1-2: en el límite exacto todavía vale, y se envía', () => {
+    expect(siguienteEnCola([p('justo', hoy - VIDA_COLA_MS)], 'g1', hoy)?.id,
+      'el filtro se pasó de frenada y ya no envía nada').toBe('justo')
   })
 })
