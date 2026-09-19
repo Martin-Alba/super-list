@@ -1350,3 +1350,129 @@ describe('Spec E / R2 · el perímetro: un solo fichero del producto abre el alm
       'una guarda que marca lo legítimo se desactiva a mano la primera vez que molesta').toEqual([]))
   })
 })
+
+/**
+ * Spec F / R6 y F7 — **La firma impide olvidar el id; no impide falsearlo.**
+ *
+ * `addItem` pide la fila entera, así que un llamador nuevo no compila sin darle una. Pero
+ * nada en el tipo distingue «la fila que acabo de leer de la cola» de «una fila que me acabo
+ * de inventar», y una fila inventada en cada intento devuelve la idempotencia a cero sin que
+ * ninguna puerta se ponga roja: el envío entra, la base no ve repetición, y el reenvío tras
+ * un tachado vuelve a resucitar.
+ *
+ * Así que se lee el módulo con el compilador y se exige que el envío del drenado mande **un
+ * identificador**, no un objeto construido en el sitio. Capa (§E.1): el requisito habla de lo
+ * que cualquiera escriba mañana en ese bucle, así que se mira el módulo y no su
+ * comportamiento de hoy.
+ */
+describe('Spec F / R6 · el envío del drenado manda la fila que leyó', () => {
+  type Envio = { fabricada: boolean; texto: string }
+
+  function enviosDelDrenado(codigo: string): Envio[] {
+    const sf = ts.createSourceFile('v.tsx', codigo, ts.ScriptTarget.Latest, true)
+    const out: Envio[] = []
+    const ver = (n: ts.Node) => {
+      if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === 'addItem') {
+        const fila = n.arguments[3]
+        if (fila) out.push({
+          // Un identificador o un acceso a propiedad viene de algo que ya existía; un objeto
+          // literal se construye aquí, y ahí es donde se puede colar un uuid nuevo.
+          fabricada: !ts.isIdentifier(fila) && !ts.isPropertyAccessExpression(fila),
+          texto: fila.getText().replace(/\s+/g, ' ').slice(0, 60),
+        })
+      }
+      ts.forEachChild(n, ver)
+    }
+    ver(sf)
+    return out
+  }
+
+  /** Sólo el bucle del drenado: el alta directa construye su fila a propósito y no tiene cola. */
+  const DEL_DRENADO = (codigo: string) =>
+    enviosDelDrenado(codigo.slice(codigo.indexOf('const drenarUnaVez'),
+      codigo.indexOf('const drenar =')))
+
+  it('F7: en el drenado, el envío no construye la fila', () => {
+    const envios = DEL_DRENADO(readFileSync('app/g/[id]/GroupView.tsx', 'utf8'))
+    expect(envios.length, 'el instrumento no encontró ningún envío: no mide nada').toBeGreaterThan(0)
+    expect(envios.filter(e => e.fabricada).map(e => e.texto),
+      'el drenado construye la fila que manda: un uuid nuevo por intento deja la base sin repetición que ver')
+      .toEqual([])
+  })
+
+  it('F7: la sonda — un envío que se inventa la fila se caza', () => {
+    const sembrado = `const drenarUnaVez = async () => {
+      const p = siguienteEnCola(cola, group.id, ahora)
+      const r = await addItem(createClient(), group.id, me.id,
+        { id: crypto.randomUUID(), nombre: p.nombre, cantidad: p.cantidad })
+    }
+    const drenar = () => {}`
+    const envios = DEL_DRENADO(sembrado)
+    expect(envios.filter(e => e.fabricada).length,
+      'una fila construida en el sitio pasó inadvertida').toBe(1)
+  })
+
+  it('F7: y la negativa — mandar la fila leída no se marca', () => {
+    const sembrado = `const drenarUnaVez = async () => {
+      const p = siguienteEnCola(cola, group.id, ahora)
+      const r = await addItem(createClient(), group.id, me.id, p)
+    }
+    const drenar = () => {}`
+    expect(DEL_DRENADO(sembrado).filter(e => e.fabricada), 'marca lo legítimo').toEqual([])
+  })
+})
+
+/**
+ * Spec F / R5 y F9 — Ningún documento puede seguir afirmando que la idempotencia la pone el
+ * índice de **nombre**. Es la frase que haría revertir F leyéndola de buena fe, y estaba en el
+ * docstring de R4 desde antes del sellado: la encontró una lectura, no una puerta.
+ */
+describe('Spec F / R5 · ningún documento afirma lo que F desmiente', () => {
+  const FUENTES = ['app/g/[id]/GroupView.tsx', 'lib/items.ts', 'lib/local.ts']
+
+  /**
+   * La primera versión de esta guarda buscaba «idempotencia … índice de nombre» en una ventana
+   * de prosa, y su propia sonda la tumbó: el punto de «la pone la base.» cortaba la ventana, así
+   * que **no cazaba la frase que estaba ahí**. Y al ensancharla aparecía el defecto de fondo: el
+   * texto corregido dice «**no** por el índice de nombre», o sea que una ventana amplia marca
+   * igual la afirmación y su negación. Un regex no distingue afirmar de negar.
+   *
+   * Así que la propiedad cambia a lo que sí es comprobable: **las dos frases retiradas no
+   * vuelven.** Y con su límite dicho — esto caza que alguien restaure el texto viejo, que es
+   * cómo se revierte F leyéndola de buena fe; NO caza que el comportamiento se revierta. De eso
+   * responden F1 y F2, en la base.
+   *
+   * Y un efecto que este barrido destapó en su primera corrida, que vale anotar: **la corrección
+   * citaba la frase retirada para explicarla**, así que el barrido la encontró en el sitio
+   * corregido. Un registro que reproduce el texto que retira derrota al barrido de ese texto; se
+   * describe la afirmación vieja, no se copia.
+   */
+  const RETIRADAS = [
+    'por el índice único de nombre normalizado, y eso es éxito',
+    'inventar aquí una clave de deduplicación',
+  ]
+
+  it('F9: ninguna fuente contiene las frases retiradas', () => {
+    const culpables = FUENTES.flatMap(f => {
+      const texto = readFileSync(f, 'utf8')
+      return RETIRADAS.filter(r => texto.includes(r)).map(r => `${f}: ${r}`)
+    })
+    expect(culpables, 'volvió el texto que atribuye la idempotencia al índice de nombre').toEqual([])
+  })
+
+  it('F9: la sonda — el docstring original se caza, entero y por partes', () => {
+    const original = 'La idempotencia no la pone este bucle: la pone la base. Reenviar un alta que '
+      + 'ya entró devuelve `23505` por el índice único de nombre normalizado, y eso es éxito — el '
+      + 'producto está, que es lo que se quería. Sin esa constraint habría que inventar aquí una '
+      + 'clave de deduplicación, y sería peor.'
+    expect(RETIRADAS.filter(r => original.includes(r)),
+      'el barrido no caza el texto que de verdad estaba ahí: no mide nada').toHaveLength(2)
+  })
+
+  it('F9: y la negativa — el texto corregido, que niega lo mismo, no se marca', () => {
+    const corregido = 'La idempotencia no la pone este bucle: la pone la base. Y por la clave '
+      + 'primaria, no por el índice de nombre: `items_nombre_unico` es parcial.'
+    expect(RETIRADAS.filter(r => corregido.includes(r)),
+      'la guarda marca la negación igual que la afirmación').toEqual([])
+  })
+})

@@ -64,12 +64,35 @@ export async function activeItems(
   }
 }
 
+/**
+ * Spec F / R2 — **La fila entra entera, y el id viaja dentro.** No es un parámetro que el
+ * llamador pueda olvidar: no hay forma de pedir un envío sin decir de qué fila es, así que un
+ * llamador nuevo **no compila** en vez de nacer sin idempotencia. Es la lección de la Spec E
+ * —el dueño dentro de la unidad, no en el sitio de llamada— aplicada al envío.
+ *
+ * Spec F / R1 — Y el mecanismo es la base: `items_origen_unico` es UNIQUE sobre
+ * `(group_id, origen_id)` y **no parcial**, así que un reenvío de la misma fila choca **también
+ * después de que alguien tache el producto**, que es exactamente el caso que
+ * `items_nombre_unico` no puede cazar por ser parcial. La ventana no se estrecha: deja de
+ * existir, porque el rechazo es por igualdad de clave y no por llegar a tiempo.
+ *
+ * La clave va en **su propia columna**, no en `items.id`: la primaria es autoridad del servidor
+ * y el cliente no la escribe. Lo intenté primero contra `items.id` y la base lo rechazó con
+ * `42501` — el privilegio por columna no la incluye, a propósito y con dos guardas que lo
+ * declaran.
+ *
+ * Lo que esta firma **no** impide, dicho para que no se descubra: falsear el id construyendo
+ * una fila nueva en cada intento. Eso lo mira la guarda de `unit/almacen.test.ts`.
+ */
+export type FilaAEnviar = { id: string; nombre: string; cantidad: string | null }
+
 export async function addItem(
-  client: SupabaseClient, groupId: string, createdBy: string, name: string, quantity?: string | null,
+  client: SupabaseClient, groupId: string, createdBy: string, fila: FilaAEnviar,
 ): Promise<Result<Item | null>> {
   const { data, error } = await client
     .from('items')
-    .insert({ group_id: groupId, name, quantity: quantity ?? null, created_by: createdBy })
+    .insert({ origen_id: fila.id, group_id: groupId, name: fila.nombre,
+              quantity: fila.cantidad ?? null, created_by: createdBy })
     .select('*').abortSignal(withTimeout()).single()
   return { data: (data as Item) ?? null, clase: claseDe(error), code: error?.code ?? null }
 }

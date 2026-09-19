@@ -5,7 +5,8 @@ import { useRouter } from 'next/navigation'
 import { useSinRed } from '@/lib/useSinRed'
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
-import { activeItems, addItem, mergeItems, mismoProducto, softDeleteItem, updateItem, type Item } from '@/lib/items'
+import { activeItems, addItem, mergeItems, mismoProducto, softDeleteItem, updateItem,
+  type FilaAEnviar, type Item } from '@/lib/items'
 import { caducados, EN_COLA, ESCRIBE_NOMBRE, esperasDeReintento, GONE, LISTA_EN_VIVO, mensajeDe,
   PENDIENTE, refinarSinRed, refinarSinSesion, RELECTURA, SIN_ALMACEN, SIN_CONEXION_LISTA, SIN_RED,
   SIN_RED_ACCION, type Clase } from '@/lib/errors'
@@ -351,9 +352,19 @@ export function GroupView({
    * con una cuenta que nadie va a decir.
    */
 
+  /**
+   * Spec F / R2bis — Toma **la fila**, no un nombre y una cantidad. La clave de la fila se
+   * acuña una sola vez por gesto de alta y la comparten el envío inmediato y la entrada de la
+   * cola. Lo destapó la fila F6: antes, el alta acuñaba un uuid para su envío y esta función
+   * acuñaba **otro** para la cola, así que cuando el envío llegaba al servidor y su respuesta
+   * no volvía —el caso que F existe para cerrar—, el reenvío llevaba una clave distinta de la
+   * que el servidor había guardado, y la base no podía reconocerlo: fila nueva. La spec decía
+   * «el alta directa no tiene nada que deduplicar», y era falso.
+   */
   const meterEnCola = async (
-    nombre: string, cantidad: string | null, desde: number,
+    fila: FilaAEnviar, desde: number,
   ): Promise<{ ok: boolean; descartadas: number }> => {
+    const { nombre, cantidad } = fila
     /**
      * Spec B / iteración 3 · i3-R1 — **Lo caducado se quita antes de decidir.**
      *
@@ -386,7 +397,7 @@ export function GroupView({
      */
     const decision = decidirEncolar({
       usuario: me.id, grupo: group.id, nombre, cantidad,
-      visibles: items, cola, id: crypto.randomUUID(), ahora: Date.now(),
+      visibles: items, cola, id: fila.id, ahora: Date.now(),
     })
     /**
      * R4 — Un solo sitio para el duplicado, las dos veces que se detecta: la que
@@ -457,10 +468,16 @@ export function GroupView({
    * simultáneos sobre el mismo grupo son la carrera que D.2 prohíbe resolver en
    * memoria del proceso.
    *
-   * La idempotencia no la pone este bucle: la pone la base. Reenviar un alta que
-   * ya entró devuelve `23505` por el índice único de nombre normalizado, y eso es
-   * éxito — el producto está, que es lo que se quería. Sin esa constraint habría
-   * que inventar aquí una clave de deduplicación, y sería peor.
+   * La idempotencia no la pone este bucle: la pone la base. Y **por la clave
+   * primaria**, no por el índice de nombre: `items_nombre_unico` es parcial
+   * —`WHERE deleted_at IS NULL`—, así que en cuanto alguien tacha el producto un
+   * reenvío ya no choca por nombre, **inserta**, y lo que el usuario quitó vuelve.
+   * La versión anterior de este comentario afirmaba lo contrario, y además daba
+   * por peor la idea de deduplicar con una clave propia. Las dos afirmaciones
+   * eran falsas, y eran las que harían revertir la Spec F a quien las leyera de
+   * buena fe. No hay nada que inventar aquí: la fila ya trae su uuid y viaja
+   * dentro de `addItem`, así que el reenvío choca contra `items_origen_unico`
+   * —`(group_id, origen_id)`, no parcial—, también con el producto tachado.
    */
   const drenarUnaVez = useCallback(async () => {
     // N4 — La generación se mira en CADA vuelta: desmontar con un envío en vuelo
@@ -530,7 +547,7 @@ export function GroupView({
         }
         return
       }
-      const r = await addItem(createClient(), group.id, me.id, p.nombre, p.cantidad)
+      const r = await addItem(createClient(), group.id, me.id, p)
       // Cualquier otro fallo deja la cola como está: se reintentará. Parar en el
       // primero conserva el orden, que es lo que el usuario apuntó.
       if (r.clase && r.code !== '23505') return
@@ -1041,6 +1058,14 @@ export function GroupView({
      * todo el mundo— seguía borrando lo tecleado al volver de la base.
      */
     const desde = tecleado.current
+    /**
+     * Spec F / R2bis — **Una clave por gesto de alta**, aquí y no en cada rama. El envío
+     * inmediato y la entrada de la cola son dos intentos de **la misma** intención, así que
+     * comparten clave: es lo que permite a la base reconocer el segundo. Construirla dos veces
+     * es el defecto que F6 midió.
+     */
+    const cantidadAhora = quantity.trim() || null
+    const fila: FilaAEnviar = { id: crypto.randomUUID(), nombre: trimmed, cantidad: cantidadAhora }
     if (sinRed) {
       /**
        * I4 — El campo se vacía **antes** de esperar al almacén, y la guarda
@@ -1051,10 +1076,9 @@ export function GroupView({
        * Y el duplicado se mira contra el almacén, no contra la copia en memoria
        * del cierre: entre dos altas seguidas, `pendientes` es la de antes.
        */
-      const cantidadAhora = quantity.trim() || null
       setName(''); setQuantity(''); setBusy(true)
       try {
-        const r = await meterEnCola(trimmed, cantidadAhora, desde)
+        const r = await meterEnCola(fila, desde)
         if (!r.ok) return
         limpiarAviso()
         /**
@@ -1084,10 +1108,9 @@ export function GroupView({
      * Ahora los dos caminos tienen una sola forma: vaciar, esperar, devolver si
      * falló y nadie ha tecleado.
      */
-    const cantidadAhora = quantity.trim() || null
     setName(''); setQuantity(''); setBusy(true)
     try {
-      const { clase, code } = await addItem(createClient(), group.id, me.id, trimmed, cantidadAhora)
+      const { clase, code } = await addItem(createClient(), group.id, me.id, fila)
       if (clase) {
         /**
          * N1 — Deuda 34. `clasificar` devuelve `servidor` exactamente cuando el
@@ -1117,7 +1140,7 @@ export function GroupView({
            * Anunciarlo taparía `EN_COLA`: `apertura` es `una-vez` y `cola` es
            * `nivel`, y lo de una vez gana.
            */
-          if (!(await meterEnCola(trimmed, cantidadAhora, desde)).ok) return
+          if (!(await meterEnCola(fila, desde)).ok) return
           /**
            * N4 — El aviso se pinta directo, sin `avisar`. `avisar` lanza además
            * un `reintentar` de **carga**, y con `reintentarEnvio` ya en marcha

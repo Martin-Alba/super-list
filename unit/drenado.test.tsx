@@ -127,10 +127,10 @@ const enVuelo = () => {
   const permiso = new Promise<void>(r => { soltar = r })
   addItem.mockImplementationOnce(async (...a: unknown[]) => {
     empezo(); await permiso
-    return { data: fila(String(a[3])), clase: null, code: null }
+    return { data: fila(String((a[3] as { nombre: string }).nombre)), clase: null, code: null }
   })
   addItem.mockImplementation(async (...a: unknown[]) =>
-    ({ data: fila(String(a[3])), clase: null, code: null }))
+    ({ data: fila(String((a[3] as { nombre: string }).nombre)), clase: null, code: null }))
   return { primero, soltar: () => act(async () => { soltar() }) }
 }
 
@@ -161,12 +161,12 @@ describe('R4/I7 el drenado va en orden, uno cada vez y sin solaparse', () => {
       if (enVuelo > 1) solapado = true
       await new Promise(r => setTimeout(r, 5))
       enVuelo--
-      return { data: fila(String(a[3])), clase: null, code: null }
+      return { data: fila(String((a[3] as { nombre: string }).nombre)), clase: null, code: null }
     })
     montar()
     await waitFor(() => expect(addItem).toHaveBeenCalledTimes(2))
     expect(solapado, 'dos envíos a la vez: D.2 lo prohíbe').toBe(false)
-    const nombres = addItem.mock.calls.map(c => c[3])
+    const nombres = addItem.mock.calls.map(c => (c[3] as { nombre: string }).nombre)
     expect(nombres, 'no salió el más antiguo primero').toEqual(['pronto', 'tarde'])
     /**
      * Spec B / iteración 2 · i2-R1 — **Y se espera a que la pasada termine.** El
@@ -251,7 +251,7 @@ describe('J3 el cerrojo del drenado no se traga trabajo', () => {
     await vuelo.soltar()
 
     await waitFor(() => expect(addItem).toHaveBeenCalledTimes(2))
-    expect(addItem.mock.calls.map(c => c[3]),
+    expect(addItem.mock.calls.map(c => (c[3] as { nombre: string }).nombre),
       'lo apuntado durante el envío se quedó en la cola para siempre')
       .toEqual(['viejo', 'nuevo'])
   })
@@ -269,7 +269,7 @@ describe('J3 el cerrojo del drenado no se traga trabajo', () => {
 
     await waitFor(() => expect(quitarDeCola).toHaveBeenCalledWith('p-solo'))
     await new Promise(r => setTimeout(r, 50))
-    expect(addItem.mock.calls.map(c => c[3]),
+    expect(addItem.mock.calls.map(c => (c[3] as { nombre: string }).nombre),
       'el mismo producto salió dos veces: D.2 lo prohíbe').toEqual(['solo'])
   })
 })
@@ -1723,5 +1723,40 @@ describe('R2 la vista distingue «ya estaba» de «no se pudo guardar»', () => 
     fireEvent.change(r.getByTestId('item-name'), { target: { value: 'leche' } })
     await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
     expect(r.queryByTestId('notice')?.textContent ?? '').toContain(SIN_ALMACEN)
+  })
+})
+
+/**
+ * Spec F / F3 — **La secuencia que abre la resurrección, en la capa del drenado.**
+ *
+ * Envío aceptado, baja local que el almacén rechaza, y una segunda pasada. Lo que esta capa
+ * tiene que garantizar es que el reenvío llegue **con la misma clave**: es lo único que
+ * permite a la base reconocerlo como repetición. Si el drenado regenerara la clave —o mandara
+ * un nombre suelto, como antes—, la base no vería repetición alguna y el producto tachado
+ * volvería. Que la base efectivamente lo rechace lo prueban F1 y F2, con token real.
+ *
+ * Capa (§E.1): el requisito habla del envío del drenado, así que se monta la vista y se mira
+ * qué manda, no se llama a `addItem` a mano.
+ */
+describe('Spec F / F3 · el reenvío lleva la misma clave', () => {
+  it('F3: con la baja rechazada, la segunda pasada manda la misma clave de origen', async () => {
+    const p = pendiente('lentejas', 1_000)
+    leerCola.mockResolvedValue([p])
+    // El almacén acepta el envío y **rechaza la baja**: la fila sobrevive en disco.
+    quitarDeCola.mockResolvedValue(false)
+    addItem.mockImplementation(async (...a: unknown[]) =>
+      ({ data: fila(String((a[3] as { nombre: string }).nombre)), clase: null, code: null }))
+
+    montar()
+    await waitFor(() => expect(addItem).toHaveBeenCalledTimes(1))
+    // Segunda pasada: la cola vuelve a entregar la fila, porque la baja no entró.
+    await act(async () => { oyentesDeLaCola.forEach(f => f()) })
+    await waitFor(() => expect(addItem.mock.calls.length).toBeGreaterThan(1))
+
+    const claves = addItem.mock.calls.map(c => (c[3] as { id: string }).id)
+    expect(claves[0], 'el primer envío no mandó la clave de la fila').toBe(p.id)
+    expect(new Set(claves).size,
+      'el reenvío llegó con otra clave: la base no puede reconocerlo y el tachado se resucita')
+      .toBe(1)
   })
 })

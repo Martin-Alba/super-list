@@ -13,7 +13,8 @@ describe('I11 las mutaciones denegadas devuelven el error', () => {
     const gid = await newGroup(owner)
     const outsider = await newUser('me-out')
 
-    const { data, clase } = await addItem(outsider.client, gid, outsider.id, 'intruso')
+    const { data, clase } = await addItem(outsider.client, gid, outsider.id,
+      { id: crypto.randomUUID(), nombre: 'intruso', cantidad: null })
     expect(clase, 'la denegación de RLS llegó como éxito').toBeTruthy()
     expect(data).toBeNull()
   })
@@ -44,7 +45,8 @@ describe('I11 las mutaciones denegadas devuelven el error', () => {
   it('el éxito no lleva error: la señal distingue de verdad', async () => {
     const owner = await newUser('me-owner3')
     const gid = await newGroup(owner)
-    const { data, clase } = await addItem(owner.client, gid, owner.id, 'pan')
+    const { data, clase } = await addItem(owner.client, gid, owner.id,
+      { id: crypto.randomUUID(), nombre: 'pan', cantidad: null })
     expect(clase).toBeNull()
     expect(data?.name).toBe('pan')
   })

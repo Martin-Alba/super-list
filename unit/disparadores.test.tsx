@@ -345,7 +345,7 @@ describe('i1-R1 · el drenado no publica lo que la regla manda descartar', () =>
     cola = [caducada('viejo')]
     await act(async () => { avisarDeLaCola(); await Promise.resolve() })
     await asentar()
-    expect(addItem.mock.calls.map(c => c[3]),
+    expect(addItem.mock.calls.map(c => (c[3] as { nombre: string }).nombre),
       'se publicó al grupo un producto de más de 24 h').not.toContain('viejo')
   })
 
@@ -358,7 +358,7 @@ describe('i1-R1 · el drenado no publica lo que la regla manda descartar', () =>
     cola = [pendiente('fresco')]
     await act(async () => { avisarDeLaCola(); await Promise.resolve() })
     await asentar()
-    expect(addItem.mock.calls.map(c => c[3]),
+    expect(addItem.mock.calls.map(c => (c[3] as { nombre: string }).nombre),
       'el filtro de caducidad se llevó por delante lo que sí había que enviar').toContain('fresco')
   })
 

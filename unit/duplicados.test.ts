@@ -6,6 +6,7 @@ import {
 } from './muestras/borrados'
 import { readFileSync } from 'node:fs'
 import { sql, pool, newUser, newGroup } from './helpers'
+import { addItem } from '@/lib/items'
 
 /**
  * R7 / DoD 10, 11, 16 — La invariante la impone el ALMACÉN. Comprobar en el
@@ -51,6 +52,57 @@ describe('R7 el índice único decide', () => {
     const { error } = await owner.client.from('items')
       .insert({ group_id: gid, name: 'platano', created_by: owner.id })
     expect(error, 'un índice total dejaría el nombre bloqueado para siempre').toBeNull()
+  })
+
+  /**
+   * Spec F / F2 — **La fila que prueba el requisito.** El índice de nombre es PARCIAL, así que
+   * en cuanto alguien tacha el producto un reenvío ya no choca: inserta, y lo que el usuario
+   * quitó vuelve. Es la resurrección de la deuda 64, atacada en la capa que el requisito nombra
+   * —la base, con el token del usuario— y a través del camino de envío del producto.
+   */
+  it('F2: el reenvío de la misma fila no resucita un producto tachado', async () => {
+    const owner = await newUser('f2'); const gid = await newGroup(owner)
+    const fila = { id: crypto.randomUUID(), nombre: 'Pan', cantidad: null }
+    const r1 = await addItem(owner.client, gid, owner.id, fila)
+    expect(r1.clase, 'el primer envío tiene que entrar: sin camino feliz no se distingue una guarda de una avería').toBeNull()
+    await owner.client.from('items')
+      .update({ deleted_at: new Date().toISOString() }).eq('id', r1.data!.id)
+
+    const r2 = await addItem(owner.client, gid, owner.id, fila)
+    expect(r2.code, 'el reenvío insertó en vez de chocar').toBe('23505')
+    const vivos = await sql(`select 1 from items where group_id = $1 and deleted_at is null`, [gid])
+    expect(vivos, 'resurrección: la fila que alguien tachó volvió a la lista').toHaveLength(0)
+  })
+
+  /**
+   * Spec F / F1 — Y **qué** índice hace el trabajo, no sólo que algo lo haga. Dos nombres
+   * distintos con la misma clave de origen: el índice de nombre no puede cazar esto —los
+   * nombres difieren—, así que sólo `items_origen_unico` puede. Sin esta fila, F1 estaría verde
+   * por el mecanismo equivocado.
+   */
+  it('F1: el mecanismo es la clave de origen, no el índice de nombre', async () => {
+    const owner = await newUser('f1'); const gid = await newGroup(owner)
+    const origen = crypto.randomUUID()
+    expect((await addItem(owner.client, gid, owner.id,
+      { id: origen, nombre: 'Sal', cantidad: null })).clase).toBeNull()
+    const r2 = await addItem(owner.client, gid, owner.id,
+      { id: origen, nombre: 'Azúcar', cantidad: null })
+    expect(r2.code, 'nombres distintos y misma clave: si esto entra, la clave de origen no viajó')
+      .toBe('23505')
+  })
+
+  /**
+   * Spec F / F1bis — Y la otra mitad del mecanismo: la clave es **por grupo**, así que la misma
+   * fila en otro grupo sí entra. Es lo que hace que el borde de «un uuid que ya existe en otro
+   * grupo» no exista, en vez de aceptarse por nombre.
+   */
+  it('F1bis: la misma clave de origen en otro grupo sí entra', async () => {
+    const owner = await newUser('f1b')
+    const g1 = await newGroup(owner), g2 = await newGroup(owner, 'Otro')
+    const fila = { id: crypto.randomUUID(), nombre: 'Sal', cantidad: null }
+    expect((await addItem(owner.client, g1, owner.id, fila)).clase).toBeNull()
+    expect((await addItem(owner.client, g2, owner.id, fila)).clase,
+      'la clave se acotó de más: dos grupos no comparten cola').toBeNull()
   })
 
   it('el mismo nombre en OTRO grupo no choca', async () => {

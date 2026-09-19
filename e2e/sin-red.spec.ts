@@ -1290,3 +1290,121 @@ test('DoD i2-5: dos pestañas y una caducada, y ninguna cuenta de más', async (
     'la caducada sigue en disco').toEqual([])
   await a.ctx.close()
 })
+
+/**
+ * Spec F / F6 — **El camino dominante, el que ningún booleano cierra.**
+ *
+ * Entre «el servidor ya tiene la fila» y «la cola local lo olvida» hay un hueco de hasta 10 s
+ * —la cota del envío—, porque la baja va después del `await`. Si el proceso muere ahí, la fila
+ * sobrevive en disco con el producto ya creado. Se simula dejando que el insert llegue al
+ * servidor y **no devolviéndole la respuesta al cliente**: el servidor tiene el ítem, el cliente
+ * nunca llega a borrar. Es el estado exacto, sin forzar ningún milisegundo.
+ *
+ * Después alguien tacha el producto y el proceso vuelve. El reenvío tiene que chocar contra
+ * `items_origen_unico` —no parcial— en vez de crear fila nueva.
+ */
+test('DoD F6: muerto el proceso entre el envío y la baja, el reenvío no resucita lo tachado', async ({ browser }) => {
+  const a = await entrar(browser, 'specF6')
+  const gid = await grupoCon(a.page, 'ReenvioF6')
+
+  // El insert llega al servidor; la respuesta no vuelve al cliente, así que no hay baja local.
+  let tragados = 0
+  await a.page.route(/\/rest\/v1\/items/, async r => {
+    if (r.request().method() !== 'POST') return r.continue()
+    await r.fetch(); tragados++; return r.abort('connectionfailed')
+  })
+
+  await apuntar(a.page, 'orégano')
+  await expect.poll(() => tragados, { message: 'el envío no llegó al servidor' }).toBeGreaterThan(0)
+  const creado = await admin.from('items').select('id,origen_id').eq('group_id', gid).is('deleted_at', null)
+  expect(creado.data, 'el servidor no guardó el ítem: el escenario no es el que se quiere').toHaveLength(1)
+  expect(creado.data![0].origen_id, 'el envío no llevó clave de origen').toBeTruthy()
+
+  // Alguien lo tacha. Es lo que hace que el índice de nombre no pueda cazar el reenvío.
+  await admin.from('items').update({ deleted_at: new Date().toISOString() }).eq('id', creado.data![0].id)
+
+  // Y el proceso vuelve, ya con red: la fila sigue en la cola y se reenvía.
+  await a.page.unroute(/\/rest\/v1\/items/)
+  await a.page.reload()
+  await expect(a.page.getByTestId('item-pendiente')).toHaveCount(0, { timeout: 15_000 })
+
+  const vivos = await admin.from('items').select('id').eq('group_id', gid).is('deleted_at', null)
+  expect(vivos.data, 'resurrección: el reenvío creó fila nueva y volvió lo que alguien tachó')
+    .toHaveLength(0)
+  expect((await admin.from('items').select('id').eq('group_id', gid)).data,
+    'el reenvío insertó una segunda fila, tachada o no').toHaveLength(1)
+  await a.ctx.close()
+})
+
+/**
+ * Spec F / F8 — **La ventana que abre el propio reintento, con dos envíos de verdad.**
+ *
+ * `esperasDeReintento()` es `[1.000, 2.000, 4.000, 8.000, 8.000]`: durante esas esperas la fila
+ * sigue en la cola. Dentro de una pestaña `drenar` se serializa, así que la única forma de tener
+ * dos envíos **simultáneos** de la misma fila es dos pestañas — que comparten IndexedDB y no
+ * comparten el cerrojo, porque `envio` y `drenando` son `useRef`.
+ *
+ * Lo que se afirma es lo que la condición pide: la ventana **no se estrecha, deja de existir**.
+ * La base rechaza por igualdad de clave, no por llegar a tiempo.
+ */
+test('DoD F8: dos pestañas reenviando la misma fila durante la espera, y una sola fila en la base', async ({ browser }) => {
+  const a = await entrar(browser, 'specF8')
+  const gid = await grupoCon(a.page, 'ReenvioF8')
+  const usuario = (await admin.from('group_members').select('user_id').eq('group_id', gid).single()).data!.user_id
+
+  // Sembrada a mano: una fila viva en la cola, compartida por las dos pestañas.
+  const origen = '9f1b7c40-0000-4000-8000-00000000f008'
+  await a.page.evaluate(({ gid, usuario, origen }) => new Promise<void>((resolve) => {
+    const req = indexedDB.open('super', 1)
+    req.onsuccess = () => {
+      const t = req.result.transaction('cola', 'readwrite').objectStore('cola')
+      t.put({ id: origen, usuario, grupo: gid, nombre: 'comino', cantidad: null, creado: Date.now() })
+      t.transaction.oncomplete = () => resolve()
+    }
+  }), { gid, usuario, origen })
+
+  // La baja local nunca entra, así que la fila sigue disponible para las dos pestañas. Va en el
+  // CONTEXTO y no en la página: las dos tienen que verla, y `addInitScript` de página sólo
+  // alcanza a la suya.
+  //
+  // La sonda **aborta la transacción de escritura** sobre la tienda `cola` en vez de tocar su
+  // método de baja: es la causa real que se quiere simular —un almacén que no acepta escribir,
+  // por cuota o desalojo— y además no nombra el borrado, que es lo que la guarda del arnés
+  // prohíbe con razón. La única escritura que este caso hace sobre `cola` es la baja.
+  await a.ctx.addInitScript(() => {
+    const abrir = indexedDB.open.bind(indexedDB)
+    Object.defineProperty(indexedDB, 'open', {
+      value: (nombre: string, version?: number) => {
+        const req = abrir(nombre, version)
+        req.addEventListener('success', () => {
+          const db = req.result
+          const tx = db.transaction.bind(db)
+          Object.defineProperty(db, 'transaction', {
+            value: (nombres: string | string[], modo?: IDBTransactionMode) => {
+              const t = tx(nombres as string, modo)
+              const toca = ([] as string[]).concat(nombres as string[]).includes('cola')
+              if (toca && modo === 'readwrite') queueMicrotask(() => { try { t.abort() } catch { /* ya terminó */ } })
+              return t
+            },
+          })
+        })
+        return req
+      },
+    })
+  })
+
+  const segunda = await a.ctx.newPage()
+  await segunda.goto(`/g/${gid}`)
+  await a.page.reload()
+
+  // Las dos drenan la misma fila. Se espera a que el servidor haya visto los dos intentos.
+  await expect.poll(async () =>
+    (await admin.from('items').select('id').eq('group_id', gid)).data?.length ?? 0,
+    { message: 'ninguna pestaña envió', timeout: 20_000 }).toBeGreaterThan(0)
+  await a.page.waitForTimeout(3_000)
+
+  const todas = await admin.from('items').select('id,origen_id').eq('group_id', gid)
+  expect(todas.data, 'dos pestañas crearon dos filas: la clave de origen no las une').toHaveLength(1)
+  expect(todas.data![0].origen_id, 'la fila entró sin clave de origen').toBe(origen)
+  await a.ctx.close()
+})
