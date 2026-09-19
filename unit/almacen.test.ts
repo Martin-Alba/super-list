@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, dirname } from 'node:path'
 import ts from 'typescript'
 
 /**
@@ -41,8 +43,14 @@ type Tx = { oncomplete?: () => void; onerror?: () => void; onabort?: () => void 
  * @param escritura 'error' aborta la **transacción**, que es como se manifiesta
  *   quedarse sin cuota: el `put` contesta bien y el disco dice que no después.
  */
+/**
+ * `filas` se añadió para la Spec E: hasta entonces `getAll` devolvía siempre vacío, y
+ * el caso que hacía falta —la puerta con el almacén **rechazando el borrado** de una
+ * caducada— necesita que la lectura entregue algo. Va al final y con valor por defecto:
+ * las llamadas que ya existían no cambian.
+ */
 function falso(aperturas: ('ok' | 'error')[], escritura: 'ok' | 'error' = 'ok',
-  cerrada = false, saltos = 1) {
+  cerrada = false, saltos = 1, filas: unknown[] = []) {
   let n = 0
   let vivas = 0
   /**
@@ -52,8 +60,9 @@ function falso(aperturas: ('ok' | 'error')[], escritura: 'ok' | 'error' = 'ok',
   const viva = <T,>(hacer: (fin: () => void) => T): T => { vivas++; return hacer(() => { vivas-- }) }
   const tienda = {
     put: () => ({}), delete: () => ({}),
-    get: () => viva(fin => disparar({}, 'ok', undefined, fin, saltos)),
-    getAll: () => viva(fin => disparar({}, 'ok', [], fin, saltos)),
+    get: (k?: unknown) => viva(fin => disparar({}, 'ok',
+      (filas as { id?: unknown }[]).find(f => f.id === k), fin, saltos)),
+    getAll: () => viva(fin => disparar({}, 'ok', filas, fin, saltos)),
     getAllKeys: () => viva(fin => disparar({}, 'ok', [], fin, saltos)),
   }
   const db = {
@@ -161,7 +170,12 @@ describe('J8 una apertura fallida no deja el almacén muerto', () => {
 describe('K5 una lectura con la conexión cerrada no rompe', () => {
   it('DoD 51: `leerCola` devuelve vacío en vez de rechazar', async () => {
     const { leerCola } = await cargar(falso(['ok'], 'ok', true))
-    await expect(leerCola('u1'), 'la lectura rechazó: nadie recoge eso').resolves.toEqual([])
+    /**
+     * Spec E — Lo que este caso afirma es lo mismo: **la lectura no rechaza, contesta
+     * vacío**. Con el almacén caído no hay nada que filtrar, así que la lista sale vacía.
+     */
+    await expect(leerCola('u1'), 'la lectura rechazó: nadie recoge eso')
+      .resolves.toEqual([])
   })
 
   it('y `leerLista` y `leerUltimoUsuario`, igual', async () => {
@@ -340,8 +354,24 @@ describe('R2 el almacén avisa de lo que escribe en la cola', () => {
   })
 
   it('quitarDeCola avisa después de escribir', async () => {
-    const { mod, oidos } = await conCanal(falso(['ok']))
+    const { mod, oidos } = await conCanal(falso(['ok'], 'ok', false, 1, [{ id: 'p1' }]))
+    /**
+     * Spec E / i2-R2 — Lo que este caso guarda es **el anuncio**, y sigue intacto. Lo
+     * que cambió es el valor devuelto: ya no dice si la escritura entró sino si **había
+     * fila que borrar**, que es lo que impide que dos barridos solapados cuenten las
+     * mismas filas. Por eso el falso ahora entrega una fila: sin ella el borrado no
+     * borra nada y el `false` sería correcto.
+     */
     expect(await mod.quitarDeCola('p1')).toBe(true)
+    expect(oidos, 'la escritura entró y no se anunció').toHaveLength(1)
+  })
+
+  // Y la otra mitad del valor nuevo: si no había fila, la escritura entra igual —así
+  // que se anuncia— pero no se ha retirado nada, y eso es lo que se devuelve.
+  it('quitarDeCola distingue «borré» de «la escritura entró»', async () => {
+    const { mod, oidos } = await conCanal(falso(['ok']))
+    expect(await mod.quitarDeCola('no-existe'),
+      'dice que borró una fila que no estaba: dos barridos contarían lo mismo dos veces').toBe(false)
     expect(oidos).toHaveLength(1)
   })
 
@@ -663,7 +693,10 @@ describe('R3 las escrituras a la cola que este lector ve, anuncian', () => {
     const cola = puertas(fuente).filter(x => x.tienda === 'cola')
     expect(cola.map(x => `${x.fn}:${x.escribe ? 'escribe' : 'lee'}`).sort(),
       'el lector no ve las puertas de la cola: no puede guardar nada')
-      .toEqual(['encolar:escribe', 'leerCola:lee', 'quitarDeCola:escribe'])
+      // Spec E / i1-R1 — La lectura cruda se extrajo a `deEsteUsuario`, el ayudante
+      // privado del que cuelgan las dos exportadas: `leerCola`, que filtra, y
+      // `barrerCaducados`, que barre. La puerta al almacén es ahora suya.
+      .toEqual(['deEsteUsuario:lee', 'encolar:escribe', 'quitarDeCola:escribe'])
   })
 
   it('hoy ninguna escritura a la cola que el lector ve es muda', () => {
@@ -701,5 +734,619 @@ describe('R3 las escrituras a la cola que este lector ve, anuncian', () => {
   it('y una LECTURA de la cola tampoco, aunque no anuncie', () => {
     const lee = "\nexport const v13 = () => conTienda<number[]>(COLA, 'readonly', (t: IDBObjectStore) => t.getAll() as IDBRequest<number[]>)\n"
     expect(mudas(fuente + lee), 'marcó una lectura: anunciar una lectura sería mentir').toEqual([])
+  })
+})
+
+/**
+ * Spec E / R1 — Lo que la puerta hace cuando el almacén **no acepta el borrado**, que es
+ * la mitad que la Spec B aprendió a fuerza de medirlo: no se cuenta como descartada, y
+ * nadie la ve igual. Se prueba aquí porque este falso sí sabe abortar; el de
+ * `unit/duplicado.test.tsx` declara en su cabecera que no puede producir un fallo.
+ */
+describe('Spec E · la puerta con el almacén rechazando', () => {
+  const viejo = { id: 'v', usuario: 'u1', grupo: 'g1', nombre: 'lejia', cantidad: null,
+    creado: Date.now() - 25 * 60 * 60 * 1000 }
+
+  it('DoD 3: no la cuenta como descartada, y tampoco la entrega', async () => {
+    const m = await cargar(falso(['ok'], 'error', false, 1, [viejo]))
+    expect(await m.leerCola('u1'), 'entregó una caducada porque no la pudo borrar').toEqual([])
+    expect((await m.barrerCaducados('u1')).descartadas,
+      'anunció un descarte que el almacén no aceptó').toBe(0)
+  })
+})
+
+/**
+ * Spec E / R2 — **Toda fila que salga de la tienda `cola` ha pasado por la regla.**
+ *
+ * Esto no se puede comprobar contando puertas al almacén: `encolar` lee con un
+ * `t.getAll()` **dentro** de su propia transacción de escritura, y para el lector de
+ * `puertas()` eso es una escritura, no una lectura. Ése es justo el octavo lector que
+ * ninguna búsqueda por `leerCola` encontraba y el que costó la deuda 63.
+ *
+ * Así que se buscan **las llamadas que producen filas** —`getAll`, `get`, `openCursor`—
+ * y se exige que la función que las envuelve mencione `reparte`. Es una condición
+ * estructural sobre el módulo, no sobre su comportamiento de hoy (§E.1): lo que guarda
+ * es al lector que alguien escriba mañana.
+ *
+ * **Su límite, escrito:** comprueba que la regla se *nombra* en esa función, no que se
+ * aplique bien. Una función que llamara a `reparte` y tirara el resultado pasaría. Lo
+ * que impide es lo que de verdad ocurrió cinco veces — un lector nuevo que ni se entera
+ * de que la regla existe —, y para lo otro están los casos de comportamiento.
+ */
+/**
+ * Spec E / i3-R4 — `getAllKeys` **no** está: devuelve claves, y a una clave no se le
+ * puede aplicar la regla de caducidad. Exigírselo marcaba a un lector legítimo, y una
+ * guarda que marca lo legítimo se desactiva a mano la primera vez que molesta.
+ */
+const PRODUCEN_FILAS = new Set(['getAll', 'get', 'openCursor'])
+
+/**
+ * Spec E / i3-R1 — **La propiedad, dicha entera.** No es «ninguna fila **sale** sin la
+ * regla»: es **ninguna fila se usa sin la regla**. Las dos difieren exactamente en
+ * `encolar`, que lee la cola cruda para **decidir** un duplicado y devuelve una cadena —
+ * y decidir contra lo caducado es la deuda 63, o sea el defecto que este ciclo existe
+ * para cerrar. La iteración 2 midió «salir» y con eso perdió esa sonda sin decirlo.
+ *
+ * Así que la regla vale para toda unidad que saque filas de la cola, y lo que se
+ * exceptúa se escribe aquí, una por una, con su motivo. Un lector nuevo no está en esta
+ * lista: tiene que añadirse a mano, que es justo el momento en que alguien lo mira.
+ */
+const EXENTAS: Record<string, string> = {
+  quitarDeCola: 'lee una fila para saber si EXISTÍA y devuelve un booleano: no mira su '
+    + 'contenido ni la entrega. Sin esta exención, el arreglo de B7 marcaría a su propio autor.',
+}
+
+/**
+ * Spec E / i2-R1 — **De dónde salen estas filas**, no «¿conozco esta forma?».
+ *
+ * La primera versión preguntaba lo segundo y se escapaba por nueve caminos, medidos por
+ * la revisión —y uno era **el refactor que la propia obra acababa de hacer**: extraer el
+ * callback de la tienda a un ayudante con nombre—. Una guarda que enumera formas siempre
+ * va una forma por detrás de quien escribe el código.
+ *
+ * Así que se parte de la **puerta al almacén** y se sigue hacia fuera: qué llamada produce
+ * filas de la tienda `cola`, si esas filas **salen** de su unidad, qué unidades las
+ * reciben, y si alguna de las que las entregan es alcanzable desde fuera del módulo. Una
+ * forma nueva aparece como un camino nuevo, no como un caso que falta.
+ *
+ * Las unidades se indexan **por nodo**, no por nombre: con el nombre como clave, un
+ * `leerCola` crudo local se fundía con el exportado y heredaba su cumplimiento.
+ */
+type Unidad = {
+  id: number; fn: string; nodo: ts.Node
+  aplica: boolean        // llama a `reparte` de verdad (AST, no texto)
+  entregaCrudo: boolean  // saca filas de la tienda y las deja salir
+  entrega: boolean       // entrega filas, propias o prestadas
+  llama: string[]
+}
+
+function lectorasDeLaCola(codigo: string): { fn: string; expuesta: boolean; aplica: boolean }[] {
+  const sf = ts.createSourceFile('local.ts', codigo, ts.ScriptTarget.Latest, true)
+  const unidades: Unidad[] = []
+  const porNombre = new Map<string, Unidad[]>()
+  const expuestos = new Set<string>()
+
+  /** Todo lo que sale del módulo, en cualquiera de sus formas. */
+  const verExportaciones = (n: ts.Node) => {
+    const exportado = (x: ts.Node) =>
+      !!(ts.canHaveModifiers(x) && ts.getModifiers(x)?.some(m => m.kind === ts.SyntaxKind.ExportKeyword))
+    if (ts.isFunctionDeclaration(n) && n.name && exportado(n)) expuestos.add(n.name.text)
+    if (ts.isClassDeclaration(n) && exportado(n)) {
+      for (const m of n.members) if (ts.isMethodDeclaration(m) && ts.isIdentifier(m.name)) expuestos.add(m.name.text)
+    }
+    if (ts.isVariableStatement(n) && exportado(n)) {
+      for (const d of n.declarationList.declarations) {
+        if (!ts.isIdentifier(d.name)) continue
+        expuestos.add(d.name.text)
+        // Un objeto exportado expone sus métodos y lo que sus propiedades apuntan.
+        if (d.initializer && ts.isObjectLiteralExpression(d.initializer)) {
+          for (const pr of d.initializer.properties) {
+            if (ts.isMethodDeclaration(pr) && ts.isIdentifier(pr.name)) expuestos.add(pr.name.text)
+            if (ts.isPropertyAssignment(pr) && ts.isIdentifier(pr.initializer)) expuestos.add(pr.initializer.text)
+            if (ts.isShorthandPropertyAssignment(pr)) expuestos.add(pr.name.text)
+          }
+        }
+        // `export const x = y` — un alias de una línea expone a `y`.
+        if (d.initializer && ts.isIdentifier(d.initializer)) expuestos.add(d.initializer.text)
+      }
+    }
+    // `export { x }` y `export { x as y }`
+    if (ts.isExportDeclaration(n) && n.exportClause && ts.isNamedExports(n.exportClause)) {
+      for (const e of n.exportClause.elements) expuestos.add((e.propertyName ?? e.name).text)
+    }
+    ts.forEachChild(n, verExportaciones)
+  }
+  verExportaciones(sf)
+
+  const unidadDe = (n: ts.Node): Unidad => {
+    for (let a: ts.Node | undefined = n; a; a = a.parent) {
+      const nom = nombreDeUnidad(a)
+      if (!nom) continue
+      let u = unidades.find(x => x.nodo === a)
+      if (!u) {
+        u = { id: unidades.length, fn: nom, nodo: a, aplica: false, entregaCrudo: false, entrega: false, llama: [] }
+        unidades.push(u)
+        porNombre.set(nom, [...(porNombre.get(nom) ?? []), u])
+      }
+      return u
+    }
+    // Lectura a nivel de módulo: unidad propia, y expuesta por definición — cualquiera
+    // que importe el módulo puede alcanzar lo que deje en una constante.
+    let u = unidades.find(x => x.fn === '(módulo)')
+    if (!u) {
+      u = { id: unidades.length, fn: '(módulo)', nodo: sf, aplica: false, entregaCrudo: false, entrega: false, llama: [] }
+      unidades.push(u); porNombre.set('(módulo)', [u]); expuestos.add('(módulo)')
+    }
+    return u
+  }
+  /**
+   * La unidad es una **función con nombre**, no la variable más cercana. Sin el filtro
+   * del inicializador, desde la llamada gana el `const ok = await escribir(COLA, …)` de
+   * `encolar` y el sitio sale llamándose «ok» — es la cicatriz que `puertas()` documenta
+   * doce describes más arriba, y la volvió a cazar la depuración de esta vuelta: la
+   * guarda marcaba `ok`, `q`, `todo`, `idas` y `descartadas`.
+   */
+  const esFuncion = (n: ts.Node | undefined): boolean =>
+    !!n && (ts.isArrowFunction(n) || ts.isFunctionExpression(n))
+  const nombreDeUnidad = (a: ts.Node): string | null => {
+    if (ts.isFunctionDeclaration(a) && a.name) return a.name.text
+    if (ts.isMethodDeclaration(a) && ts.isIdentifier(a.name)) return a.name.text
+    if (ts.isPropertyAssignment(a) && ts.isIdentifier(a.name) && esFuncion(a.initializer)) return a.name.text
+    if (ts.isVariableDeclaration(a) && ts.isIdentifier(a.name) && esFuncion(a.initializer)) return a.name.text
+    return null
+  }
+
+  /**
+   * Los callbacks que una puerta de la cola recibe **por nombre**. Sin esto, extraer el
+   * callback a un ayudante saca la lectura del alcance de la guarda — y ésa es
+   * exactamente la forma que el refactor de esta spec usó, así que no es hipotética.
+   */
+  const callbacksDeLaCola = new Set<string>()
+  /**
+   * Spec E / i3-R1 — **Se reconoce la puerta como ya sabe hacerlo este fichero.**
+   *
+   * La primera versión comparaba el argumento con el identificador `COLA` o con el
+   * literal `'cola'`, y con eso se escapaban `const TIENDA = COLA`, `'co' + 'la'` y una
+   * transacción propia. Doce describes más arriba, `puertas()` ya resuelve constantes con
+   * punto fijo, pliega sumas de literales y acepta las cuatro puertas — se usa **su**
+   * tabla `PUERTAS` y **su** resolución de texto, de modo que abrir una puerta nueva
+   * rompa un solo inventario y no pase inadvertido en dos sitios distintos.
+   */
+  const constantes = new Map<string, string>()
+  const textoDe = (n: ts.Node): string | null => {
+    if (ts.isStringLiteralLike(n)) return n.text
+    if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+      const i = textoDe(n.left), d = textoDe(n.right)
+      return i !== null && d !== null ? i + d : null
+    }
+    if (ts.isIdentifier(n)) return constantes.get(n.text) ?? null
+    return null
+  }
+  for (let vuelta = 0; vuelta < 3; vuelta++) {
+    const verC = (n: ts.Node) => {
+      if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer) {
+        const v2 = textoDe(n.initializer)
+        if (v2 !== null) constantes.set(n.name.text, v2)
+      }
+      ts.forEachChild(n, verC)
+    }
+    verC(sf)
+  }
+  const esPuertaDeLaCola = (a: ts.CallExpression): boolean => {
+    const llamada = ts.isPropertyAccessExpression(a.expression) ? a.expression.name.text
+      : ts.isIdentifier(a.expression) ? a.expression.text : ''
+    const idx = PUERTAS[llamada]
+    if (idx === undefined) return false
+    const arg = a.arguments[idx]
+    return !!arg && textoDe(arg) === 'cola'
+  }
+  const verPuertas = (n: ts.Node) => {
+    if (ts.isCallExpression(n) && esPuertaDeLaCola(n)) {
+      for (const arg of n.arguments) if (ts.isIdentifier(arg)) callbacksDeLaCola.add(arg.text)
+    }
+    ts.forEachChild(n, verPuertas)
+  }
+  verPuertas(sf)
+
+  const enLaCola = (n: ts.Node): boolean => {
+    /**
+     * Una transacción propia —`db.transaction(COLA).objectStore(COLA).getAll()`— no tiene
+     * la puerta por **encima** sino a la **izquierda**: el `objectStore(…)` es el receptor
+     * de la llamada, no su ancestro. Subir por el árbol no la encuentra, y por eso se
+     * escapaba. Se mira también la cadena de receptores.
+     */
+    if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression)) {
+      // El receptor suele venir guardado en una variable —`const t = db.transaction(…)`—,
+      // así que un identificador se resuelve a su inicializador antes de seguir la cadena.
+      const resolver = (x: ts.Node): ts.Node => {
+        if (!ts.isIdentifier(x)) return x
+        let hallado: ts.Node = x
+        const verV = (m2: ts.Node) => {
+          if (ts.isVariableDeclaration(m2) && ts.isIdentifier(m2.name)
+              && m2.name.text === (x as ts.Identifier).text && m2.initializer) hallado = m2.initializer
+          ts.forEachChild(m2, verV)
+        }
+        verV(sf)
+        return hallado
+      }
+      for (let r: ts.Node = resolver(n.expression.expression); ; ) {
+        if (ts.isCallExpression(r)) {
+          if (esPuertaDeLaCola(r)) return true
+          if (ts.isPropertyAccessExpression(r.expression)) { r = resolver(r.expression.expression); continue }
+        }
+        if (ts.isPropertyAccessExpression(r)) { r = resolver(r.expression); continue }
+        break
+      }
+    }
+    for (let a: ts.Node | undefined = n; a; a = a.parent) {
+      if (ts.isCallExpression(a) && ts.isIdentifier(a.expression)
+          && (a.expression.text === 'conTienda' || a.expression.text === 'escribir')) {
+        return esPuertaDeLaCola(a)
+      }
+      const nom = nombreDeUnidad(a)
+      if (nom && callbacksDeLaCola.has(nom)) return true
+    }
+    return false
+  }
+  /**
+   * *(Aquí vivía `sale()`, que medía si las filas **salían** de su unidad. Se fue al
+   * ensanchar la propiedad: lo que la regla exige no es que no salgan sino que no se
+   * **usen** sin filtrar, y la diferencia es exactamente `encolar`, que decide un
+   * duplicado contra ellas y devuelve una cadena. Lo que sustituye al refinamiento es la
+   * lista `EXENTAS`, que dice a mano quién puede leer sin la regla y por qué.)*
+   */
+
+  const ver = (n: ts.Node) => {
+    if (ts.isCallExpression(n)) {
+      const u = unidadDe(n)
+      if (ts.isIdentifier(n.expression)) {
+        if (n.expression.text === 'reparte') u.aplica = true
+        u.llama.push(n.expression.text)
+      }
+      if (ts.isPropertyAccessExpression(n.expression)
+          && PRODUCEN_FILAS.has(n.expression.name.text) && enLaCola(n)
+          && !(u.fn in EXENTAS)) {
+        u.entregaCrudo = true; u.entrega = true
+      }
+    }
+    // Un identificador suelto que nombra a otra unidad —parámetro por defecto, alias—
+    // también es un camino por el que las filas pueden viajar.
+    // Se excluye sólo cuando el identificador **es** el llamado —eso ya lo recoge la
+    // rama de arriba—; como **argumento** sí cuenta, que es como viaja un callback
+    // extraído o un parámetro por defecto.
+    const esElLlamado = !!n.parent && ts.isCallExpression(n.parent) && n.parent.expression === n
+    if (ts.isIdentifier(n) && !esElLlamado && porNombre.has(n.text)) {
+      const u = unidadDe(n); if (u.fn !== n.text) u.llama.push(n.text)
+    }
+    ts.forEachChild(n, ver)
+  }
+  ver(sf)
+  ver(sf)   // segunda vuelta: `porNombre` ya está poblado para los identificadores sueltos
+
+  for (let vuelta = 0; vuelta < 6; vuelta++) {
+    for (const u of unidades) {
+      const fuentes = u.llama.flatMap(c => porNombre.get(c) ?? []).filter(f => f.entrega)
+      if (!fuentes.length) continue
+      u.entrega = true
+      if (!u.entregaCrudo && fuentes.every(f => f.aplica)) u.aplica = true
+    }
+  }
+  return unidades.filter(u => u.entrega)
+    .map(u => ({ fn: u.fn, expuesta: expuestos.has(u.fn), aplica: u.aplica }))
+}
+
+describe('Spec E / i2-R1 · ninguna fila de la cola sale del módulo sin la regla', () => {
+  const codigo = readFileSync('lib/local.ts', 'utf8')
+  const sinRegla = (src: string) =>
+    lectorasDeLaCola(src).filter(l => l.expuesta && !l.aplica).map(l => l.fn)
+
+  it('i2-1: el instrumento ve lectoras, y ninguna expuesta se salta la regla', () => {
+    expect(lectorasDeLaCola(codigo).length, 'no ve ninguna: no mide nada').toBeGreaterThanOrEqual(2)
+    expect(sinRegla(codigo), 'una función alcanzable desde fuera entrega filas sin la regla').toEqual([])
+  })
+
+  /**
+   * Las **nueve formas** que la revisión midió que se escapaban. Cada una es una sonda:
+   * si la guarda deja de cazar una, este banco lo dice. La novena —la colisión de
+   * nombres— es la que más importa, porque no parece una forma: parece un descuido.
+   */
+  const CRUDO = `(await conTienda<Pendiente[]>(COLA, 'readonly', (t: IDBObjectStore) => t.getAll() as IDBRequest<Pendiente[]>)) ?? []`
+  const formas: [string, string][] = [
+    ['re-exportación', `const fisgona = async (): Promise<Pendiente[]> => ${CRUDO}\nexport { fisgona }`],
+    ['re-exportación con alias', `const fisgona = async (): Promise<Pendiente[]> => ${CRUDO}\nexport { fisgona as leerColaCruda }`],
+    ['callback extraído a un ayudante', `const traer = (t: IDBObjectStore) => t.getAll() as IDBRequest<Pendiente[]>\nexport const fisgona = async (): Promise<Pendiente[]> => (await conTienda<Pendiente[]>(COLA, 'readonly', traer)) ?? []`],
+    ['método de clase', `export class Fisgona {\n  async fisgona(): Promise<Pendiente[]> { return ${CRUDO} }\n}`],
+    ['método de objeto exportado', `export const api = {\n  async fisgona(): Promise<Pendiente[]> { return ${CRUDO} }\n}`],
+    ['lectura a nivel de módulo', `export const fisgona = ${CRUDO}`],
+    ['parámetro por defecto', `const fisgona = async (): Promise<Pendiente[]> => ${CRUDO}\nexport const usa = (f = fisgona) => f()`],
+    ['alias de una línea', `const fisgona = async (): Promise<Pendiente[]> => ${CRUDO}\nexport const leerColaCruda = fisgona`],
+    ['colisión de nombres con una que sí aplica', `export const otra = async (): Promise<Pendiente[]> => {\n  const leerCola = async (): Promise<Pendiente[]> => ${CRUDO}\n  return leerCola()\n}`],
+  ]
+  /**
+   * Spec E / i3-R1 — **El horizonte, medido.** Las cuatro formas que la revisión
+   * reprodujo atravesando el análisis en vez de rodeando sus casos: la tienda nombrada
+   * por una constante intermedia, por concatenación, una transacción propia, y las filas
+   * saliendo **por un cierre** — que es el idioma que `encolar` usa y declara.
+   */
+  const delHorizonte: [string, string][] = [
+    ['la tienda por una constante intermedia', `const TIENDA = COLA\nexport const fisgona = async (): Promise<Pendiente[]> => (await conTienda<Pendiente[]>(TIENDA, 'readonly', (t: IDBObjectStore) => t.getAll() as IDBRequest<Pendiente[]>)) ?? []`],
+    ['la tienda por concatenación', `export const fisgona = async (): Promise<Pendiente[]> => (await conTienda<Pendiente[]>('co' + 'la', 'readonly', (t: IDBObjectStore) => t.getAll() as IDBRequest<Pendiente[]>)) ?? []`],
+    ['una transacción propia', `export const fisgona = async (db: IDBDatabase): Promise<Pendiente[]> => {\n  const t = db.transaction(COLA, 'readonly').objectStore(COLA)\n  return (t.getAll() as IDBRequest<Pendiente[]>).result ?? []\n}`],
+    ['las filas salen por un cierre', `export const fisgona = async (): Promise<Pendiente[]> => {\n  let filas: Pendiente[] = []\n  await escribir(COLA, (t: IDBObjectStore) => {\n    const q = t.getAll() as IDBRequest<Pendiente[]>\n    q.onsuccess = () => { filas = q.result ?? [] }\n  })\n  return filas\n}`],
+  ]
+  it.each(delHorizonte)('i3-1: la sonda del horizonte — %s', (_n, inyectado) => {
+    const sembrado = codigo + '\n' + inyectado.replace(/\\n/g, '\n') + '\n'
+    expect(sinRegla(sembrado).length,
+      'el análisis no sigue este camino: un lector nuevo entrega caducadas sin que nadie lo vea').toBeGreaterThan(0)
+  })
+
+  /**
+   * Spec E / i3-R3 — **Las dos sondas del expediente anterior.** La base citaba la
+   * primera y la iteración 1 la segunda; al reescribir la guarda se perdieron las dos, y
+   * la primera dejó de estar guardada por ninguna estructura — sólo por un caso de
+   * comportamiento. Es el test que se pone rojo cuando alguien revierte (§E.4).
+   */
+  it('i3-4: la sonda heredada — `encolar` decidiendo contra la cola cruda', () => {
+    const sembrado = codigo.replace(
+      'const hay = reparte((q.result ?? []) as Pendiente[], Date.now()).vivos.some(x =>',
+      'const hay = ((q.result ?? []) as Pendiente[]).some(x =>')
+    expect(sembrado, 'la sonda no se aplicó: el ancla cambió').not.toBe(codigo)
+    expect(sinRegla(sembrado), 'la guarda dejó de ver al octavo lector').toContain('encolar')
+  })
+
+  it('i3-4: la sonda heredada — un `getAll` crudo dentro de una función que ya aplica la regla', () => {
+    const sembrado = codigo.replace(
+      'export const barrerCaducados',
+      `export const fisgona = async (): Promise<Pendiente[]> =>
+  (await conTienda<Pendiente[]>(COLA, 'readonly', (t: IDBObjectStore) => t.getAll() as IDBRequest<Pendiente[]>)) ?? []
+
+export const barrerCaducados`)
+    expect(sembrado, 'la sonda no se aplicó: el ancla cambió').not.toBe(codigo)
+    expect(sinRegla(sembrado)).toContain('fisgona')
+  })
+
+  it.each(formas)('i2-1: la sonda — %s', (_n, inyectado) => {
+    const sembrado = codigo + '\n' + inyectado.replace(/\\n/g, '\n') + '\n'
+    expect(sinRegla(sembrado).length,
+      'la guarda no ve esta forma: un lector nuevo puede nacer sin la regla').toBeGreaterThan(0)
+  })
+
+  /**
+   * Sondas negativas (§E.2) — lo que **no** puede marcar. Sin ellas, endurecer la guarda
+   * se convierte en marcarlo todo, que es la otra forma de no distinguir nada.
+   */
+  const negativas: [string, string][] = [
+    ['un `.get()` que no es del almacén', `export const ajena = (m: Map<string, string>): string | undefined => m.get(COLA)`],
+    ['una lectura de OTRA tienda', `export const listas = async (): Promise<unknown[]> => (await conTienda<unknown[]>(LISTAS, 'readonly', (t: IDBObjectStore) => t.getAll() as IDBRequest<unknown[]>)) ?? []`],
+    ['un envoltorio de una que sí aplica', `export const envuelve = async (u: string): Promise<Pendiente[]> => (await leerCola(u)).slice()`],
+  ]
+  /**
+   * Spec E / i3-R4 — **La otra mitad de una guarda: a quién NO marca.** Los tres que la
+   * revisión midió. Una guarda que marca lo legítimo se desactiva a mano la primera vez
+   * que molesta, y entonces no guarda nada.
+   */
+  const falsosPositivos: [string, string][] = [
+    ['una variable local llamada como una exportada', `export const inocuaN1 = async (): Promise<number> => {\n  const leerCola = (xs: Pendiente[]) => xs.length\n  return leerCola([])\n}`],
+    ['un contador que lee y devuelve un número', `export const cuantas = async (u: string): Promise<number> => (await leerCola(u)).length`],
+    ['una lectura de claves, a las que no se les aplica la regla', `export const claves = async (): Promise<IDBValidKey[]> => (await conTienda<IDBValidKey[]>(COLA, 'readonly', (t: IDBObjectStore) => t.getAllKeys() as IDBRequest<IDBValidKey[]>)) ?? []`],
+  ]
+  it.each(falsosPositivos)('i3-3: no marca — %s', (_n, inyectado) => {
+    const sembrado = codigo + '\n' + inyectado.replace(/\\n/g, '\n') + '\n'
+    expect(sinRegla(sembrado), 'marcó a quien no entrega filas de la cola').toEqual([])
+  })
+
+  it.each(negativas)('i2-2: la sonda negativa — %s', (_n, inyectado) => {
+    const sembrado = codigo + '\n' + inyectado + '\n'
+    expect(sinRegla(sembrado), 'marcó a quien no entrega filas crudas de la cola').toEqual([])
+  })
+})
+
+/**
+ * Spec E / R2 — **El límite del requisito, que se selló sin él.**
+ *
+ * R2 pide demostrar una **ausencia**: que ninguna fila de la cola se use sin la regla. Una
+ * ausencia sobre todo lo que el lenguaje admite no tiene final: tres vueltas seguidas
+ * cerraron formas y la siguiente encontró más. `spec` tiene la regla para esto —un
+ * requisito de ausencia necesita, antes de sellar, qué cuenta como prueba suficiente y qué
+ * queda fuera— y no se aplicó.
+ *
+ * **Lo que cuenta como prueba suficiente, escrito:**
+ *
+ * 1. **El perímetro.** `lib/local.ts` es el único fichero del producto que abre IndexedDB.
+ *    Eso es finito y se comprueba aquí. Mientras se cumpla, la guarda AST del describe de
+ *    arriba —que lee ese fichero— alcanza a **todo** el producto.
+ * 2. **Dentro del módulo, las formas medidas.** Quince: las nueve de la iteración 2, las
+ *    cuatro del horizonte, y las dos heredadas del expediente anterior. No todas las que el
+ *    lenguaje admite.
+ *
+ * **Lo que queda explícitamente fuera:** demostrar la ausencia para cualquier forma que
+ * alguien escriba mañana dentro de `lib/local.ts`. Los escapes que la revisión midió y no se
+ * cerraron están en la deuda con su medida. Lo que impide que importen es el punto 1: un
+ * fichero nuevo que abra la tienda rompe **este** caso, y entonces alguien mira.
+ */
+describe('Spec E / R2 · el perímetro: un solo fichero del producto abre el almacén', () => {
+  /**
+   * La revisión del cierre midió que la versión anterior de este bloque **no podía
+   * fallar** en la dirección que importa: la sonda inyectaba el fichero con `.concat()`,
+   * o sea **después** del recorrido y del filtro de extensión, así que reducir el
+   * recorrido a `lib` sola —dejar de mirar toda la capa de vista— dejaba las dos filas
+   * verdes. Y el detector era `/\bindexedDB\b/` sobre texto crudo: no veía
+   * `public/sw.js` (ni la raíz ni la extensión), ni `import { openDB } from 'idb'`, ni
+   * `g['indexed' + 'DB']`, y sí marcaba un **comentario** que nombrara la API.
+   *
+   * Tres cambios, y los tres atacan la misma cosa —que lo comprobado sea el perímetro y
+   * no que un fichero contenga una cadena—:
+   *
+   * 1. **El nivel superior del repo se enumera entero**, y cada entrada está dentro o
+   *    fuera con su motivo. Eso es lo que hace **finita** la afirmación: un directorio
+   *    nuevo con código no puede quedarse fuera en silencio.
+   * 2. **El recorrido se afirma**: tiene que llegar a las cuatro capas del producto. Es
+   *    la fila que se pone roja si alguien lo encoge, que es lo que antes no pasaba.
+   * 3. **El detector es el compilador, no un regex** — la misma razón que ya está escrita
+   *    arriba para `puertas()`: una afirmación de ausencia no se comprueba con `grep`. Un
+   *    comentario y una cadena son invisibles para el AST por construcción, y la
+   *    concatenación se pliega.
+   */
+  const CODIGO = /\.(tsx?|m?js)$/
+  const ficheros = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap(e =>
+      e.name === 'node_modules' || e.name.startsWith('.') ? []
+        : e.isDirectory() ? ficheros(`${dir}/${e.name}`)
+        : CODIGO.test(e.name) ? [`${dir}/${e.name}`] : [])
+
+  /** Dentro del perímetro. `public` está porque el service worker es código de producto
+   *  del mismo origen, con IndexedDB entero a su alcance, y es el sitio natural de un
+   *  background-sync de esta misma cola. */
+  const RAICES = ['app', 'lib', 'public']
+  /** Fuera, con su motivo. Sin esta tabla, «fuera» es «nadie se acordó». */
+  const FUERA: Record<string, string> = {
+    docs: 'documentación', unit: 'pruebas unitarias', e2e: 'pruebas de navegador',
+    supabase: 'migraciones y configuración de la base', 'test-results': 'salida de playwright',
+    node_modules: 'dependencias',
+  }
+  /** Configuración de la raíz: corre en el build o en el runner, no en el navegador. */
+  const CONFIG = new Set(['next.config.ts', 'postcss.config.mjs', 'eslint.config.mjs',
+    'playwright.config.ts', 'vitest.config.ts', 'next-env.d.ts'])
+
+  const deLaRaiz = () => readdirSync('.', { withFileTypes: true })
+    .filter(e => e.isFile() && CODIGO.test(e.name) && !CONFIG.has(e.name))
+    .map(e => e.name)
+
+  const recorrido = (raices: string[]): string[] =>
+    raices.flatMap(r => statSync(r).isDirectory() ? ficheros(r) : [r])
+
+  const PRODUCTO = () => [...RAICES, ...deLaRaiz()]
+
+  /** Un `import`/`require` de un envoltorio de IndexedDB cuenta como abrirla: `idb` no
+   *  nombra la API en ninguna parte del fichero que lo usa. */
+  const ENVOLTORIOS = new Set(['idb', 'idb-keyval'])
+
+  function abreLaTienda(ruta: string, codigo: string): boolean {
+    const sf = ts.createSourceFile(ruta, codigo, ts.ScriptTarget.Latest, true)
+    const constantes = new Map<string, string>()
+    const textoDe = (n: ts.Node): string | null => {
+      if (ts.isStringLiteralLike(n)) return n.text
+      if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+        const i = textoDe(n.left), d = textoDe(n.right)
+        return i !== null && d !== null ? i + d : null
+      }
+      if (ts.isIdentifier(n)) return constantes.get(n.text) ?? null
+      return null
+    }
+    const verConstantes = (n: ts.Node) => {
+      if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer) {
+        const v = textoDe(n.initializer)
+        if (v !== null) constantes.set(n.name.text, v)
+      }
+      ts.forEachChild(n, verConstantes)
+    }
+    verConstantes(sf)
+
+    let abre = false
+    const modulo = (n: ts.Node): string | null =>
+      ts.isImportDeclaration(n) ? textoDe(n.moduleSpecifier)
+        : ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === 'require'
+          ? textoDe(n.arguments[0] ?? n) : null
+    const ver = (n: ts.Node) => {
+      // Un identificador `indexedDB` en posición de expresión: la forma desnuda y
+      // `self.indexedDB`/`window.indexedDB`. Los comentarios y las cadenas no son nodos.
+      if (ts.isIdentifier(n) && n.text === 'indexedDB') abre = true
+      // `g['indexed' + 'DB']`, que es la forma que el regex no veía.
+      if (ts.isElementAccessExpression(n) && textoDe(n.argumentExpression) === 'indexedDB') abre = true
+      const m = modulo(n)
+      if (m && ENVOLTORIOS.has(m.split('/')[0])) abre = true
+      if (!abre) ts.forEachChild(n, ver)
+    }
+    ver(sf)
+    return abre
+  }
+
+  const abren = (raices: string[]): string[] =>
+    recorrido(raices).filter(f => abreLaTienda(f, readFileSync(f, 'utf8')))
+
+  /** Siembra de verdad, en disco: la sonda tiene que pasar por el recorrido y por el
+   *  filtro de extensión, que son justo las dos piezas que deciden el alcance. */
+  const sembrando = (ficheros: Record<string, string>, comprobar: (raiz: string) => void) => {
+    const raiz = mkdtempSync(join(tmpdir(), 'perimetro-'))
+    try {
+      for (const [rel, codigo] of Object.entries(ficheros)) {
+        const abs = join(raiz, rel)
+        mkdirSync(dirname(abs), { recursive: true })
+        writeFileSync(abs, codigo)
+      }
+      comprobar(raiz)
+    } finally { rmSync(raiz, { recursive: true, force: true }) }
+  }
+
+  it('R2-perímetro: el nivel superior del repo está clasificado, dentro o fuera', () => {
+    const sinClasificar = readdirSync('.', { withFileTypes: true })
+      .filter(e => !e.name.startsWith('.'))
+      .filter(e => e.isDirectory()
+        ? !RAICES.includes(e.name) && !(e.name in FUERA)
+        : CODIGO.test(e.name) && !CONFIG.has(e.name) && !deLaRaiz().includes(e.name))
+      .map(e => e.name)
+    expect(sinClasificar, 'algo nuevo en la raíz: decide si entra en el perímetro o queda fuera, con su motivo')
+      .toEqual([])
+  })
+
+  it('R2-perímetro: el recorrido llega a las cuatro capas del producto', () => {
+    const vistos = recorrido(PRODUCTO())
+    for (const f of ['app/sin-conexion/page.tsx', 'app/g/[id]/GroupView.tsx',
+                     'lib/local.ts', 'public/sw.js', 'proxy.ts'])
+      expect(vistos, `el recorrido no mira ${f}: el perímetro deja de cubrir su capa`).toContain(f)
+  })
+
+  it('R2-perímetro: sólo `lib/local.ts` abre IndexedDB en el producto', () => {
+    expect(abren(PRODUCTO()), 'otro fichero abre la tienda: la guarda AST no lo mira y R2 deja de valer')
+      .toEqual(['lib/local.ts'])
+  })
+
+  it('R2-perímetro: y nadie puede abrirla sin nombrarla — las tres puertas siguen sin exportar', () => {
+    const sf = ts.createSourceFile('local.ts', readFileSync('lib/local.ts', 'utf8'),
+      ts.ScriptTarget.Latest, true)
+    const exportados: string[] = []
+    const ver = (n: ts.Node) => {
+      if ((ts.isFunctionDeclaration(n) || ts.isVariableStatement(n)) &&
+          n.modifiers?.some(m => m.kind === ts.SyntaxKind.ExportKeyword)) {
+        if (ts.isFunctionDeclaration(n) && n.name) exportados.push(n.name.text)
+        if (ts.isVariableStatement(n)) for (const d of n.declarationList.declarations)
+          if (ts.isIdentifier(d.name)) exportados.push(d.name.text)
+      }
+      if (ts.isExportSpecifier(n)) exportados.push(n.name.text)
+      ts.forEachChild(n, ver)
+    }
+    ver(sf)
+    for (const puerta of ['abrir', 'conTienda', 'escribir'])
+      expect(exportados, `\`${puerta}\` exportada: un fichero nuevo leería la tienda sin escribir nunca `
+        + '`indexedDB`, así que el perímetro daría verde y la guarda AST —que lee un solo fichero— tampoco lo vería')
+        .not.toContain(puerta)
+  })
+
+  // ---- las sondas, todas sembrando en disco (§E.2) ----
+
+  it('R2-perímetro: la sonda — un fichero sembrado en disco se caza', () => {
+    sembrando({ 'cola/diagnostico.ts': 'const db = indexedDB.open("super", 1)\n' }, raiz =>
+      expect(abren([raiz]), 'un fichero nuevo que abre la tienda pasó inadvertido').toHaveLength(1))
+  })
+
+  it('R2-perímetro: la sonda — y en `.js`, que es la extensión del service worker', () => {
+    sembrando({ 'sw.js': 'self.indexedDB.open("super", 1)\n' }, raiz =>
+      expect(abren([raiz]), 'el filtro de extensión deja fuera la capa de service worker').toHaveLength(1))
+  })
+
+  it('R2-perímetro: la sonda — el envoltorio y la concatenación también', () => {
+    sembrando({ 'a.ts': "import { openDB } from 'idb'\nexport const x = openDB\n" }, raiz =>
+      expect(abren([raiz]), 'un envoltorio de IndexedDB no nombra la API').toHaveLength(1))
+    sembrando({ 'b.ts': "const g = globalThis as Record<string, unknown>\nexport const d = g['indexed' + 'DB']\n" }, raiz =>
+      expect(abren([raiz]), 'la concatenación se pliega en `puertas()` y aquí también').toHaveLength(1))
+  })
+
+  it('R2-perímetro: la sonda negativa — prosa que nombra la API no marca el fichero', () => {
+    sembrando({
+      'comentario.ts': '// este módulo no toca indexedDB, la cola vive en lib/local.ts\nexport const a = 1\n',
+      'cadena.ts': 'export const aviso = "indexedDB no disponible"\n',
+      'sw-real.js': '/** Los datos siguen viviendo en IndexedDB. */\nconst V = "super-v2"\n',
+    }, raiz => expect(abren([raiz]),
+      'una guarda que marca lo legítimo se desactiva a mano la primera vez que molesta').toEqual([]))
   })
 })

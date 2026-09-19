@@ -3,6 +3,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, waitFor, cleanup, act, fireEvent } from '@testing-library/react'
 import type { Item } from '@/lib/items'
 import type { Pendiente } from '@/lib/local'
+import { dobleDeLaPuerta } from './puertaDeLaCola'
+import { reparte } from '@/lib/local'
 import { claseDe, DUPLICADO, EN_COLA, mensajeDe, SIN_ALMACEN, GONE, SIN_ACCESO, RELECTURA, type Clase } from '@/lib/errors'
 
 /**
@@ -13,6 +15,7 @@ import { claseDe, DUPLICADO, EN_COLA, mensajeDe, SIN_ALMACEN, GONE, SIN_ACCESO, 
 const addItem = vi.fn()
 const activeItems = vi.fn()
 const leerCola = vi.fn()
+const barrerCaducados = vi.fn()
 const quitarDeCola = vi.fn()
 const encolar = vi.fn()
 const guardarLista = vi.fn()
@@ -64,6 +67,7 @@ const avisarDeOtraPestana = () => { for (const f of [...oyentesDeLaCola]) f() }
 vi.mock('@/lib/local', async (orig) => ({
   ...(await orig<typeof import('@/lib/local')>()),
   leerCola: (...a: unknown[]) => leerCola(...a),
+  barrerCaducados: (...a: unknown[]) => barrerCaducados(...a),
   quitarDeCola: (...a: unknown[]) => quitarDeCola(...a),
   encolar: (...a: unknown[]) => encolar(...a),
   guardarLista: (...a: unknown[]) => guardarLista(...a),
@@ -106,8 +110,11 @@ const montar = () => render(vista())
  * el test mediría el doble envío que él mismo fabricó.
  */
 let cola: Pendiente[] = []
+const { leerComoLaPuerta, barrerComoElDueno } = dobleDeLaPuerta(
+  () => cola, (vivos) => { cola = vivos }, reparte, quitarDeCola)
 const colaViva = () => {
-  leerCola.mockImplementation(async () => cola)
+  leerCola.mockImplementation(leerComoLaPuerta)
+  barrerCaducados.mockImplementation(barrerComoElDueno)
   // Devuelve `boolean`, como el de verdad: desde Spec B / i5-R1 la vista distingue el
   // borrado que entró del que el almacén rechazó, y un doble que devuelve `undefined`
   // le está diciendo «rechazado» sin querer.
@@ -135,6 +142,7 @@ beforeEach(() => {
   encolar.mockResolvedValue('entro')
   guardarLista.mockResolvedValue(undefined)
   leerCola.mockResolvedValue([])
+  barrerCaducados.mockResolvedValue({ vivos: [], descartadas: 0 })
   quitarDeCola.mockResolvedValue(true)
   addItem.mockResolvedValue({ data: fila('x'), clase: null, code: null })
   activeItems.mockResolvedValue({ data: [], clase: null, code: null })
@@ -370,15 +378,17 @@ describe('K2 lo tecleado durante la espera no se pisa', () => {
   })
 
   it('DoD 47: y con un duplicado sin red, igual', async () => {
-    let soltar!: (v: Pendiente[]) => void
-    leerCola.mockResolvedValueOnce([])
-    leerCola.mockImplementation(() => new Promise<Pendiente[]>(r => { soltar = r }))
+    // Spec E / i1-R1 — Lo que la rama sin red espera es el **barrido**, que es el que
+    // trae lo vivo en un solo viaje; `leerCola` ya no interviene en este camino.
+    let soltar!: (v: { vivos: Pendiente[]; descartadas: number }) => void
+    barrerCaducados.mockResolvedValueOnce({ vivos: [], descartadas: 0 })
+    barrerCaducados.mockImplementation(() => new Promise(r => { soltar = r }))
     sinRedAhora = true
     const r = montar()
     await tecleaYEnvia(r, 'lentejas')
 
     fireEvent.change(r.getByTestId('item-name'), { target: { value: 'garbanzos' } })
-    await act(async () => { soltar([pendiente('lentejas', 1_000)]) })
+    await act(async () => { soltar({ vivos: [pendiente('lentejas', 1_000)], descartadas: 0 }) })
 
     expect((r.getByTestId('item-name') as HTMLInputElement).value,
       'el duplicado sin red pisó lo que se estaba tecleando').toBe('garbanzos')

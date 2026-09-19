@@ -1234,3 +1234,59 @@ test('DoD i4-7: una caducada del mismo nombre no bloquea volver a apuntarlo', as
     'la caducada sigue en disco, o el producto nuevo no entró').toEqual(['salvia'])
   await a.ctx.close()
 })
+
+/**
+ * Spec E / i2-R2 · i2-5 — **Dos pestañas, una caducada, un solo anuncio.**
+ *
+ * La iteración 1 declaró esto como límite: dos barridos solapados contaban las mismas
+ * filas, y cerrarlo «exigiría que `IDBObjectStore.delete` dijera si la fila existía». Es
+ * cierto de `delete` y falso del almacén — `encolar` lee y escribe en una misma
+ * transacción desde hace tres specs—. Medido antes de arreglarlo, 3 de 3: **una fila
+ * caducada producía dos anuncios**, y dos filas, cuatro.
+ *
+ * Las dos pestañas van en el **mismo contexto** porque lo que comparten es IndexedDB:
+ * dos contextos no comparten almacén y el caso no existiría.
+ */
+test('DoD i2-5: dos pestañas y una caducada, y ninguna cuenta de más', async ({ browser }) => {
+  const a = await entrar(browser, 'redE1')
+  const gid = await grupoCon(a.page, 'Dospestanas')
+  const usuario = (await admin.from('group_members').select('user_id').eq('group_id', gid).single()).data!.user_id
+
+  const b = await a.ctx.newPage()
+  await b.goto(`/g/${gid}`)
+  await expect(b.getByTestId('item-name')).toBeVisible()
+
+  // La caducada aparece con las dos ya montadas: es el caso, no el arranque.
+  await a.page.evaluate(({ gid, usuario }) => new Promise<void>((ok) => {
+    const req = indexedDB.open('super', 1)
+    req.onsuccess = () => {
+      const t = req.result.transaction('cola', 'readwrite').objectStore('cola')
+      t.put({ id: 'vieja-e2', usuario, grupo: gid, nombre: 'cilantro', cantidad: null,
+              creado: Date.now() - 25 * 60 * 60 * 1000 })
+      t.transaction.oncomplete = () => ok()
+    }
+  }), { gid, usuario })
+
+  // Una sola señal del canal: la que el almacén emite tras cada escritura aceptada.
+  await a.page.evaluate(() => { const c = new BroadcastChannel('super:cola'); c.postMessage(1); c.close() })
+
+  /**
+   * **Lo que se afirma, y lo que NO.** Que las dos pestañas lo digan no es un defecto:
+   * son dos pantallas del mismo usuario y el hecho es cierto en las dos. Lo que B7 sí
+   * podía romper es **el número**: dos barridos solapados contando las mismas filas
+   * hacían que una pantalla dijera más descartes de los que hubo. Eso es lo que se mide.
+   */
+  await expect(async () => {
+    const avisos = (await a.page.getByTestId('notice').allTextContents())
+      .concat(await b.getByTestId('notice').allTextContents())
+      .filter(t => /se descartó|se descartaron/i.test(t))
+    expect(avisos.length, 'ninguna pantalla anunció el descarte').toBeGreaterThan(0)
+    for (const t of avisos) {
+      expect(t, 'una pantalla contó más filas de las que se retiraron').toMatch(/descartó 1 producto/i)
+    }
+  }).toPass({ timeout: 15_000 })
+
+  expect((await colaEn(a.page) as { nombre: string }[]).map(x => x.nombre),
+    'la caducada sigue en disco').toEqual([])
+  await a.ctx.close()
+})

@@ -967,7 +967,22 @@ Las dos mitades son la misma regla — **una corrida no es una medida** — y ni
 la vigila nada automático hoy.
 
 
-## 62 — La cáscara sin red no conoce la regla de caducidad (2026-09-18)
+## 62 — ~~La cáscara sin red no conoce la regla de caducidad~~ — **SALDADA** (2026-09-19)
+
+**La cerró la Spec E.** La cáscara ya no puede ver una caducada: `leerCola` filtra en cada
+lectura, así que esa pantalla recibe la regla **sin pedirla**, que era el problema de fondo —
+no que le faltara una llamada, sino que aplicarla fuera responsabilidad suya. Guardado en
+`unit/shell.test.tsx` › «DoD 9: no pinta como pendiente una entrada caducada, y sí la viva» y
+«DoD 10: y deja volver a apuntar el producto cuya entrada caducó», con su sonda. Y comprobado
+a mano en las dos pantallas: `.claude/fathom/spec-e/gesto-2026-09-19.md`.
+
+**Lo que NO se cerró y sigue siendo cierto de aquella entrada:** la cáscara **no barre**, así
+que una caducada se queda en disco mientras esa sea la única pantalla que se abra. Es el borde
+B6 de la Spec E y está declarado en su §7: recibe la seguridad, no la cortesía de anunciar.
+
+*(Texto original, para el que quiera la medida de entonces:)*
+
+
 
 `app/sin-conexion/page.tsx` lee la cola **cruda** y se la da a `decidirEncolar`: no importa
 `reparte`, ni `VIDA_COLA_MS`, ni `caducados` — verificado en su lista de importaciones, que es
@@ -995,7 +1010,18 @@ Lo que se anota aquí es que **hoy**, en producción, la cáscara tiene ese call
 están desfasadas. Se reportan y no se arrastran: la lección de citar por nombre la estrenó el
 ciclo de la Spec B en su valla y en sus propias entradas.)*
 
-## 63 — Con el almacén rechazando escrituras, la caducada bloquea volver a apuntar (2026-09-18)
+## 63 — ~~Con el almacén rechazando escrituras, la caducada bloquea volver a apuntar~~ — **SALDADA** (2026-09-19)
+
+**La cerró la Spec E por el otro extremo.** El mecanismo era `encolar`, que decidía el
+duplicado contra la cola **cruda** y por eso seguía viendo una entrada que ninguna pantalla
+enseñaba. Ahora decide contra lo vivo (R3), así que el producto entra aunque su caducada siga
+en disco: `unit/duplicado.test.tsx` › «i1-3: sin barrer, nadie la ve y no bloquea volver a
+apuntarla», con la sonda de que un duplicado **vivo** sí sigue bloqueando. Comprobado a mano en
+la cáscara, que era donde el callejón era permanente.
+
+*(Texto original:)*
+
+
 
 **Medido en navegador real por la revisión de la iteración 5**, con el `delete` de la tienda
 `cola` rechazando: la entrada caducada **se despinta igual** —`releerLaCola` y el efecto de
@@ -1050,3 +1076,121 @@ La valla de la spec se pasó a **citar por nombre** y eso no se desplaza. Lo que
 guarda: una prueba que extraiga `ruta:NNN` del árbol y falle si la línea está vacía o si el
 nombre citado no aparece cerca —con su sonda, que debe ser cazada—, o directamente que prohíba
 la cita por número en los comentarios. Sin ella, la lección se va con la spec que se borra.
+
+## 64 bis — El arreglo de la 64 se volvió más difícil, y eso lo hizo la Spec E (2026-09-19)
+
+La deuda 64 dice que `drenarUnaVez` descarta el booleano de `quitarDeCola` tras un envío
+aceptado, y que por el índice parcial un reenvío después de que alguien tache el producto crea
+fila nueva. Sigue igual de abierta. **Lo que cambió es el material con el que habrá que
+arreglarla.**
+
+`quitarDeCola` devolvía «la escritura entró». Ahora devuelve «**había** fila que borrar», que es
+lo que cerró el borde B7 —dos barridos solapados contando las mismas filas— y está medido en
+unidad y en navegador. Para `barrerCaducados` la fusión es correcta: sólo necesita saber si la
+retiró él. Pero **fusiona dos hechos que la 64 necesita separados**: hoy `false` significa «el
+almacén rechazó» **o** «no había fila», y un drenado que honrara ese booleano trataría «otra
+pestaña ya la drenó» —que es normal y no es un fallo— como «el disco la rechazó».
+
+Es el único cambio de este ciclo que deja una deuda declarada fuera de alcance **más difícil
+que antes**, y por eso se escribe aquí en vez de descubrirse al abrirla. Quien la arregle
+necesita los dos hechos por separado: o un valor de tres estados, o que el drenado pregunte por
+su cuenta. No se hizo aquí porque fusionar la regla de caducidad con la del comprobante del
+borrado es exactamente lo que costó cinco vueltas en la Spec B.
+
+## 67 — Los escapes que la guarda de la Spec E no cierra, medidos (2026-09-19)
+
+La guarda estructural de `unit/almacen.test.ts` demuestra que ninguna fila de la cola se usa
+sin la regla **en las quince formas medidas**, y el límite de R2 dice que eso es la prueba
+suficiente porque el **perímetro** —un solo fichero del producto abre IndexedDB— la hace
+alcanzar a todo. Lo que la última revisión midió y **no** se cerró, con su forma exacta, para
+que nadie lo vuelva a descubrir:
+
+- **Un envoltorio con nombre alrededor de la puerta.** El reconocimiento sólo acepta una
+  llamada directa a `conTienda`/`escribir`. Verificado de punta a punta: con un
+  `leerTiendaCola` privado y un `export leerColaCruda` que entrega caducadas, la guarda
+  devuelve `[]` y la verja entera queda verde. Lo único que se pone rojo es el inventario de
+  puertas, que invita en su mensaje a actualizarse.
+- **`EXENTAS` se indexa por nombre y se consulta con `in`.** Tres huecos: una función *local*
+  llamada `quitarDeCola` hereda la exención; `in` ve `Object.prototype`, así que un método
+  `toString` queda exento; y nada comprueba que la exenta siga cumpliendo su motivo —un
+  `quitarDeCola` sembrado que devolviera la fila seguiría exento—.
+- **La resolución de identificadores no tiene ámbito**: barre el fichero y se queda con la
+  última declaración del nombre. Seis escapes medidos —receptor asignado después, receptor en
+  propiedad de objeto, nombre de tienda tras una llamada, `for…of` sobre tiendas, plantilla con
+  sustitución, callback como propiedad—.
+- **Cuatro falsos positivos nuevos** de la misma clase que los tres que sí se arreglaron: una
+  local o un parámetro llamados `deEsteUsuario` marcan a su anfitrión; un contador con
+  `openCursor`; un `existeEnCola()` legítimo con la forma de la exenta y otro nombre.
+
+**Y dos más, que la revisión del cierre encontró atacando el modelo en vez de las formas.**
+Son de la misma clase y no estaban aquí:
+
+- **La propagación va por el grafo de llamadas, y una caché no es una llamada.** Un
+  `refrescar()` que aplica la regla correctamente pero deja las filas crudas en un `let` de
+  módulo, y un `pendientes()` exportado que las devuelve: la guarda da `[]` y `pendientes` no
+  aparece ni en el inventario. Compila con `--strict`. Importa más que las otras porque una
+  caché es la razón número uno por la que nace un lector nuevo, que es el defecto que R2
+  existe para impedir.
+- **`export default { async leerColaCruda(){…} }`**: entrega crudo y sale del módulo, y
+  `verExportaciones` no lo ve porque no conoce `ts.isExportAssignment`.
+
+El patrón común de los dos, que es la forma útil de anotarlos: el modelo sigue las filas por
+donde **vuelven** (`return`) y no por donde se **quedan** (una variable de módulo) ni por donde
+el módulo **sale** (`export default`).
+
+**Y lo que quedó suelto alrededor del perímetro**, ya con su arreglo puesto donde sí se hizo
+(vuelta 4 del 2026-09-19): `TOCA` en `pasada.sh` es un **tercer inventario a mano** —tras
+`PUERTAS` y las raíces del perímetro—, así que un mutante futuro que toque un cuarto fichero
+deja la precondición de entrada ciega justo donde se cerró el agujero; y dos frases de las
+deudas 62 y 63 de este mismo fichero describen en presente `leerColaViva`, borrada, a 15 y 45
+líneas de su marcador de «texto original».
+
+**Por qué se anota y no se arregla.** Los seis sólo se pueden enseñar **añadiendo código que
+no existe**, y la regla del ciclo dice que una regresión hipotética no gana por sí sola otra
+vuelta. Además llevaban tres rondas seguidas de instrumento, que es donde el ciclo manda parar.
+Quien los cierre debería hacerlo junto con el arreglo de la clase —resolución con ámbito,
+clave por nodo, y propagación que siga también las asignaciones a binding de módulo—, no uno a
+uno: cada arreglo por instancia ha destapado el siguiente.
+
+## 68 — La ronda de navegador de la pasada corre una sola vez (2026-09-19)
+
+Las mutaciones de unidad corren tres veces y sólo fijan veredicto por acuerdo —es la deuda 65
+aplicada—, y la ronda de navegador de `pasada.sh` corre **una**, sin baseline verde de esa
+fila. El resultado aguanta —la revisión la corrió tres veces y salió roja 3/3— pero hoy
+descansa en una muestra de una, que es exactamente lo que la cabecera del propio script dice
+que no vale.
+
+## 69 — Una pasada muerta a media faena sólo se detecta en la corrida siguiente (2026-09-19)
+
+Medido en la revisión del cierre, con las dos muertes hechas de verdad:
+
+| | `SIGTERM` | `SIGKILL` |
+|---|---|---|
+| Corre la trampa | sí, tras 4–12 s (espera a que el hijo suelte el control) | no, por diseño |
+| Árbol | restaurado | **mutado**, con su `.bak` |
+| En el log | `TRAMPA: …` como última línea | nada: el log se corta |
+| Código de salida | 143 | 137 |
+
+La pieza que salva el escenario es la **precondición de entrada**, y funciona: se le sembraron
+tres respaldos —uno distinto del fichero, uno idéntico, y uno de un fichero que la pasada no
+toca— y abortó con exit 1 en los dos primeros y siguió en el tercero, que es lo correcto.
+
+**Lo que sigue abierto:** eso detecta el destrozo **la próxima vez que alguien pase**, no
+cuando ocurre. Con `SIGKILL` lo único que aparece en el árbol es una línea nueva de
+`git status` (`?? lib/local.ts.bak`), porque los ficheros mutados ya figuraban como ` M` — la
+rama lleva la obra sin commitear—. Y se reprodujo el silencio completo con el mutante que la
+mató de verdad, la **NEUTRA**: `typecheck` 0, `lint` 0, la suite de la pasada 0, `pnpm test`
+0 y `pnpm build` 0, **las cinco puertas verdes con el árbol mutado**. Cerrarlo de verdad pide
+un canal que no dependa de que el proceso siga vivo —un fichero centinela escrito antes de
+mutar y borrado al restaurar, que la verja o el arranque de la siguiente orden miren— y eso ya
+no es una línea: es una pieza, y se decide aparte.
+
+**Y el mismo centinela resuelve un segundo problema medido, que conviene atender de una vez.**
+El 2026-09-19 quedó un vigilante de la pasada corriendo **5 h 46 min** —`until grep -q "^DONE"
+pasada.log; do sleep 45; done`— esperando una línea que el script **no imprime**: acaba en
+`== N mutaciones ==` y `PASADA: OK`, nunca en `DONE`. Era inofensivo (sólo leía) pero no podía
+terminar jamás. Es la misma carencia por el otro lado: **la pasada no publica su final en
+ninguna forma estable**, así que ni quien la espera sabe que acabó ni quien llega después sabe
+que murió. Un centinela con dos estados —«mutando» y ausente— sirve para las dos cosas, y
+entonces el vigilante espera *su desaparición* en vez de una cadena que alguien tuvo que
+adivinar.

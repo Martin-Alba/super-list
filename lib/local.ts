@@ -247,7 +247,14 @@ export const encolar = async (p: Pendiente): Promise<Encolado> => {
   const ok = await escribir(COLA, (t: IDBObjectStore) => {
     const q = t.getAll() as IDBRequest<Pendiente[]>
     q.onsuccess = () => {
-      const hay = (q.result ?? []).some(x =>
+      /**
+       * Spec E / R3 — Contra **lo vivo**. Éste es el octavo lector de la cola y el
+       * que ninguna búsqueda por `leerCola` encontraba, porque lee la tienda por su
+       * cuenta dentro de esta transacción. Comparando contra la cola cruda, una
+       * entrada caducada que ninguna pantalla enseña seguía bloqueando el alta: es
+       * la deuda 63 —«Ese producto ya está en la lista» contra una lista vacía—.
+       */
+      const hay = reparte((q.result ?? []) as Pendiente[], Date.now()).vivos.some(x =>
         x.usuario === p.usuario && x.grupo === p.grupo && mismoProducto(x.nombre, p.nombre))
       if (hay) { yaEstaba = true; return }
       t.put(p)
@@ -259,12 +266,89 @@ export const encolar = async (p: Pendiente): Promise<Encolado> => {
   return 'entro'
 }
 
-export const leerCola = (usuario: string): Promise<Pendiente[]> =>
-  conTienda<Pendiente[]>(COLA, 'readonly', (t: IDBObjectStore) => t.getAll() as IDBRequest<Pendiente[]>)
-    .then(todo => (todo ?? []).filter(p => p.usuario === usuario))
+/**
+ * Spec E / R1 — **La lectura es la dueña de la regla de caducidad.**
+ *
+ * `reparte` y `VIDA_COLA_MS` vivían aquí como función pura y **aplicarlas era
+ * responsabilidad de cada lector**, así que cada lector nuevo nacía sin la regla:
+ * medido el 2026-09-18, de **ocho** lectores de la cola sólo dos la aplicaban, y eso
+ * costó cinco vueltas seguidas arreglando un sitio y descubriendo el siguiente.
+ *
+ * El dueño vive ahora **dentro de la lectura**, por el mismo argumento que puso
+ * `avisarDeLaCola()` dentro de `encolar` y `quitarDeCola` en vez de al lado: lo que no
+ * se puede pedir no se puede olvidar pedir. **No existe función que devuelva una
+ * caducada.**
+ *
+ */
+/**
+ * La **única** lectura cruda de la tienda. Privada a propósito: de ella cuelgan las dos
+ * exportadas —`leerCola`, que filtra, y `barrerCaducados`, que barre—, y la guarda
+ * estructural de `unit/almacen.test.ts` comprueba que ninguna fila de la cola se use en
+ * ningún sitio sin pasar por la regla.
+ */
+const deEsteUsuario = async (usuario: string): Promise<Pendiente[]> => {
+  const todo = await conTienda<Pendiente[]>(COLA, 'readonly',
+    (t: IDBObjectStore) => t.getAll() as IDBRequest<Pendiente[]>)
+  return (todo ?? []).filter(p => p.usuario === usuario)
+}
 
-export const quitarDeCola = (id: string): Promise<boolean> =>
-  escribir(COLA, (t: IDBObjectStore) => { t.delete(id) }).then(ok => { if (ok) avisarDeLaCola(); return ok })
+/**
+ * La lectura de la cola. **Filtra siempre, y no borra.**
+ *
+ * Que filtre en cada lectura es lo que hace imposible que un lector nuevo nazca sin la
+ * regla, que es de lo que va esta spec: medido, de ocho lectores sólo dos la aplicaban.
+ * Que **no** borre es la corrección de su primera versión — descartar y filtrar parecían
+ * un mecanismo y son dos, porque no disparan a la vez.
+ */
+export const leerCola = async (usuario: string): Promise<Pendiente[]> =>
+  reparte(await deEsteUsuario(usuario), Date.now()).vivos
+
+/**
+ * El otro mecanismo, con **un solo dueño**: borra lo que la regla condena y devuelve
+ * cuántas confirmó el almacén. Lo llaman las superficies que pueden decirlo —la apertura
+ * de la vista y su relectura— y `olvidarTodo`, para que su barrido siga llevándoselo todo.
+ *
+ * Honra el booleano de `quitarDeCola`: lo que el almacén no aceptó borrar no se cuenta,
+ * porque anunciar un descarte que no ocurrió es peor que no anunciarlo.
+ *
+ * Devuelve **también lo vivo** para no cobrar dos viajes a IndexedDB en el camino del
+ * alta, que es el que usa todo el mundo: pedirlo por separado costaba una transacción
+ * más antes de `encolar` y un caso de navegador lo notó. Que lo devuelva no lo vuelve a
+ * fusionar con la lectura: quien no habla sigue llamando a `leerCola`, que no barre.
+ */
+export type ColaBarrida = { vivos: Pendiente[]; descartadas: number }
+export const barrerCaducados = async (usuario: string): Promise<ColaBarrida> => {
+  const { vivos, caducados } = reparte(await deEsteUsuario(usuario), Date.now())
+  if (!caducados.length) return { vivos, descartadas: 0 }
+  const idas = await Promise.all(caducados.map(p => quitarDeCola(p.id)))
+  return { vivos, descartadas: idas.filter(Boolean).length }
+}
+
+/**
+ * Spec E / i2-R2 — Devuelve si **había fila que borrar**, no si la escritura entró.
+ *
+ * Con lo segundo, dos barridos solapados contaban los dos las mismas filas: medido en
+ * navegador real, dos pestañas del mismo grupo y **una sola** señal del canal hacían que
+ * una caducada produjera **dos anuncios**, y dos filas, cuatro. La iteración 1 lo declaró
+ * como límite diciendo que cerrarlo «exigiría que `IDBObjectStore.delete` dijera si la
+ * fila existía, cosa que no dice». Es cierto de `delete` y **falso del almacén**: el
+ * precedente está doce líneas más arriba, en `encolar`, que hace `getAll` y `put` dentro
+ * de **una misma transacción** —propiedad verificada en navegador real, según su propio
+ * docstring—. Un `get` y un `delete` en esa misma `readwrite` dan exactamente el booleano
+ * que faltaba.
+ *
+ * El anuncio sigue saliendo cuando la escritura entra, haya borrado o no: lo que cambia es
+ * lo que se devuelve, no a quién se avisa.
+ */
+export const quitarDeCola = async (id: string): Promise<boolean> => {
+  let habia = false
+  const ok = await escribir(COLA, (t: IDBObjectStore) => {
+    const q = t.get(id) as IDBRequest<Pendiente | undefined>
+    q.onsuccess = () => { if (q.result) { habia = true; t.delete(id) } }
+  })
+  if (ok) avisarDeLaCola()
+  return ok && habia
+}
 
 /**
  * Lo que la vista usa para enterarse. Devuelve cómo dejar de escuchar, porque un
@@ -312,8 +396,14 @@ export const leerUltimoUsuario = (): Promise<string | null> =>
  * en el servidor y no tendría sentido permitir aquí.
  */
 export async function olvidarTodo(usuario: string): Promise<void> {
-  const cola = await leerCola(usuario)
-  await Promise.all(cola.map(p => quitarDeCola(p.id)))
+  /**
+   * Spec E / R4 — Por la puerta como todo el mundo, y queda **correcto sin tocar la
+   * lógica**: la lectura ya descartó lo caducado de este usuario, así que borrar lo
+   * vivo lo borra todo. Es la fila V7 de la valla, y la razón de que esté señalada
+   * como una de las dos que esta obra puede romper sin querer.
+   */
+  const { vivos } = await barrerCaducados(usuario)
+  await Promise.all(vivos.map(p => quitarDeCola(p.id)))
   /**
    * Se pasa por `conTienda` como todo lo demás. La primera versión abría aquí su
    * propia transacción, y la guarda de borrado físico la marcó — con razón: era

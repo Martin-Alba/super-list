@@ -452,6 +452,174 @@ un test intermitente era «ensanchar el alcance», apoyándome en un diagnóstic
 medido; el arreglo real era **una línea**, y el diagnóstico escrito era falso.
 
 
+
+---
+
+# 2026-09-19 — La regla de caducidad con un solo dueño (Spec E, base + 3 iteraciones)
+
+Séptimo ciclo, y el primero cuyo problema **no era un defecto sino una forma de fallar**: la
+regla de las 24 h vivía como función pura y aplicarla era responsabilidad de cada lector, así
+que cada lector nuevo nacía sin ella. El ciclo anterior lo pagó cinco vueltas seguidas, cada
+una arreglando un sitio y descubriendo el siguiente.
+
+## Qué se construyó
+
+**La puerta.** `leerCola` filtra en cada lectura y **no borra**; `barrerCaducados` barre, honra
+el booleano del almacén y devuelve también lo vivo. Son dos mecanismos distintos porque no
+disparan a la vez: filtrar toca en **cada** lectura, barrer toca **una vez y en alguien que
+pueda hablar**. `encolar` decide el duplicado contra lo vivo. `quitarDeCola` dice si **había**
+fila. Y una guarda estructural sobre el AST prueba que ninguna fila se usa sin la regla.
+
+**Medido al empezar, y corrigió al borrador:** no eran «tres sitios en la vista y un cuarto en
+la cáscara», eran **ocho lectores**, de los que sólo dos aplicaban la regla. El octavo —
+`encolar`, con su propio `getAll` dentro de su transacción— no llama a `leerCola`, así que
+ninguna búsqueda por ese nombre lo encontraba, y era el mecanismo exacto de la deuda 63.
+
+## Decisiones que conviene no volver a discutir
+
+- **El dueño vive dentro de la lectura**, por el mismo argumento que puso el anuncio dentro de
+  la escritura: lo que no se puede pedir no se puede olvidar pedir.
+- **Filtrar y barrer son dos.** Fusionarlos hizo que los lectores que no anuncian se quedaran
+  la cuenta, y una caducada desaparecía del disco **sin que nadie se lo dijera al usuario**.
+- **`encolar` no puede dejar de leer por su cuenta** sin romper el invariante del duplicado,
+  que exige leer dentro de su misma transacción de escritura. Por eso la puerta no es única:
+  lo único que puede ser único es **el sitio donde la regla se aplica**.
+- **B7 no era un límite.** «Cerrarlo exigiría que `IDBObjectStore.delete` dijera si la fila
+  existía» es cierto de `delete` y falso del almacén: `encolar` lleva tres specs leyendo y
+  escribiendo dentro de una misma transacción.
+
+## Los dos números del ciclo
+
+**39 hallazgos de revisión en cuatro vueltas: 12 de producto y 27 de sostén.**
+
+| Vuelta revisada | Producto | Sostén |
+|---|---|---|
+| base | 5 | 6 |
+| iteración 1 | 4 | 10 |
+| iteración 2 | 2 | 9 |
+| iteración 3 | 1 | 2 |
+| **Total** | **12** | **27** |
+
+**Y la proporción es el motivo de que el ciclo pare donde para.** La base y la iteración 1
+arreglaron cosas que un usuario toca. Las iteraciones 2 y 3 fueron casi enteras de instrumento,
+y la vuelta que la última revisión proponía habría sido la tercera seguida: la regla de las dos
+cuentas dice parar y decirlo. Se dijo.
+
+## Terminal
+
+| | Antes del ciclo | Después |
+|---|---|---|
+| Casos unitarios | 1.639 | **1.684** |
+| Ficheros unitarios | 68 | 68 |
+| Casos de navegador | 91 | **92** |
+
+Medido el **2026-09-19**, tras la cuarta vuelta: `pnpm typecheck` 0 · `pnpm lint` 0 avisos ·
+`pnpm test` 1.684 de 1.684 · `pnpm build` 0 con `.next` borrado · `pnpm test:e2e` 92 de 92,
+exit 0. (Al cerrar la tercera eran 1.678; las seis que faltan son la valla nueva del perímetro.)
+
+**Pasada de mutación:** 13 mutantes, 12 cazados, 1 superviviente —la NEUTRA declarada—, 0 no
+aplicables, con línea base verde, **veredicto por repetición — 3 de 3 el 2026-09-19**, **testigo
+nombrado** en
+cada captura, y una **ronda de navegador** que reconstruye antes de correr. Y dos piezas nuevas
+que salieron de un accidente: una **trampa de señales** que devuelve los `.bak` y una
+**precondición de entrada** que se niega a mutar encima de lo que dejó otra corrida. Corrida
+tres veces el **2026-09-19** con el mismo resultado, la última con el script ya corregido, que
+cierra con `PASADA: OK` y **un código de salida que transporta el hallazgo** — antes era 0
+siempre, ver abajo.
+
+## Runtime — qué se ejercitó y contra qué build
+
+Contra `next start` sobre un `pnpm build` con `.next` borrado, Supabase local, y **cada elemento
+por identidad, nunca por coordenada**. Sembrados en la misma cola un pendiente de 25 h y uno
+vivo, y comprobadas **las dos pantallas**: ni la vista ni la cáscara enseñan el caducado; la
+vista lo descarta y lo dice con `role="status"`; la cáscara no lo enseña y **no lo barre**, que
+es el límite declarado en §7. Y el callejón que allí era permanente —volver a apuntar ese
+producto— entra. Artefacto: `.claude/fathom/spec-e/gesto-2026-09-19.md`.
+
+## Qué NO se verificó, y qué se hizo en su lugar
+
+- **Los cuatro escapes que la guarda no cierra.** Sólo se pueden enseñar añadiendo código que
+  no existe; anotados con su forma exacta en la **deuda 67**. La cuarta vuelta tampoco los
+  persiguió: repara la valla del límite, no las formas de dentro.
+- **La ronda de navegador de la pasada corre una vez**, no tres como las de unidad: deuda 68.
+- **Una pasada muerta a media faena se detecta en la corrida siguiente, no cuando ocurre**:
+  deuda 69, con las dos muertes medidas y el silencio de las cinco puertas reproducido.
+- **La cáscara no barre.** Declarado en §7, y comprobada a mano la mitad que sí recibe.
+
+## El hallazgo que cierra el ciclo: una ausencia sellada sin su límite
+
+R2 pedía demostrar que **ninguna fila se usa sin la regla** — una ausencia sobre todo lo que el
+lenguaje admite. `spec` tiene la regla exacta para eso: *un requisito que pide demostrar que
+algo no ocurre necesita, antes de sellar, qué cuenta como prueba suficiente y qué queda fuera;
+la ausencia no tiene final natural.* **No se aplicó al sellar**, y el precio fueron tres vueltas
+persiguiendo formas: cada ronda cerraba unas y la siguiente encontraba más.
+
+El límite está escrito ahora, y su forma es la que hace el problema finito: **el perímetro**.
+`lib/local.ts` es el único fichero del producto que abre IndexedDB —comprobado, con su sonda—,
+así que la guarda que lee ese fichero alcanza a todo; dentro, cubre las quince formas medidas y
+no todas las posibles. Perseguir formas dentro era infinito; afirmar el perímetro es finito.
+
+## La otra lección, ésta de la pasada
+
+Una pasada de mutación **muta ficheros del repositorio**, así que puede morir a media faena, y
+lo que deja es indistinguible de trabajo hecho. Pasó: un timeout ajeno la mató y dejó
+`lib/local.ts` mutado con un respaldo suelto — y como el mutante en vuelo era **el que no cambia
+comportamiento**, todas las puertas daban verde y la entrega habría pasado por buena. La regla
+está ahora en `build`: la comprobación del árbol es **dos**, una trampa a la salida y una
+precondición a la entrada, porque la salida es justo lo que un proceso muerto no puede honrar. Y
+se compara por **huella**, no corriendo la suite: una suite verde dice que el árbol funciona, no
+que sea el mismo.
+
+## La cuarta vuelta, y por qué se hizo después de haber cerrado
+
+El cierre se declaró con el límite de R2 escrito. Una revisión independiente lo atacó y midió
+que **la valla de ese límite no podía fallar en la dirección que importa**: la sonda del
+perímetro inyectaba el fichero sembrado con `.concat()`, o sea **después** del recorrido y del
+filtro de extensión — las dos piezas que deciden el alcance—, así que reducir el recorrido a
+`lib` sola, dejando de mirar toda la capa de vista, dejaba las dos filas verdes. Lo comprobado
+no era el perímetro: era que `lib/local.ts` contiene la cadena `indexedDB`.
+
+Eso no es una mejora opcional: es la premisa con la que se cerró. De ahí una cuarta vuelta,
+**declarada como lo que es —la cuarta seguida de puro instrumento, sin una línea de producto—**
+y acotada a la valla y a la pasada.
+
+**Lo que se arregló, y lo que se puso rojo antes de arreglarlo:**
+
+- **El recorrido se afirma.** Tiene que llegar a las cuatro capas —vista, cáscara, módulo,
+  service worker y el `proxy.ts` de la raíz—. Rojo contra el recorrido de entonces, que no
+  miraba `public/sw.js` ni `proxy.ts`; y encogido a `['lib']` da **2 filas rojas, 3 de 3**.
+- **El nivel superior del repo se enumera entero**, cada entrada dentro o fuera con su motivo.
+  Es lo que hace **finita** la afirmación del perímetro, que era el argumento del límite: un
+  directorio nuevo con código no puede quedarse fuera en silencio.
+- **El detector es el compilador, no un regex.** La misma regla que este fichero ya aplicaba a
+  `puertas()` — una ausencia no se comprueba con `grep` — llegó por fin al perímetro. Antes
+  fallaba en las dos direcciones: marcaba un **comentario** que nombrara la API, y no veía
+  `import { openDB } from 'idb'` ni `g['indexed' + 'DB']`. Los comentarios y las cadenas no son
+  nodos del AST, así que el falso positivo se cierra por construcción.
+- **Las sondas siembran en disco**, en un árbol temporal, para pasar por el recorrido y por el
+  filtro de extensión. Incluida una en `.js`, que es la extensión del service worker.
+- **Las tres puertas del almacén siguen sin exportar**, afirmado. Es lo que de verdad hace
+  cierto el perímetro: con `conTienda` exportada, un fichero nuevo leería la tienda **sin
+  nombrar `indexedDB` jamás**, y entonces las dos mitades de la prueba fallan a la vez.
+
+**Y los dos defectos de la pasada, que son la regla nueva de `build` en su primera aplicación:**
+
+- **La mitad de la trampa no existía.** `trap … INT` es inerte cuando el script se lanza de
+  forma asíncrona: bash le pone `SIG_IGN` a `SIGINT` en un shell no interactivo de fondo, y una
+  señal **ignorada al entrar no se puede atrapar**. Medido 3 de 3: el `.bak` se quedaba en
+  disco y la pasada **seguía juzgando mutantes**. La garantía vive ahora en `TERM`/`HUP`, con la
+  medida escrita al lado; `INT` se conserva porque en primer plano sí funciona.
+- **El código de salida era 0 siempre.** La cola acababa en `if/else` y en
+  `correr && echo || echo`: las dos formas devuelven 0, así que imprimía
+  `EL ARBOL NO QUEDO COMO ESTABA` y salía 0 igual. Comprobado extrayendo la cola verbatim con
+  la huella forzada a diferir: antes 0, ahora **1**, y cierra con una línea de veredicto.
+  Los dos logs anteriores terminaban en `P=0` y ese cero no desmentía nada.
+
+**La lección, que es la de siempre y esta vez me tocó a mí:** el límite que cierra un requisito
+de ausencia **es él mismo una afirmación que necesita su sonda**. Escribí «el perímetro es
+finito y se comprueba» y lo respaldé con una prueba que no podía fallar si el perímetro se
+encogía a cero. La regla de §E.3 —*decir en una línea qué cambio del producto pondría rojo este
+test*— es exactamente la que no apliqué a la fila que sellaba el ciclo.
 ---
 
 <!-- ESTADO-VERIFICABLE -->

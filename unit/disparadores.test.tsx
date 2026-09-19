@@ -4,7 +4,8 @@ import { render, cleanup, act, fireEvent } from '@testing-library/react'
 import type { Item } from '@/lib/items'
 import type { Pendiente } from '@/lib/local'
 import { caducados, EN_COLA, LISTA_EN_VIVO, SERVIDOR } from '@/lib/errors'
-import { VIDA_COLA_MS } from '@/lib/local'
+import { dobleDeLaPuerta } from './puertaDeLaCola'
+import { reparte, VIDA_COLA_MS } from '@/lib/local'
 import type { ChannelState } from '@/lib/channelState'
 
 /**
@@ -24,6 +25,7 @@ import type { ChannelState } from '@/lib/channelState'
 const addItem = vi.fn()
 const activeItems = vi.fn()
 const leerCola = vi.fn()
+const barrerCaducados = vi.fn()
 const quitarDeCola = vi.fn()
 const encolar = vi.fn()
 const guardarLista = vi.fn()
@@ -82,6 +84,7 @@ const avisarDeLaCola = () => { for (const f of [...oyentesDeLaCola]) f() }
 vi.mock('@/lib/local', async (orig) => ({
   ...(await orig<typeof import('@/lib/local')>()),
   leerCola: (...a: unknown[]) => leerCola(...a),
+  barrerCaducados: (...a: unknown[]) => barrerCaducados(...a),
   quitarDeCola: (...a: unknown[]) => quitarDeCola(...a),
   encolar: (...a: unknown[]) => encolar(...a),
   guardarLista: (...a: unknown[]) => guardarLista(...a),
@@ -113,10 +116,13 @@ const montar = (iniciales: Item[] = []) => render(
     me={{ id: 'u1', role: 'owner' }} loadClase={null} />,
 )
 
+const { leerComoLaPuerta, barrerComoElDueno } = dobleDeLaPuerta(
+  () => cola, (vivos) => { cola = vivos }, reparte, quitarDeCola)
 /** Una cola que recuerda, y que **avisa al escribir**, como la de verdad. */
 let cola: Pendiente[] = []
 const colaViva = () => {
-  leerCola.mockImplementation(async () => cola)
+  leerCola.mockImplementation(leerComoLaPuerta)
+  barrerCaducados.mockImplementation(barrerComoElDueno)
   quitarDeCola.mockImplementation(async (id: string) => {
     // Devuelve `boolean`, como el de verdad: desde i5-R1 la vista distingue el
     // borrado que entró del que el almacén rechazó, y un doble que devuelve
@@ -144,6 +150,7 @@ beforeEach(() => {
   encolar.mockResolvedValue('entro')
   guardarLista.mockResolvedValue(undefined)
   leerCola.mockResolvedValue([])
+  barrerCaducados.mockResolvedValue({ vivos: [], descartadas: 0 })
   quitarDeCola.mockResolvedValue(true)
   addItem.mockResolvedValue({ data: fila('x'), clase: null, code: null })
   activeItems.mockResolvedValue({ data: [], clase: null, code: null })
@@ -263,7 +270,8 @@ describe('R1 · el drenado se dispara cuando el canal vuelve a estar vivo', () =
 describe('R2 · la app no dice «Lista en vivo» con pendientes sin enviar', () => {
   it('DoD 8: con un pendiente de este grupo y el canal vivo, no se afirma', async () => {
     cola = [pendiente('lentejas')]
-    leerCola.mockImplementation(async () => cola)
+    leerCola.mockImplementation(leerComoLaPuerta)
+  barrerCaducados.mockImplementation(barrerComoElDueno)
     addItem.mockResolvedValue({ data: null, clase: 'servidor', code: null })
     const r = montar()
     await asentar()
@@ -281,7 +289,8 @@ describe('R2 · la app no dice «Lista en vivo» con pendientes sin enviar', () 
 
   it('DoD 10: un pendiente de OTRO grupo no calla el anuncio', async () => {
     cola = [pendiente('lentejas', 'g2')]
-    leerCola.mockImplementation(async () => cola)
+    leerCola.mockImplementation(leerComoLaPuerta)
+  barrerCaducados.mockImplementation(barrerComoElDueno)
     const r = montar()
     await asentar()
     expect(r.queryByTestId('channel-live'),
@@ -361,7 +370,7 @@ describe('i1-R1 · el drenado no publica lo que la regla manda descartar', () =>
   it('i1-5: lo caducado no cuenta como pendiente, y no calla el anuncio', async () => {
     /**
      * Por la relectura, no por el montaje: el efecto de apertura **ya** pasa por
-     * `reparte` (por `leerColaViva`, como todos), así que montar con la cola llena mediría
+     * `reparte` (por `la puerta de la cola`, como todos), así que montar con la cola llena mediría
      * un filtro que ya existe. El que falta es el de `releerLaCola`, y a ése sólo
      * se llega con la señal.
      */
@@ -569,7 +578,8 @@ describe('i2-R4 · el descarte también se anuncia como estado', () => {
  */
 const sembrarCaducada = (nombre: string) => {
   cola = [caducada(nombre)]
-  leerCola.mockImplementation(async () => cola)
+  leerCola.mockImplementation(leerComoLaPuerta)
+  barrerCaducados.mockImplementation(barrerComoElDueno)
   quitarDeCola.mockImplementation(async (id: string) => {
     // Devuelve `boolean`, como el de verdad: desde i5-R1 la vista distingue el
     // borrado que entró del que el almacén rechazó, y un doble que devuelve
@@ -679,7 +689,8 @@ describe('i4-R1 · el descarte no tapa el aviso del gesto', () => {
   it('i4-4: sin canal, descartar no deja ficha huérfana', async () => {
     // Entra viva —23 h— así que el montaje la pinta; y caduca con la vista abierta.
     cola = [pendiente('viejo', 'g1', 23 * 60 * 60 * 1000)]
-    leerCola.mockImplementation(async () => cola)
+    leerCola.mockImplementation(leerComoLaPuerta)
+  barrerCaducados.mockImplementation(barrerComoElDueno)
     // Sin canal: el doble NO emite, como el navegador sin `BroadcastChannel`, donde
     // `alCambiarLaCola` es un no-op por diseño (`lib/local.ts`). Si la ficha se cura,
     // se cura porque alguien la quitó, no porque llegara una señal.
@@ -717,7 +728,8 @@ describe('i4-R1 · el descarte no tapa el aviso del gesto', () => {
  */
 describe('i5-R1 · un descarte que el almacén no aceptó no se canta', () => {
   const conAlmacen = (admite: boolean) => {
-    leerCola.mockImplementation(async () => cola)
+    leerCola.mockImplementation(leerComoLaPuerta)
+  barrerCaducados.mockImplementation(barrerComoElDueno)
     quitarDeCola.mockImplementation(async (id: string) => {
       if (!admite) return false
       cola = cola.filter(x => x.id !== id); return true
@@ -749,7 +761,7 @@ describe('i5-R1 · un descarte que el almacén no aceptó no se canta', () => {
        * **Lo que este caso NO afirma, y por qué.** La iteración 5 escribió también «y
        * la ficha se queda», y es **falso**: `releerLaCola` y el efecto de apertura
        * pintan `vivos`, que excluye toda caducada se haya podido borrar o no, así que
-       * la resta de `leerColaViva` queda pisada. Medido por la revisión en un
+       * la resta de `la puerta de la cola` queda pisada. Medido por la revisión en un
        * navegador real: cero fichas, ningún aviso, la entrada en disco, y al apuntar
        * ese producto «Ese producto ya está en la lista» frente a una lista vacía.
        *
@@ -793,7 +805,8 @@ describe('i5-R1 · un descarte que el almacén no aceptó no se canta', () => {
 
   it('i5-3: con dos caducadas y el almacén borrando una, la cuenta es 1', async () => {
     cola = [pendiente('uno', 'g1', 23 * 60 * 60 * 1000), pendiente('dos', 'g1', 23 * 60 * 60 * 1000)]
-    leerCola.mockImplementation(async () => cola)
+    leerCola.mockImplementation(leerComoLaPuerta)
+  barrerCaducados.mockImplementation(barrerComoElDueno)
     quitarDeCola.mockImplementation(async (id: string) => {
       if (id !== 'p-uno') return false
       cola = cola.filter(x => x.id !== id); return true
@@ -811,3 +824,64 @@ describe('i5-R1 · un descarte que el almacén no aceptó no se canta', () => {
   })
 })
 
+/**
+ * Spec E / i2-R3 — **La fila 11 vuelve, y con la condición que sí distingue.**
+ *
+ * Se retiró midiendo con el almacén aceptando el borrado: allí el barrido se lleva la
+ * caducada y el bucle para en las dos versiones, así que el caso daba 4 y 4. La
+ * condición que distingue estaba medida en el roadmap y este ciclo la borró sin
+ * sustituirla: **con el almacén rechazando**, la entrada sigue en disco, y entonces se
+ * ve si `reintentarEnvio` pregunta por la puerta o por la cola cruda — **2 lecturas
+ * contra 10**, medido 3 de 3.
+ */
+describe('Spec E / i2-R3 · el bucle de reintento pregunta por la puerta', () => {
+  it('i2-6: con el almacén rechazando y la cola sólo de caducadas, el bucle para', async () => {
+    vi.useFakeTimers()
+    try {
+      colaViva()
+      // El almacén no acepta borrados: la caducada se queda, que es la condición.
+      quitarDeCola.mockImplementation(async () => false)
+      addItem.mockResolvedValue({ data: null, clase: 'servidor', code: null })
+      const r = montar()
+      await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+      fireEvent.change(r.getByTestId('item-name'), { target: { value: 'tomillo' } })
+      await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_500) })
+      cola = cola.map(p => ({ ...p, creado: Date.now() - 25 * 60 * 60 * 1000 }))
+      const antes = leerCola.mock.calls.length
+      await act(async () => { await vi.advanceTimersByTimeAsync(25_000) })
+      expect(leerCola.mock.calls.length - antes,
+        'el bucle giró sus cinco esperas sobre una cola que la regla condena').toBeLessThan(5)
+    } finally { vi.useRealTimers() }
+  })
+})
+
+/**
+ * Spec E / i2-R5 — **Sólo barre quien puede hablar.** Es la propiedad central de la
+ * iteración 1 y no la guardaba nadie: la pasada de mutación puso a `reintentarEnvio` a
+ * barrer otra vez —o sea, reintrodujo el defecto que costó la fila V13— y **sobrevivió**.
+ *
+ * Se afirma por la llamada y no por el efecto a propósito: lo que la regla dice es quién
+ * tiene derecho a barrer, y un lector que barre se queda con la cuenta aunque el efecto
+ * visible tarde en aparecer. Es la forma que hizo falta cinco vueltas ver.
+ */
+describe('Spec E / i2-R5 · los lectores que no hablan no barren', () => {
+  it('i2-7: el bucle de reintento y el drenado no llaman al barrido', async () => {
+    vi.useFakeTimers()
+    try {
+      colaViva()
+      addItem.mockResolvedValue({ data: null, clase: 'servidor', code: null })
+      const r = montar()
+      await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+      fireEvent.change(r.getByTestId('item-name'), { target: { value: 'tomillo' } })
+      await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
+      // El alta sin red sí barre —habla—, así que se cuenta desde aquí.
+      const trasElAlta = barrerCaducados.mock.calls.length
+      await act(async () => { await vi.advanceTimersByTimeAsync(25_000) })
+      expect(barrerCaducados.mock.calls.length - trasElAlta,
+        'un lector que no anuncia se puso a barrer: se queda la cuenta y nadie la dice').toBe(0)
+      expect(leerCola.mock.calls.length, 'el bucle no llegó a leer: el caso no mide nada')
+        .toBeGreaterThan(0)
+    } finally { vi.useRealTimers() }
+  })
+})

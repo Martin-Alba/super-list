@@ -140,10 +140,10 @@ no está medido.
 
 ### Spec B — SELLADA el 2026-09-18, acotada al medirla
 
-El borrador entero está en el historial de este fichero (commit anterior a esta línea). Lo
-que se selló vive en `docs/spec.md` como **«Lo pendiente sale solo, y la pantalla no dice lo
-contrario»**, con tres requisitos: los disparadores del drenado, la afirmación «Lista en
-vivo», y el texto del aviso de lo encolado.
+El borrador entero está en el historial de este fichero (commit anterior a esta línea). Se
+cerró el 2026-09-18 —acta en `docs/CHECKPOINT.md`— como **«Lo pendiente sale solo, y la
+pantalla no dice lo contrario»**, con tres requisitos: los disparadores del drenado, la
+afirmación «Lista en vivo», y el texto del aviso de lo encolado.
 
 **Lo que se cayó al medirlo con el teclado**, y por qué esto queda escrito aquí: la fila
 «cuatro de cinco productos desaparecen» era **el mismo artefacto de clics por coordenada que
@@ -165,43 +165,39 @@ Medir eso es el paso previo a volver a plantearla. Si el hueco es pequeño, la o
 
 ---
 
-### Spec E — La regla de caducidad con un solo dueño, sobre las dos pantallas
+### Spec E — **CERRADA el 2026-09-19** (base + 3 iteraciones + una vuelta de valla)
 
-**SIN SELLAR.** Sale del ciclo de la Spec B (2026-09-18), y sale **medida**.
+Acta en `docs/CHECKPOINT.md` › «2026-09-19 — La regla de caducidad con un solo dueño». El texto
+íntegro de la spec, con las suposiciones tal y como se resolvieron, en
+`.claude/fathom/spec-e/spec-e-final.md` (fuera del repo, sobrevive a la sesión). Cerró las
+deudas **62** y **63**; abrió la **67** —los cuatro escapes que la guarda no cubre, con su forma
+medida— y la **68**. La **64** siguió fuera por su nombre, como pedía el encargo.
 
-**El diagnóstico, que es el motivo de que sea spec propia.** Tres iteraciones seguidas
-arreglaron un sitio y descubrieron el siguiente:
+**Y una cuarta vuelta, después de cerrar**, porque una revisión independiente midió que la valla
+del límite de R2 no podía fallar si el recorrido del perímetro se encogía: sólo instrumento, sin
+una línea de producto. Abrió la **69**. El detalle está en el acta.
 
-| Vuelta | El sitio | Lo que se descubrió al arreglarlo |
-|---|---|---|
-| iter 1 | El drenado enviaba lo caducado | …y la relectura lo seguía contando como pendiente |
-| iter 2 | La relectura | …y el duplicado se decidía contra la cola cruda |
-| iter 3 | El duplicado | …y la cáscara no conoce la regla en absoluto |
+El diagnóstico que la motivaba —la regla sin dueño, y cada lector naciendo sin ella— no cambió
+al medirla, y está entero en el acta. Lo que **sí** cambió es el recuento, y conviene que quede: se hablaba de «tres sitios en la vista y un
+cuarto en la cáscara». Contados con el instrumento son **ocho lectores de la cola**, de los que
+sólo dos aplican la regla. El octavo —`encolar`, con su propio `getAll()` crudo dentro de su
+transacción— no llama a `leerCola`, así que ninguna búsqueda por ese nombre lo encontraba, y es
+el mecanismo exacto de la deuda 63.
 
-**La causa no es ninguno de los cuatro sitios: es que la regla no tiene dueño.**
-`reparte`/`VIDA_COLA_MS` viven en `lib/local.ts` como función pura, y **aplicarla es
-responsabilidad de cada lector**. Así que cada lector nuevo nace sin ella. La iteración 4
-unificó los tres de la vista en una función; la cáscara sigue fuera, y con ella un callejón
-permanente (deuda 62).
+La forma quedó decidida por la medida y por el precedente del canal: el dueño vive **dentro de
+la lectura**, igual que el anuncio vive dentro de la escritura. La alternativa —un tipo que
+distinga cola cruda de cola viva— cuesta lo mismo y la derrota un `as`.
 
-**Lo que la spec tendría que decidir:** si la cola se lee siempre por una puerta que ya
-devuelve lo vivo —de modo que leer lo caducado sea imposible en vez de improbable—, y qué pasa
-con quien la lea desde un contexto sin React. Medir antes de fijar: hay al menos dos formas
-—la puerta en `lib/local.ts` devolviendo ya sólo lo vivo, o un tipo que distinga «cola cruda»
-de «cola viva»— y cuál cuesta menos no está medido.
+**Corregido dos veces al construir, y las dos correcciones importan más que la frase original:**
 
-**Lo que el ciclo deja medido y que esta spec hereda** (no vive sólo en la spec borrada):
-
-- **Dos lecturas crudas quedan en la vista**, y están ahí a propósito: `drenarUnaVez` lee cruda
-  y su corte lo pone `siguienteEnCola`; `reintentarEnvio` pregunta «¿queda algo de este grupo?»
-  sobre la cruda. La segunda **sí gira en vano** cuando el almacén rechaza el borrado: medido,
-  10 lecturas en 25 s frente a 2 cuando la entrada se pudo borrar. Se dejó por coste, no por
-  inexistente.
-- **No hay guarda estructural** que impida una lectura cruda nueva. La fila i4-5 de la Spec B
-  declaró esa capa y nadie la atacó; la afirmación se retiró.
-- **Aplicar la regla no es haberla aplicado** (deudas 63 y 64): los dos sitios que borran de la
-  cola descartan el booleano del almacén, y uno de ellos —el drenado— puede resucitar con eso un
-  producto tachado, porque el índice único es parcial.
+1. **No hay «una sola puerta de lectura».** `encolar` no puede dejar de leer dentro de su propia
+   transacción sin romper el invariante del duplicado. Lo único que puede ser único es **el
+   sitio donde la regla se aplica**, y eso es lo que la guarda comprueba.
+2. **`leerCola` no descarta.** Filtrar y descartar parecían un mecanismo y son dos, porque no
+   disparan a la vez: filtrar toca en **cada** lectura, descartar toca **una vez y en alguien
+   que pueda hablar**. Fusionados, los lectores que no anuncian se quedaban la cuenta y una
+   caducada desaparecía sin que nadie lo dijera. Hoy `leerCola` filtra y `barrerCaducados`
+   barre.
 
 ---
 

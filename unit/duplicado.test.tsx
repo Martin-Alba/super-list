@@ -129,8 +129,17 @@ const cargarConCanal = async () => {
 beforeEach(() => { for (const k of Object.keys(tiendas)) delete tiendas[k] })
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
+/**
+ * Spec E — `creado` pasa a ser **reciente**. Valía `1` —la época— porque hasta ahora
+ * nadie leía ese campo al leer la cola; con la puerta de R1, una fila de 1970 nace
+ * caducada y todos los casos de este fichero medirían el descarte en vez del
+ * invariante que vienen a probar. El arnés se hace fiel, no más permisivo.
+ */
 const pendiente = (id: string, nombre: string, grupo = 'g1'): Pendiente =>
-  ({ id, usuario: 'u1', grupo, nombre, cantidad: null, creado: 1 })
+  ({ id, usuario: 'u1', grupo, nombre, cantidad: null, creado: Date.now() })
+/** Una que la regla de las 24 h condena. */
+const caducado = (id: string, nombre: string, grupo = 'g1'): Pendiente =>
+  ({ ...pendiente(id, nombre, grupo), creado: Date.now() - 25 * 60 * 60 * 1000 })
 
 describe('el almacén impide el duplicado', () => {
   // DoD 3 — El invariante, en la capa que el requisito nombra.
@@ -308,5 +317,104 @@ describe('la cola sigue borrándose por id', () => {
       'cerrar sesión dejó la lista del anterior en el dispositivo').toBeNull()
     expect(await m.leerNombre('u1', 'g1'), 'y dejó el nombre de su grupo').toBeNull()
     expect(await m.leerUltimoUsuario(), 'y dejó la marca de quién estaba').toBeNull()
+  })
+})
+
+/**
+ * Spec E — **Filtrar y descartar son dos mecanismos, porque no disparan a la vez.**
+ *
+ * `leerCola` filtra en **cada** lectura: eso es lo que hace imposible que un lector
+ * nuevo nazca sin la regla, y es lo que esta spec vino a arreglar — medido, de ocho
+ * lectores sólo dos la aplicaban. `barrerCaducados` borra y cuenta **una vez**, y lo
+ * llama quien pueda decirlo.
+ *
+ * La primera versión los fusionó dentro de la lectura, y la costura se vio enseguida:
+ * los dos lectores crudos de la vista borraban la entrada y tiraban la cuenta, así que
+ * una caducada desaparecía del disco **sin que nadie se lo dijera al usuario nunca**
+ * (medido en navegador, 5 de 5).
+ */
+describe('Spec E · la lectura filtra, y el descarte tiene dueño', () => {
+  it('i1-1: una caducada no sale en la lectura, y la lectura NO la borra', async () => {
+    const { encolar, leerCola, barrerCaducados } = await cargarAlmacen()
+    await encolar(caducado('1', 'lejia'))
+    await encolar(pendiente('2', 'leche'))
+    expect((await leerCola('u1')).map(p => p.nombre),
+      'la lectura entregó una entrada que la regla condena').toEqual(['leche'])
+    expect((await barrerCaducados('u1')).descartadas,
+      'la lectura ya la había borrado: filtrar y descartar volvieron a ser uno').toBe(1)
+  })
+
+  // Sonda (§E.2): sin ella, una puerta que no devolviera nada pasaría el caso de arriba.
+  it('i1-1: una de hoy sí sale, y no hay nada que descartar', async () => {
+    const { encolar, leerCola, barrerCaducados } = await cargarAlmacen()
+    await encolar(pendiente('1', 'leche'))
+    expect((await leerCola('u1')).map(p => p.nombre)).toEqual(['leche'])
+    expect((await barrerCaducados('u1')).descartadas, 'descartó algo que está vivo').toBe(0)
+  })
+
+  it('i1-2: descartar es idempotente — la segunda vez no cuenta nada', async () => {
+    const { encolar, barrerCaducados } = await cargarAlmacen()
+    await encolar(caducado('1', 'lejia'))
+    expect((await barrerCaducados('u1')).descartadas).toBe(1)
+    expect((await barrerCaducados('u1')).descartadas, 'volvió a contar lo que ya no está').toBe(0)
+  })
+
+  /**
+   * i1-3 — El borde B6: entre que caduca y alguien barre, la entrada sigue en disco.
+   * Lo que se promete es que **nadie la ve** — ni la lectura ni el duplicado —, y eso
+   * es lo que este caso mira, sin barrer antes a propósito.
+   */
+  it('i1-3: sin barrer, nadie la ve y no bloquea volver a apuntarla', async () => {
+    const { encolar, leerCola } = await cargarAlmacen()
+    await encolar(caducado('1', 'lejia'))
+    expect(await leerCola('u1'), 'la lectura la entregó').toEqual([])
+    expect(await encolar(pendiente('2', 'lejia')),
+      'el almacén la tomó por duplicado: es la deuda 63, «ya está en la lista» sobre una lista vacía')
+      .toBe('entro')
+  })
+
+  // Sonda (§E.2): el invariante del duplicado no se afloja. Una VIVA sigue bloqueando.
+  it('i1-3: y una viva del mismo producto lo sigue bloqueando', async () => {
+    const { encolar } = await cargarAlmacen()
+    await encolar(pendiente('1', 'lejia'))
+    expect(await encolar(pendiente('2', 'lejia')),
+      'se aflojó el invariante: entran dos veces el mismo producto').toBe('ya-estaba')
+  })
+
+  /**
+   * i1-4 — Dos barridos solapados. La base declaró este caso incubrible porque «las
+   * `readonly` no toman turno»; es **al revés**: eso es lo que hace el solape trivial.
+   * Con un solo dueño, lo que se mide es que la cuenta no se sume dos veces.
+   */
+  it('i2-4: dos barridos a la vez no sobrecuentan ni dejan la cola inconsistente', async () => {
+    const { encolar, barrerCaducados, leerCola } = await cargarAlmacen()
+    await encolar(caducado('1', 'lejia'))
+    await encolar(caducado('2', 'vinagre'))
+    const [a, b] = (await Promise.all([barrerCaducados('u1'), barrerCaducados('u1')]))
+      .map(r => r.descartadas)
+    expect(await leerCola('u1'), 'la cola quedó inconsistente').toEqual([])
+    /**
+     * Spec E / i2-R2 — **Y la suma es exactamente lo retirado.** La iteración 1 midió
+     * aquí una sobrecuenta —dos barridos contando las mismas filas— y la declaró como
+     * límite diciendo que cerrarla exigiría saber si la fila existía, «cosa que
+     * `IDBObjectStore.delete` no dice». Es cierto de `delete` y falso del almacén: el
+     * precedente es `encolar`, que lee y escribe en una misma transacción. Con
+     * `quitarDeCola` devolviendo si **había** fila, quien llega segundo no cuenta.
+     *
+     * Este caso **afirmaba el defecto** (`a + b > 2`), así que se habría puesto rojo
+     * cuando alguien lo arreglara. Ahora afirma la garantía.
+     */
+    expect(a + b, 'dos barridos contaron las mismas filas: se anunciaría el doble').toBe(2)
+  })
+
+  // i1-5 `[REGRESIÓN]` — V7 de la valla: la fila que denuncia si el barrido se rompe.
+  it('i1-5: `olvidarTodo` no deja nada del usuario, ni vivo ni caducado', async () => {
+    const { encolar, olvidarTodo, leerCola, barrerCaducados } = await cargarAlmacen()
+    await encolar(caducado('1', 'lejia'))
+    await encolar(pendiente('2', 'leche'))
+    await olvidarTodo('u1')
+    expect((await leerCola('u1')).length, 'quedó algo vivo del usuario que salió').toBe(0)
+    expect((await barrerCaducados('u1')).descartadas,
+      'quedó una caducada en disco tras cerrar sesión (§A.1)').toBe(0)
   })
 })

@@ -11,7 +11,7 @@ import { caducados, EN_COLA, ESCRIBE_NOMBRE, esperasDeReintento, GONE, LISTA_EN_
   SIN_RED_ACCION, type Clase } from '@/lib/errors'
 import { avisoInicial, reducirAviso, visible, type Origen } from '@/lib/aviso'
 import { decidirEncolar } from '@/lib/cola'
-import { alCambiarLaCola, encolar, guardarLista, guardarNombre, leerCola, leerLista, quitarDeCola, reparte, siguienteEnCola,
+import { alCambiarLaCola, barrerCaducados, encolar, guardarLista, guardarNombre, leerCola, leerLista, quitarDeCola, siguienteEnCola,
   type Pendiente } from '@/lib/local'
 import { useGroupChannel } from '@/lib/useGroupChannel'
 import { createInviteAction, decideMemberAction, leaveGroupAction } from '@/app/actions'
@@ -344,49 +344,12 @@ export function GroupView({
    * deriva que unificar la puerta venía a matar.
    */
   /**
-   * Spec B / iteración 4 · i4-R2 — **La única lectura de la cola en esta vista.**
-   *
-   * Lee, descarta lo que la regla de las 24 h condena, lo quita de `pendientes`, y
-   * devuelve lo vivo con la cuenta de lo que cayó. Había **tres** copias de este
-   * bloque y ya habían divergido en tres cosas —quién anuncia, si el `Promise.all`
-   * va guardado, y si se toca `pendientes`—; la tercera divergencia dejaba en
-   * pantalla una ficha prometiendo enviar algo que esa misma pestaña acababa de
-   * borrar. El docstring N3 de este fichero existe porque este bloque ya estuvo
-   * escrito dos veces y ya divergió: iban tres.
-   *
-   * **No habla** (i4-R1). Quién anuncia el descarte lo decide quien llama, que es el
-   * único que sabe qué otro mensaje hay en juego: con el servicio caído gana
-   * `EN_COLA`, con un duplicado gana el duplicado, y sin red —donde no hay ningún
-   * otro— gana el descarte.
+   * Spec E — **La puerta a la cola desde esta vista.** Lee por `leerCola`, que filtra, y
+   * barre con `barrerCaducados` **sólo porque esta rama habla**: el `onAdd` sin red
+   * anuncia el descarte después de `limpiarAviso()`. Los lectores que no anuncian
+   * —`drenarUnaVez`, `reintentarEnvio`— sólo filtran, y por eso ya no pueden quedarse
+   * con una cuenta que nadie va a decir.
    */
-  const leerColaViva = useCallback(async (): Promise<{ vivos: Pendiente[]; descartadas: number }> => {
-    const bruta = await leerCola(me.id)
-    const { vivos, caducados: viejos } = reparte(bruta, Date.now())
-    /**
-     * Spec B / iteración 5 · i5-R1 — **Sólo cuenta lo que el almacén confirmó.**
-     *
-     * `quitarDeCola` puede devolver `false` —transacción abortada, conexión cerrada
-     * entre la lectura y la escritura, que es lo que K5/L2 documentan en
-     * `lib/local.ts`— y dar el borrado por hecho abría el peor estado de todos:
-     * medido en sonda, la app quitaba la ficha, **anunciaba un descarte que no había
-     * ocurrido**, y `encolar` seguía viendo la entrada, así que el alta se rechazaba
-     * con «ya está en la lista» sin escribir nada, sin señal y sin relectura. El
-     * callejón de la iteración 3, reabierto y permanente.
-     *
-     * Lo que no se pudo borrar **no se anuncia y no se despinta**: con su ficha
-     * todavía en pantalla, «ya está en la lista» deja de ser mentira. Se reintenta en
-     * la lectura siguiente. Lo que sí desaparece es el estado imposible.
-     *
-     * `vivos` no cambia: lo caducado está condenado se haya podido borrar o no, y
-     * `decidirEncolar` no debe verlo en ningún caso.
-     */
-    const idas = viejos.length
-      ? (await Promise.all(viejos.map(async x => (await quitarDeCola(x.id)) ? x : null)))
-          .filter((x): x is Pendiente => x !== null)
-      : []
-    if (idas.length) setPendientes(prev => prev.filter(p => !idas.some(v => v.id === p.id)))
-    return { vivos, descartadas: idas.length }
-  }, [me.id])
 
   const meterEnCola = async (
     nombre: string, cantidad: string | null, desde: number,
@@ -405,7 +368,16 @@ export function GroupView({
      * aprobar. La regla de `lib/cola.ts` no se toca: sigue siendo pura y sigue
      * decidiendo sobre la lista que se le da.
      */
-    const { vivos: cola, descartadas } = await leerColaViva()
+    /**
+     * Spec E / i1-R1 — Barre **y** lee. Esta rama es una superficie que puede hablar
+     * —el `onAdd` sin red anuncia el descarte después de `limpiarAviso()`, que es lo
+     * que la Spec B / i4-R1 fijó—, así que le toca el barrido. Los lectores que no
+     * hablan sólo filtran, y por eso ya no pueden quedarse con la cuenta.
+     */
+    const { vivos: cola, descartadas } = await barrerCaducados(me.id)
+    // Y si barrió, se cura la pantalla: `pendientes` es estado de esta instancia y el
+    // almacén no lo conoce. Se re-deriva de lo que acaba de leer, que es lo vivo.
+    if (descartadas) setPendientes(cola.filter(x => x.grupo === group.id))
     /**
      * Spec C / R3 — La **regla** vive en `lib/cola.ts` porque la cáscara sin red
      * tiene que decidir lo mismo. Lo que se queda aquí son los efectos: devolver
@@ -470,6 +442,8 @@ export function GroupView({
       if (mio !== envio.current) return
       await drenar()
       if (mio !== envio.current) return
+      // Spec E / R4 — Por la puerta: preguntaba sobre la cola cruda, así que el bucle
+      // podía seguir girando sobre entradas que nunca se enviarán.
       if (!(await leerCola(me.id)).some(p => p.grupo === group.id)) return
     }
   }
@@ -648,12 +622,12 @@ export function GroupView({
      * `quitarDeCola` vuelve a emitir y esto se ejecuta otra vez: la segunda vuelta ya
      * no encuentra caducadas, no anuncia nada, y para.
      */
-    const { vivos, descartadas } = await leerColaViva()
+    const { vivos, descartadas } = await barrerCaducados(me.id)
     const mios = vivos.filter(x => x.grupo === group.id)
     setPendientes(mios)
     if (descartadas) despachar({ tipo: 'avisar', origen: 'apertura', texto: caducados(descartadas), clase: 'texto' })
     if (mios.length === 0) despachar({ tipo: 'retirar', origen: 'cola' })
-  }, [leerColaViva, group.id])
+  }, [me.id, group.id])
 
   const drenar = useCallback(async () => {
     if (drenando.current) { pedido.current = true; return }
@@ -735,7 +709,7 @@ export function GroupView({
       // **toda** página desde el layout: un segundo usuario del mismo dispositivo
       // entra por la portada o por una invitación, no por aquí. Por eso este
       // efecto no comprueba el cambio de usuario: cuando llega, ya está hecho.
-      const { vivos, descartadas } = await leerColaViva()
+      const { vivos, descartadas } = await barrerCaducados(me.id)
       setPendientes(vivos.filter(x => x.grupo === group.id))
       if (descartadas) avisarTexto(caducados(descartadas), 'texto', 'apertura')
       const guardada = await leerLista(me.id, group.id)

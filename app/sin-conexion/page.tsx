@@ -362,6 +362,13 @@ export default function SinConexion() {
     }
 
     try {
+      /**
+       * Spec E / R4 — Por la puerta. Esta pantalla **no conocía la regla en absoluto**
+       * —su línea de importación no traía `reparte` ni `VIDA_COLA_MS`—, así que pintaba
+       * como pendiente una entrada caducada y rechazaba volver a apuntar ese producto
+       * contra ella, sin salida: aquí esa pantalla no descarta nunca. Ahora la recibe
+       * sin pedirla, que es de lo que va esta spec.
+       */
       const cola = await leerCola(usuario)
       const decision = decidirEncolar({
         usuario, grupo, nombre, cantidad: cantidadAhora,

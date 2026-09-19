@@ -993,3 +993,76 @@ describe('iter2 · la cáscara lee el grupo del destino conservado', () => {
     expect(screen.queryByText('anchoas'), 'siguió un destino de otro dominio').toBeNull()
   })
 })
+
+/**
+ * Spec E / R4 — **La cáscara recibe la regla sin pedirla.**
+ *
+ * Esta pantalla no la conocía en absoluto: su línea de importación no traía `reparte`
+ * ni `VIDA_COLA_MS`, así que pintaba como pendiente una entrada caducada —prometiendo
+ * un envío que `siguienteEnCola` garantiza que no ocurrirá— y rechazaba volver a
+ * apuntar ese producto contra ella. Allí el callejón era **permanente**, porque esta
+ * pantalla no descarta nunca (deuda 62).
+ *
+ * El doble es la puerta, porque el de verdad lo es: uno que devolviera la cola cruda le
+ * estaría diciendo a la vista que no hay nada caducado, y el caso mediría el doble.
+ *
+ * **Y lo que estos dos casos NO pueden ver, dicho aquí:** como el doble reimplementa la
+ * regla, quitarla de `leerCola` no los pone rojos. Lo que sí afirman es la composición
+ * —la cáscara consume la puerta y no filtra por su cuenta—, que es justo R4. Que la
+ * puerta aplique la regla lo guardan los casos de `unit/duplicado.test.tsx`, que usan el
+ * almacén de verdad, y la guarda estructural de R2.
+ */
+describe('Spec E · la cáscara hereda la regla de la puerta', () => {
+  const G = '8f1f1f7a-0000-4000-8000-000000000000'
+  const caducada = { id: 'v', usuario: 'u1', grupo: G, nombre: 'lejia', cantidad: null,
+    creado: Date.now() - 25 * 60 * 60 * 1000 }
+  const viva = { id: 'n', usuario: 'u1', grupo: G, nombre: 'leche', cantidad: null,
+    creado: Date.now() }
+  const conCola = (filas: typeof caducada[]) => {
+    haySesionLocal.mockReturnValue(true)
+    leerUltimoUsuario.mockResolvedValue('u1')
+    leerLista.mockResolvedValue(null)
+    leerNombre.mockResolvedValue('Familia')
+    // Spec E / i1-R1 — El doble filtra, que es lo que hace el de verdad: barrer es de
+    // `barrerCaducados`, y esta pantalla no barre (declarado: recibe la seguridad,
+    // no la cortesía de anunciar).
+    leerCola.mockImplementation(async () =>
+      filas.filter(p => Date.now() - p.creado <= 24 * 60 * 60 * 1000))
+    enGrupo(G)
+  }
+
+  it('DoD 9: no pinta como pendiente una entrada caducada, y sí la viva', async () => {
+    conCola([caducada, viva])
+    render(<SinConexion />)
+    await waitFor(() => expect(screen.getAllByTestId('pendiente')).toHaveLength(1))
+    expect(screen.getByTestId('pendiente').textContent,
+      'la cáscara enseña una caducada prometiendo un envío que no va a ocurrir').toContain('leche')
+  })
+
+  it('DoD 10: y deja volver a apuntar el producto cuya entrada caducó', async () => {
+    conCola([caducada])
+    render(<SinConexion />)
+    await waitFor(() => expect(screen.getByTestId('item-name')).toBeTruthy())
+    fireEvent.change(screen.getByTestId('item-name'), { target: { value: 'lejia' } })
+    await act(async () => { fireEvent.click(screen.getByTestId('add-item')) })
+    await waitFor(() => expect(encolar,
+      'lo rechaza como duplicado contra una entrada que ninguna pantalla enseña').toHaveBeenCalled())
+  })
+
+  /**
+   * **Sonda (§E.2), y la puso la pasada de mutación.** Sin ella, el caso de arriba pasa
+   * aunque la cáscara **no lea su cola en absoluto**: un alta contra una cola vacía
+   * también llama a `encolar`. Lo midió un mutante que vaciaba esa lectura y
+   * **sobrevivió**. Con la viva de por medio, la lectura tiene que ocurrir y tiene que
+   * decidir.
+   */
+  it('DoD 10: pero una viva del mismo producto lo sigue bloqueando', async () => {
+    conCola([viva])
+    render(<SinConexion />)
+    await waitFor(() => expect(screen.getByTestId('item-name')).toBeTruthy())
+    fireEvent.change(screen.getByTestId('item-name'), { target: { value: 'leche' } })
+    await act(async () => { fireEvent.click(screen.getByTestId('add-item')) })
+    await waitFor(() => expect(screen.getByTestId('aviso-local')).toBeTruthy())
+    expect(encolar, 'la cáscara no leyó su cola: encoló un duplicado vivo').not.toHaveBeenCalled()
+  })
+})
