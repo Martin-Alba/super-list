@@ -92,6 +92,51 @@ describe('R7 el índice único decide', () => {
   })
 
   /**
+   * Spec F / iteración 1 · i1-7 — **El orden de despliegue deja de depender de que alguien se
+   * acuerde.** Medido por la revisión: con el código delante de la migración, PostgREST devuelve
+   * `PGRST204`, el cliente lo clasifica como `generico`, el usuario lee «No se ha podido completar
+   * la operación.», el drenado **para en la primera fila** porque el código no es 23505, y a las
+   * 24 h `reparte` descarta la compra. Falla cerrado, pero no se puede añadir nada.
+   *
+   * Esta fila es la mitad que una prueba puede cubrir: la verja lee el catálogo del entorno y se
+   * pone roja si la columna que el envío necesita no está. La otra mitad —un paso de CI o de
+   * despliegue que ordene los dos— necesita mano humana y está declarada fuera en la spec.
+   */
+  it('i1-7: la columna que el envío necesita existe en la base, con su privilegio', async () => {
+    const cols = await sql<{ n: string }>(
+      `select column_name as n from information_schema.columns
+        where table_schema='public' and table_name='items' and column_name='origen_id'`)
+    expect(cols, 'sin la columna, cada alta da un error genérico y la cola no drena nunca').toHaveLength(1)
+    const priv = await sql<{ p: string }>(
+      `select privilege_type as p from information_schema.column_privileges
+        where table_name='items' and grantee='authenticated' and column_name='origen_id'
+        order by 1`)
+    expect(priv.map(x => x.p), 'el cliente necesita escribirla y leerla, y no reescribirla')
+      .toEqual(['INSERT', 'SELECT'])
+  })
+
+  /**
+   * Spec F / iteración 1 · i1-5 — **El índice, leído del catálogo, con los dos ejes separados.**
+   *
+   * La revisión midió que la idempotencia de la migración es por **nombre** y no por definición:
+   * un `items_origen_unico` preexistente que fuera parcial sobre `deleted_at` sobreviviría al
+   * `create ... if not exists`, la migración diría OK y la garantía central de F estaría ausente
+   * en silencio. Esta fila lo caza nombrando la causa, en vez de esperar a que F2 caiga por el
+   * síntoma.
+   */
+  it('i1-5: el índice de origen es parcial sobre la clave, y NUNCA sobre lo tachado', async () => {
+    const [fila] = await sql<{ def: string }>(
+      `select indexdef as def from pg_indexes where indexname = 'items_origen_unico'`)
+    expect(fila?.def, 'sin índice de origen, el reenvío sobre lo tachado vuelve a insertar').toBeTruthy()
+    expect(fila.def).toContain('UNIQUE')
+    expect(fila.def, 'la clave tiene que ser por grupo').toMatch(/group_id, origen_id/)
+    expect(fila.def, 'parcial sobre `origen_id is not null`: las filas sin clave no deduplican')
+      .toMatch(/WHERE \(origen_id IS NOT NULL\)/i)
+    expect(fila.def, 'parcial sobre `deleted_at` sería la regresión: el reenvío sobre lo tachado dejaría de chocar')
+      .not.toMatch(/deleted_at/i)
+  })
+
+  /**
    * Spec F / F1bis — Y la otra mitad del mecanismo: la clave es **por grupo**, así que la misma
    * fila en otro grupo sí entra. Es lo que hace que el borde de «un uuid que ya existe en otro
    * grupo» no exista, en vez de aceptarse por nombre.
