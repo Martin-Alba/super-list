@@ -102,7 +102,7 @@ const { GroupView } = await import('@/app/g/[id]/GroupView')
 
 const fila = (nombre: string): Item => ({
   id: `id-${nombre}`, group_id: 'g1', name: nombre, quantity: null, created_by: 'u1',
-  created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', deleted_at: null,
+  created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', deleted_at: null, origen_id: null,
 })
 const pendiente = (nombre: string, grupo = 'g1', edad = 1000): Pendiente =>
   ({ id: `p-${nombre}`, usuario: 'u1', grupo, nombre, cantidad: null, creado: Date.now() - edad })

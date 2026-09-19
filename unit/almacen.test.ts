@@ -1368,16 +1368,62 @@ describe('Spec E / R2 · el perímetro: un solo fichero del producto abre el alm
 describe('Spec F / R6 · el envío del drenado manda la fila que leyó', () => {
   type Envio = { fabricada: boolean; texto: string }
 
+  /**
+   * Iteración 1 · i1-R6 — **La primera versión seguía una forma, y la forma se rodea en una
+   * línea.** La revisión construyó un banco que corre el código de esta guarda y midió 5 huecos
+   * y 5 falsos positivos; tres de los huecos compilan limpios contra el proyecto real. El más
+   * barato es `const q = { ...p, id: crypto.randomUUID() }` y luego `addItem(…, q)`: un
+   * identificador, así que la versión anterior callaba — y es exactamente el defecto que esta
+   * guarda existe para impedir.
+   *
+   * Ahora sigue **el binding un salto**: un identificador se resuelve a su declaración y lo que
+   * se juzga es su inicializador. Y se desenvuelven los adornos que no cambian el valor —
+   * paréntesis, `as`, `!`, `satisfies`—, que eran los cinco falsos positivos: una guarda que se
+   * pone roja con un cast y calla con un re-acuñado es una guarda que el siguiente relaja.
+   *
+   * **Su límite, escrito:** un salto, no un análisis de flujo. Una fila que pase por dos
+   * variables, o que se mute después de declararse (`p.id = …`), sigue fuera — y para eso está
+   * `unit/drenado.test.tsx` › «F3…», que compara las claves de dos pasadas y **sí** las caza, y la
+   * fila F6 de navegador, que caza la que F3 no puede ver. R6 no descansa sólo en esta guarda, y
+   * eso va dicho aquí y en la lista del DoD en vez de suponerse.
+   */
+  const INVENTA = /randomUUID|Math\.random|Date\.now/
+
   function enviosDelDrenado(codigo: string): Envio[] {
     const sf = ts.createSourceFile('v.tsx', codigo, ts.ScriptTarget.Latest, true)
     const out: Envio[] = []
+
+    /** Los adornos no cambian el valor: `(p)`, `p as T`, `p!`, `p satisfies T`. */
+    const desnudo = (n: ts.Node): ts.Node =>
+      ts.isParenthesizedExpression(n) || ts.isAsExpression(n) || ts.isNonNullExpression(n)
+        || ts.isSatisfiesExpression(n) ? desnudo(n.expression) : n
+
+    /** Un salto: de un identificador a lo que se le asignó al declararlo. */
+    const declaraciones = new Map<string, ts.Node>()
+    const verDecls = (n: ts.Node) => {
+      if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer)
+        declaraciones.set(n.name.text, desnudo(n.initializer))
+      ts.forEachChild(n, verDecls)
+    }
+    verDecls(sf)
+
+    /** Se fabrica si es un literal de objeto, o si lo es lo que hay detrás del nombre. */
+    const fabricado = (n: ts.Node, salto = true): boolean => {
+      const x = desnudo(n)
+      if (ts.isObjectLiteralExpression(x)) return true
+      if (INVENTA.test(x.getText())) return true
+      if (salto && ts.isIdentifier(x)) {
+        const d = declaraciones.get(x.text)
+        return d ? fabricado(d, false) : false
+      }
+      return false
+    }
+
     const ver = (n: ts.Node) => {
       if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === 'addItem') {
         const fila = n.arguments[3]
         if (fila) out.push({
-          // Un identificador o un acceso a propiedad viene de algo que ya existía; un objeto
-          // literal se construye aquí, y ahí es donde se puede colar un uuid nuevo.
-          fabricada: !ts.isIdentifier(fila) && !ts.isPropertyAccessExpression(fila),
+          fabricada: fabricado(fila),
           texto: fila.getText().replace(/\s+/g, ' ').slice(0, 60),
         })
       }
@@ -1412,6 +1458,29 @@ describe('Spec F / R6 · el envío del drenado manda la fila que leyó', () => {
       'una fila construida en el sitio pasó inadvertida').toBe(1)
   })
 
+  it('F7: la sonda — las tres variantes que la primera versión no cazaba', () => {
+    const casos: [string, string][] = [
+      ['propagación por un spread', 'const q = { ...p, id: crypto.randomUUID() }\n      const r = await addItem(c, g, u, q)'],
+      ['una fila construida detrás de un nombre', 'const q = { id: crypto.randomUUID(), nombre: p.nombre, cantidad: null }\n      const r = await addItem(c, g, u, q)'],
+      ['acuñada en la propia llamada', 'const r = await addItem(c, g, u, { ...p, id: crypto.randomUUID() })'],
+    ]
+    for (const [nombre, cuerpo] of casos) {
+      const sembrado = `const drenarUnaVez = async () => {\n      ${cuerpo}\n    }\n    const drenar = () => {}`
+      expect(DEL_DRENADO(sembrado).filter(e => e.fabricada).length, `${nombre}: pasó inadvertida`)
+        .toBeGreaterThan(0)
+    }
+  })
+
+  it('F7: las negativas — los cinco adornos de la fila leída no se marcan', () => {
+    for (const forma of ['(p)', 'p as FilaAEnviar', 'p!', 'p satisfies FilaAEnviar', 'cola[0]']) {
+      const sembrado = `const drenarUnaVez = async () => {
+      const r = await addItem(c, g, u, ${forma})
+    }
+    const drenar = () => {}`
+      expect(DEL_DRENADO(sembrado).filter(e => e.fabricada), `${forma}: marca lo legítimo`).toEqual([])
+    }
+  })
+
   it('F7: y la negativa — mandar la fila leída no se marca', () => {
     const sembrado = `const drenarUnaVez = async () => {
       const p = siguienteEnCola(cola, group.id, ahora)
@@ -1428,6 +1497,12 @@ describe('Spec F / R6 · el envío del drenado manda la fila que leyó', () => {
  * docstring de R4 desde antes del sellado: la encontró una lectura, no una puerta.
  */
 describe('Spec F / R5 · ningún documento afirma lo que F desmiente', () => {
+  /**
+   * Iteración 1 · i1-R1 — El alcance es **estas tres fuentes**, y la fila del DoD lo dice así en
+   * vez de decir «ningún documento»: una afirmación más ancha que su barrido es la misma clase de
+   * registro falso que este barrido existe para cazar. `docs/spec.md` queda fuera a propósito —
+   * cita el texto viejo como cita marcada, y eso es legítimo.
+   */
   const FUENTES = ['app/g/[id]/GroupView.tsx', 'lib/items.ts', 'lib/local.ts']
 
   /**
@@ -1469,10 +1544,35 @@ describe('Spec F / R5 · ningún documento afirma lo que F desmiente', () => {
       'el barrido no caza el texto que de verdad estaba ahí: no mide nada').toHaveLength(2)
   })
 
-  it('F9: y la negativa — el texto corregido, que niega lo mismo, no se marca', () => {
-    const corregido = 'La idempotencia no la pone este bucle: la pone la base. Y por la clave '
-      + 'primaria, no por el índice de nombre: `items_nombre_unico` es parcial.'
-    expect(RETIRADAS.filter(r => corregido.includes(r)),
+  /**
+   * i1-R1 — **Este caso negativo citaba una frase falsa y la bendecía.** Decía «Y por la clave
+   * primaria», que es falso: el cliente no puede escribir `items.id` —`42501`, por privilegio de
+   * columna— y quien rechaza es `items_origen_unico`. La frase se escribió cuando el mecanismo
+   * iba a ser la primaria y no se actualizó al cambiarlo, así que la guarda de los registros
+   * falsos **certificaba uno**. La revisión lo midió. Ahora el caso negativo usa el texto que de
+   * verdad está en el fichero, leído del fichero.
+   */
+  it('F9: y la negativa — el texto corregido, tomado del fichero, no se marca', () => {
+    const real = readFileSync('app/g/[id]/GroupView.tsx', 'utf8')
+    const parrafo = real.slice(real.indexOf('La idempotencia no la pone este bucle'))
+      .slice(0, 600)
+    expect(parrafo, 'el párrafo corregido no está donde se espera: el caso mide otra cosa')
+      .toContain('items_origen_unico')
+    expect(RETIRADAS.filter(r => parrafo.includes(r)),
       'la guarda marca la negación igual que la afirmación').toEqual([])
+  })
+
+  /**
+   * i1-R1 — Y la mitad positiva, que es la que no había: **el fichero nombra el mecanismo real**.
+   * Un barrido de ausencias está verde también cuando el párrafo entero desaparece, o cuando
+   * nombra un mecanismo que no es. Esta fila se pone roja en los dos casos.
+   */
+  it('F9: el fichero nombra el mecanismo que de verdad rechaza, y no la clave primaria', () => {
+    const real = readFileSync('app/g/[id]/GroupView.tsx', 'utf8')
+    expect(real, 'el drenado no nombra `items_origen_unico`: quien lo lea no sabrá qué rechaza')
+      .toContain('items_origen_unico')
+    expect(/idempotencia[^.]{0,120}\bclave\s+\n?\s*\*?\s*primaria\b/i.test(real),
+      'vuelve a atribuir la idempotencia a la clave primaria, que el cliente no puede escribir')
+      .toBe(false)
   })
 })

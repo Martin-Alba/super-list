@@ -7,7 +7,7 @@ import { mergeItems, type Item } from '../lib/items'
 // que nada lo delate.
 const item = (id: string, updated: string, extra: Partial<Item> = {}): Item => ({
   id, group_id: 'g', name: id, quantity: null, created_by: 'u',
-  created_at: '2026-01-01T00:00:00Z', updated_at: updated, deleted_at: null, ...extra,
+  created_at: '2026-01-01T00:00:00Z', updated_at: updated, deleted_at: null, origen_id: null, ...extra,
 })
 
 describe('J6 el refresco no se come los eventos en vuelo', () => {

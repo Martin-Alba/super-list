@@ -409,7 +409,7 @@ export function GroupView({
      * comprobar a mano.
      */
     const esDuplicado = () => {
-      devolver(nombre, cantidad, desde); void avisar('duplicado', '23505')
+      devolver(fila, desde); void avisar('duplicado', '23505')
       return { ok: false, descartadas }
     }
     if (decision.accion === 'duplicado') return esDuplicado()
@@ -426,7 +426,7 @@ export function GroupView({
      */
     const puesto = await encolar(p)
     if (puesto === 'rechazado') {
-      devolver(nombre, cantidad, desde); avisarTexto(SIN_ALMACEN, 'generico', 'mutacion')
+      devolver(fila, desde); avisarTexto(SIN_ALMACEN, 'generico', 'mutacion')
       return { ok: false, descartadas }
     }
     if (puesto === 'ya-estaba') return esDuplicado()
@@ -468,10 +468,15 @@ export function GroupView({
    * simultáneos sobre el mismo grupo son la carrera que D.2 prohíbe resolver en
    * memoria del proceso.
    *
-   * La idempotencia no la pone este bucle: la pone la base. Y **por la clave
-   * primaria**, no por el índice de nombre: `items_nombre_unico` es parcial
-   * —`WHERE deleted_at IS NULL`—, así que en cuanto alguien tacha el producto un
-   * reenvío ya no choca por nombre, **inserta**, y lo que el usuario quitó vuelve.
+   * La idempotencia no la pone este bucle: la pone la base, y **por
+   * `items_origen_unico`** —UNIQUE sobre `(group_id, origen_id)`, no parcial—, no
+   * por el índice de nombre: `items_nombre_unico` es parcial —`WHERE deleted_at IS
+   * NULL`—, así que en cuanto alguien tacha el producto un reenvío ya no choca por
+   * nombre, **inserta**, y lo que el usuario quitó vuelve.
+   *
+   * Y tampoco por la clave primaria, que es donde este comentario se equivocó una
+   * segunda vez: el cliente **no puede escribirla**. El privilegio de INSERT es por
+   * columna y no la incluye —`42501`, medido al construir—, y eso es a propósito.
    * La versión anterior de este comentario afirmaba lo contrario, y además daba
    * por peor la idea de deduplicar con una clave propia. Las dos afirmaciones
    * eran falsas, y eran las que harían revertir la Spec F a quien las leyera de
@@ -557,11 +562,17 @@ export function GroupView({
        * escrito para que nadie lo vuelva a añadir.
        *
        * La iteración 1 lo añadió razonando que el reenvío devolvería `23505`. Es
-       * falso: `items_nombre_unico` es **parcial** —`WHERE deleted_at IS NULL`,
-       * verificado en el catálogo y afirmado desde antes en
+       * falso **entonces**: `items_nombre_unico` es parcial —`WHERE deleted_at IS
+       * NULL`, verificado en el catálogo y afirmado desde antes en
        * `unit/duplicados.test.ts:19`, que además explica por qué tiene que serlo—,
-       * así que en cuanto alguien tacha el producto el reenvío **crea fila nueva**.
-       * Un desmontaje a mitad de envío resucitaba lo que alguien había quitado.
+       * así que un reenvío sobre un producto tachado creaba fila nueva y un
+       * desmontaje a mitad de envío resucitaba lo que alguien había quitado.
+       *
+       * **Desde la Spec F ya no.** El envío lleva `origen_id` y quien rechaza es
+       * `items_origen_unico`, que no es parcial, así que el reenvío choca también
+       * con el producto tachado. La conclusión no cambia —aquí no se mira la
+       * generación— pero el motivo sí, y dejarlo escrito al revés es lo que haría
+       * revertir la F a quien lo leyera de buena fe.
        *
        * Los dos chequeos que sí se quedan —al empezar la vuelta y tras la
        * relectura— impiden que un drenado de un árbol muerto **siga drenando**, que
@@ -699,9 +710,26 @@ export function GroupView({
    * y se hace sobre el gesto —¿ha tecleado alguien?— y no sobre el contenido.
    */
   const tecleado = useRef(0)
-  const devolver = (nombre: string, cantidad: string | null, desde: number) => {
+  /**
+   * Spec F / iteración 1 · i1-R4 — **La clave sobrevive a que el gesto se reinicie.**
+   *
+   * `devolver` existe porque un alta que falla devuelve lo tecleado al campo, y hasta aquí
+   * devolvía el texto y **tiraba la clave**: el intento siguiente acuñaba otra. La revisión lo
+   * midió — envío con `clase === 'servidor'` (que incluye un timeout **después** de que el
+   * servidor confirmara) y `encolar` devolviendo `'rechazado'` porque el almacén no acepta
+   * escribir: la fila nunca entra en la cola, el servidor puede tener el ítem bajo la clave
+   * primera, y el segundo intento llega con otra. Si alguien tachó el producto en medio, la base
+   * no tiene nada que reconocer y entra fila nueva.
+   *
+   * Es la misma clase que F6 encontró —una intención con dos claves—, por el tercer camino.
+   */
+  const claveDevuelta = useRef<FilaAEnviar | null>(null)
+  const devolver = (fila: FilaAEnviar, desde: number) => {
+    // Se recuerda pase lo que pase con el campo: que el usuario haya tecleado otra cosa no
+    // borra el hecho de que el servidor pueda tener la fila bajo esta clave.
+    claveDevuelta.current = fila
     if (tecleado.current !== desde) return
-    setName(nombre); setQuantity(cantidad ?? '')
+    setName(fila.nombre); setQuantity(fila.cantidad ?? '')
   }
 
   const avisarTexto = (texto: string, clase: Clase, origen: Origen) => {
@@ -1065,7 +1093,13 @@ export function GroupView({
      * es el defecto que F6 midió.
      */
     const cantidadAhora = quantity.trim() || null
-    const fila: FilaAEnviar = { id: crypto.randomUUID(), nombre: trimmed, cantidad: cantidadAhora }
+    // i1-R4 — Si este gesto reintenta el producto que acaba de volver, hereda su clave: el
+    // servidor puede tener la fila bajo ella. `mismoProducto` y no igualdad de cadenas, para que
+    // cambiar una mayúscula al reescribir no acuñe una clave nueva.
+    const devuelta = claveDevuelta.current
+    const fila: FilaAEnviar = devuelta && mismoProducto(devuelta.nombre, trimmed)
+      ? { id: devuelta.id, nombre: trimmed, cantidad: cantidadAhora }
+      : { id: crypto.randomUUID(), nombre: trimmed, cantidad: cantidadAhora }
     if (sinRed) {
       /**
        * I4 — El campo se vacía **antes** de esperar al almacén, y la guarda
@@ -1080,6 +1114,7 @@ export function GroupView({
       try {
         const r = await meterEnCola(fila, desde)
         if (!r.ok) return
+        claveDevuelta.current = null
         limpiarAviso()
         /**
          * Spec B / iteración 4 · i4-R1 — **Después de `limpiarAviso()`, no antes.**
@@ -1111,6 +1146,7 @@ export function GroupView({
     setName(''); setQuantity(''); setBusy(true)
     try {
       const { clase, code } = await addItem(createClient(), group.id, me.id, fila)
+      if (!clase) claveDevuelta.current = null
       if (clase) {
         /**
          * N1 — Deuda 34. `clasificar` devuelve `servidor` exactamente cuando el
@@ -1170,7 +1206,7 @@ export function GroupView({
           void reintentarEnvio(++envio.current)
           return
         }
-        devolver(trimmed, cantidadAhora, desde)
+        devolver(fila, desde)
         // T7 — no se espera al afinado: hacerlo dejaba el botón deshabilitado
         // hasta 2 s tras un 42501, que es lo contrario de lo que S4 buscaba.
         void avisar(clase, code)

@@ -10,6 +10,12 @@ export type Item = {
   created_at: string
   updated_at: string
   deleted_at: string | null
+  /**
+   * Spec F / i1-R8 — El payload de realtime ya la lleva: la publicación no filtra columnas y
+   * `authenticated` tiene SELECT sobre ella, así que llega en cada INSERT y UPDATE y acaba en el
+   * estado y en la instantánea de IndexedDB. Declararla es que el tipo deje de mentir.
+   */
+  origen_id: string | null
 }
 
 /**

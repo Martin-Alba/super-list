@@ -1039,7 +1039,30 @@ confirmado —y entonces la ficha, que promete un envío imposible, necesita otr
 mensaje del `'ya-estaba'` sobre una caducada no borrada sea `SIN_ALMACEN` en vez de
 `DUPLICADO`, que es lo que de verdad está pasando.
 
-## 64 — El drenado ignora el mismo booleano, y ahí la consecuencia es peor (2026-09-18)
+## 64 — ~~El drenado ignora el mismo booleano, y ahí la consecuencia es peor~~ — **SALDADA** (2026-09-19)
+
+**La cerró la Spec F, y no por donde esta entrada proponía.** La entrada decía «honrar el
+booleano». Medido al construir: el hueco entre «el servidor tiene la fila» y «la cola local lo
+olvida» es **estructural** —la baja va después del `await` del envío, con cota de 10 s—, así que
+**ningún booleano lo cierra**: un proceso muerto no honra nada. El arreglo va en la base. El envío
+lleva `origen_id` —la clave de la fila de la cola, acuñada una vez por gesto— y
+`items_origen_unico`, UNIQUE sobre `(group_id, origen_id)` y **no parcial sobre `deleted_at`**,
+rechaza el reenvío también con el producto tachado, que es el caso exacto que el índice de nombre
+no puede cazar.
+
+Guardado en `unit/duplicados.test.ts` › «F2: el reenvío de la misma fila no resucita un producto
+tachado» y › «F1: el mecanismo es la clave de origen, no el índice de nombre» —con token real—, en
+`unit/drenado.test.tsx` › «F3…», y en tres filas de navegador: «DoD F5», «DoD F6» —el proceso
+muerto entre el envío y la baja— y «DoD F8» —dos pestañas durante la espera del reintento—.
+
+**Lo que NO cerró y sigue siendo cierto:** que `drenarUnaVez` descarte el booleano. Ya no
+resucita nada, pero sigue sin poder distinguir «el almacén rechazó» de «otra pestaña ya la
+drenó», y por eso la fila puede reenviarse muchas veces sin que nadie lo sepa. Eso es la Spec G y
+su deuda 64 bis.
+
+*(Texto original:)*
+
+
 
 `drenarUnaVez` hace `await quitarDeCola(p.id)` tras un envío aceptado y **descarta el
 resultado**, igual que hacía `leerColaViva` antes de la iteración 5. Si el almacén rechaza ese
@@ -1077,7 +1100,19 @@ guarda: una prueba que extraiga `ruta:NNN` del árbol y falle si la línea está
 nombre citado no aparece cerca —con su sonda, que debe ser cazada—, o directamente que prohíba
 la cita por número en los comentarios. Sin ella, la lección se va con la spec que se borra.
 
-## 64 bis — El arreglo de la 64 se volvió más difícil, y eso lo hizo la Spec E (2026-09-19)
+## 64 bis — Lo que queda del booleano fusionado, ya sin la resurrección (2026-09-19, reescrita)
+
+**Reescrita al cerrar la 64.** La entrada decía que el arreglo de la 64 se había vuelto más
+difícil porque `quitarDeCola` fusiona «el almacén rechazó» y «no había fila». La consecuencia
+grave que describía —la resurrección— **ya no existe**: la cerró la Spec F por la base, sin tocar
+el booleano. Lo que queda es lo que la Spec G necesita, y es menor: un drenado que quisiera saber
+si la baja entró no puede, así que reintenta la baja sin saber si hace falta, y nadie puede
+distinguir un almacén que rechaza de una pestaña que se adelantó. Quien la arregle sigue
+necesitando los dos hechos separados —tres estados, o que el drenado pregunte por su cuenta—.
+
+*(Texto original:)*
+
+
 
 La deuda 64 dice que `drenarUnaVez` descarta el booleano de `quitarDeCola` tras un envío
 aceptado, y que por el índice parcial un reenvío después de que alguien tache el producto crea
@@ -1194,3 +1229,25 @@ ninguna forma estable**, así que ni quien la espera sabe que acabó ni quien ll
 que murió. Un centinela con dos estados —«mutando» y ausente— sirve para las dos cosas, y
 entonces el vigilante espera *su desaparición* en vez de una cadena que alguien tuvo que
 adivinar.
+
+## 70 — El nombre canónico trata NFC y NFD como productos distintos, en las dos capas (2026-09-19)
+
+Medido por la revisión de la Spec F con un diferencial de 46 entradas y los 1.035 pares:
+**0 divergencias entre el cliente y la base**. `normNombre` y la expresión de
+`items_nombre_unico` coinciden en mayúsculas, espacios interiores, tabuladores, NBSP, `ñ`,
+dígitos y latinas de ancho completo, los tres tipos de guión, sigma final griega, I turca, eszett
+capital y la ligadura ﬁ. No hay nada roto **entre** capas.
+
+Lo que hay es un acuerdo en algo indeseable: **las dos** tratan una `á` precompuesta y una
+`a`+U+0301 combinante como productos distintos. Quien pegue texto NFD —el sistema de ficheros de
+macOS lo produce, y algunos IME y el dictado también— acaba con `plátano` y `plátano` como dos
+filas visualmente idénticas en la lista de la familia, sin explicación.
+
+**La trampa para quien lo arregle, y el motivo de escribirlo aquí:** añadir `.normalize('NFC')`
+sólo en el cliente **crea** la divergencia que hoy no existe — el cliente diría «mismo producto»
+y la base insertaría igual. Cerrarlo de verdad exige rehacer `items_nombre_unico`, que es el
+camino que la Spec F midió y encontró **bloqueado**: 482 colisiones sobre 26.000 filas, y
+limpiarlas pide `DELETE` físico sobre una tabla publicada en `supabase_realtime`, que es fallo
+duro de la constitución. Así que se arregla en las dos capas a la vez o no se arregla.
+
+No afecta a la Spec F: su clave de deduplicación es un uuid.

@@ -51,7 +51,7 @@ const { GroupView } = await import('@/app/g/[id]/GroupView')
 
 const item = (id: string): Item => ({
   id, group_id: 'g1', name: 'pan', quantity: null, created_by: 'u1',
-  created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', deleted_at: null,
+  created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', deleted_at: null, origen_id: null,
 })
 
 const vista = (items: Item[] = [], loadClase: Clase | null = null) => (

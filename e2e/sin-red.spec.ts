@@ -1408,3 +1408,76 @@ test('DoD F8: dos pestañas reenviando la misma fila durante la espera, y una so
   expect(todas.data![0].origen_id, 'la fila entró sin clave de origen').toBe(origen)
   await a.ctx.close()
 })
+
+/**
+ * Spec F / F5 — **La fila que esta spec escribió y su propia lista dejó caer.**
+ *
+ * Estaba en §Definición de hecho de la Spec F y no llegó ni a la lista del DoD ni a la suite, y
+ * su única excusa escrita —«no he comprobado que el `delete` de IndexedDB se pueda hacer rechazar
+ * desde Playwright»— la desmiente F8, que lo consigue abortando la transacción de escritura. La
+ * condición se cumplió y la fila desapareció en silencio; la revisión la encontró.
+ *
+ * Es distinta de F6 y de F8: F6 mata el proceso y no rechaza nada; F8 rechaza la escritura pero
+ * el producto nunca se tacha. Ésta junta las dos mitades, que es el par que la deuda 64 describía.
+ */
+test('DoD F5: con la escritura rechazada y el producto tachado entre pasadas, la lista no gana fila', async ({ browser }) => {
+  const a = await entrar(browser, 'specF5')
+  const gid = await grupoCon(a.page, 'ReenvioF5')
+  const usuario = (await admin.from('group_members').select('user_id').eq('group_id', gid).single()).data!.user_id
+
+  const origen = '9f1b7c40-0000-4000-8000-00000000f005'
+  await a.page.evaluate(({ gid, usuario, origen }) => new Promise<void>((resolve) => {
+    const req = indexedDB.open('super', 1)
+    req.onsuccess = () => {
+      const t = req.result.transaction('cola', 'readwrite').objectStore('cola')
+      t.put({ id: origen, usuario, grupo: gid, nombre: 'cardamomo', cantidad: null, creado: Date.now() })
+      t.transaction.oncomplete = () => resolve()
+    }
+  }), { gid, usuario, origen })
+
+  // La escritura sobre `cola` se aborta: la baja local nunca entra, así que la fila sobrevive a
+  // la primera pasada. Es la misma sonda que F8, por la causa real —un almacén que no acepta
+  // escribir— y sin nombrar el borrado.
+  await a.ctx.addInitScript(() => {
+    const abrir = indexedDB.open.bind(indexedDB)
+    Object.defineProperty(indexedDB, 'open', {
+      value: (nombre: string, version?: number) => {
+        const req = abrir(nombre, version)
+        req.addEventListener('success', () => {
+          const db = req.result
+          const tx = db.transaction.bind(db)
+          Object.defineProperty(db, 'transaction', {
+            value: (nombres: string | string[], modo?: IDBTransactionMode) => {
+              const t = tx(nombres as string, modo)
+              const toca = ([] as string[]).concat(nombres as string[]).includes('cola')
+              if (toca && modo === 'readwrite') queueMicrotask(() => { try { t.abort() } catch { /* ya terminó */ } })
+              return t
+            },
+          })
+        })
+        return req
+      },
+    })
+  })
+  await a.page.reload()
+
+  // Primera pasada: el envío entra y la baja no.
+  await expect.poll(async () =>
+    (await admin.from('items').select('id').eq('group_id', gid)).data?.length ?? 0,
+    { message: 'la primera pasada no envió', timeout: 20_000 }).toBe(1)
+  const creado = (await admin.from('items').select('id,origen_id').eq('group_id', gid)).data!
+  expect(creado[0].origen_id, 'el envío no llevó clave de origen').toBe(origen)
+
+  // Alguien lo tacha. Aquí el índice de nombre deja de poder cazar el reenvío.
+  await admin.from('items').update({ deleted_at: new Date().toISOString() }).eq('id', creado[0].id)
+
+  // Segunda pasada: la fila sigue en disco, así que se reenvía.
+  await a.page.reload()
+  await a.page.waitForTimeout(4_000)
+
+  const vivos = await admin.from('items').select('id').eq('group_id', gid).is('deleted_at', null)
+  expect(vivos.data, 'resurrección: el reenvío devolvió a la lista lo que alguien tachó').toHaveLength(0)
+  expect((await admin.from('items').select('id').eq('group_id', gid)).data,
+    'el reenvío insertó una segunda fila').toHaveLength(1)
+  await a.ctx.close()
+})

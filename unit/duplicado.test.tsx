@@ -302,7 +302,7 @@ describe('la cola sigue borrándose por id', () => {
     const m = await cargarAlmacen()
     await m.guardarLista('u1', 'g1', [{
       id: 'i1', group_id: 'g1', name: 'anchoas', quantity: null,
-      created_by: 'u1', created_at: 'a', updated_at: 'a', deleted_at: null,
+      created_by: 'u1', created_at: 'a', updated_at: 'a', deleted_at: null, origen_id: null,
     }])
     await m.guardarNombre('u1', 'g1', 'Familia Alba')
     await m.guardarUltimoUsuario('u1')

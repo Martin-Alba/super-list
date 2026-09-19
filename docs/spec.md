@@ -403,4 +403,74 @@ Ninguna de las dos es investigable: las dos son tuyas.
 - **No he medido cuánto cuesta la lectura extra del borde 2**, porque la decisión es tuya y la
   medida depende de cuál elijas.
 
-<!-- ACTIVE: F -->
+---
+
+## Iteración 1 — lo que la revisión midió, y dos errores míos de registro
+
+Origen: revisión de la base de la Spec F. Entran los dos HIGH, la fila del DoD que desapareció,
+y los registros falsos. Lo que queda fuera va nombrado al final.
+
+**Los dos errores de registro, que son la parte incómoda y la que ordena el resto:**
+
+1. **El docstring de reemplazo dice que la idempotencia la pone «la clave primaria».** Falso: el
+   cliente no puede escribir `items.id` —es el `42501` que este mismo ciclo se comió— y quien
+   rechaza es `items_origen_unico`. La frase se escribió cuando el mecanismo iba a ser la
+   primaria y **no se actualizó al cambiar de mecanismo**. Peor: la sonda negativa de F9 cita esa
+   frase exacta como «el texto corregido», así que **la guarda certifica el error**. Sustituir una
+   afirmación falsa por otra y escribir el test que la bendice es el defecto, no el descuido.
+2. **La fila F5 de esta misma spec desapareció sin declararse.** Está en §Definición de hecho y
+   no está en la lista del DoD ni en la suite. Y su única excusa escrita —«no he comprobado que
+   el `delete` de IndexedDB se pueda hacer rechazar desde Playwright»— la desmiente F8, que lo
+   hace abortando la transacción de escritura. La condición se cumplió y la fila se cayó.
+
+### Requisitos
+
+1. **El docstring nombra el mecanismo real** y la guarda deja de certificar lo contrario: el caso
+   negativo de F9 usa el texto corregido **de verdad**, y se añade una afirmación positiva de que
+   el fichero nombra `items_origen_unico`.
+2. **F5 se cubre**: navegador, con la escritura sobre `cola` abortada y el producto tachado entre
+   pasadas, la lista no gana fila. El arnés existe —lo usa F8—.
+3. **Los demás documentos dejan de afirmar lo retirado**: `GroupView.tsx` noventa líneas más
+   abajo, dentro del fichero que F9 barre; y las deudas 64 y 64 bis, que declaran viva una
+   resurrección que F cierra. Y el alcance del barrido se iguala a lo que su fila afirma.
+4. **Una clave por intención, también cuando el gesto se reinicia.** Si el envío falló con
+   `servidor` y `encolar` devuelve `'rechazado'` o `'ya-estaba'`, hoy la clave se tira y el
+   siguiente intento acuña otra, con el servidor posiblemente guardando la fila bajo la primera.
+   Es el último camino donde una intención tiene dos claves — la clase exacta que F6 encontró.
+5. **El índice se acota a lo que tiene clave.** `where origen_id is not null`: mismo invariante
+   —los NULL no colisionan nunca— y 1.056 kB de entradas NULL que dejan de existir. Partial sobre
+   `deleted_at` está prohibido; partial sobre `origen_id is not null` es gratis, y el comentario
+   tiene que separar los dos ejes para que nadie lo lea como una regresión.
+6. **La guarda del AST cubre lo que su requisito dice cubrir, o se retira diciéndolo.** Sigue una
+   forma en la posición 3 y la derrotan tres variantes que compilan limpias, la más barata de una
+   línea: `{ ...p, id: crypto.randomUUID() }`. Sigue el binding un salto, o se retira y R6 pasa a
+   descansar en F3 y F6 **por escrito**.
+7. **El orden de despliegue deja de depender de que alguien se acuerde.** Con el código delante de
+   la migración, cada alta da «No se ha podido completar la operación.», la cola no drena y a las
+   24 h se descarta. Una guarda que lea el catálogo del entorno de destino, o un arranque que
+   falle cerrado. *(La mitad de infraestructura —paso de CI o de despliegue— necesita tu mano y
+   queda fuera.)*
+8. **`Item` declara `origen_id`** —el payload de realtime ya lo lleva— y la fila F4 de la lista se
+   reetiqueta a la capa que de verdad la cubre.
+
+### Definición de hecho
+
+| # | Comprobación | Capa | Por qué no puede estar verde antes |
+|---|---|---|---|
+| i1-1 | El fichero nombra `items_origen_unico` y no atribuye la idempotencia a la primaria | barrido | hoy lo atribuye, y la sonda negativa lo bendice |
+| i1-2 | F5: escritura abortada + producto tachado entre pasadas → la lista no gana fila | navegador real | la fila no existe |
+| i1-3 | Ninguna de las tres fuentes contiene ya las frases retiradas, ni la de 90 líneas abajo | barrido | hoy `GroupView.tsx:563` la contiene y F9 está verde |
+| i1-4 | Reiniciado el gesto tras `'rechazado'`, el segundo intento lleva **la misma** clave | la vista | hoy acuña otra |
+| i1-5 | El índice es parcial sobre `origen_id is not null` y F2 sigue roja sin él | la base | hoy es total |
+| i1-6 | La guarda caza `{ ...p, id: … }`, `p.id = …` y el ayudante local — o R6 dice por escrito que no cubre esas tres | el módulo | hoy las tres pasan y compilan |
+| i1-7 | Con la columna ausente, algo se pone rojo antes de que un usuario lo vea | la base / arranque | hoy sólo se ve como «No se ha podido completar la operación.» |
+| i1-8 | `Item` declara `origen_id` | tipos | hoy no |
+
+### Fuera, por nombre
+
+El paso de CI o de despliegue (requisito 7, mitad de infraestructura) · el borde del `origen_id`
+repetido **dentro del mismo grupo**, que es la §Decisión 2 que sigue sin contestar · la deuda de
+NFC/NFD, que va al fichero de deuda y **no** se arregla sólo en el cliente, porque eso crearía la
+divergencia que hoy no existe.
+
+<!-- ACTIVE: F-iter1 -->
