@@ -1220,7 +1220,21 @@ un canal que no dependa de que el proceso siga vivo —un fichero centinela escr
 mutar y borrado al restaurar, que la verja o el arranque de la siguiente orden miren— y eso ya
 no es una línea: es una pieza, y se decide aparte.
 
-**Y el mismo centinela resuelve un segundo problema medido, que conviene atender de una vez.**
+**Reescrita el 2026-09-19, al medir de dónde venía el problema.** La mitad que importaba no se
+cierra con un centinela: se cierra **no corriendo la pasada a ciegas**. Con ella en primer plano,
+un comando muerto devuelve su código de salida y su salida en el acto, así que la detección es
+inmediata y la tiene quien la necesita. Lo que la hacía invisible no era la falta de un canal:
+era que nadie leía el log mientras avanzaba — cuatro corridas desacopladas dejaron tres anclas
+desfasadas sin que nadie lo viera, un control declarado saliendo CAZADO, y una mutación aplicada.
+
+**Lo que queda abierto, y es más estrecho de lo que esta entrada decía:** que la pasada muera en
+primer plano **y su resultado no lo lea nadie** —se acaba la sesión, lo retoma otro—. Ahí el único
+detector vuelve a ser la precondición de la corrida siguiente. Para eso se conserva el centinela
+en disco: tres líneas dentro del propio script, lo único que sobrevive a la vez a un `SIGKILL` y a
+un resultado sin leer. **No es una herramienta de vigilancia externa** — se probó una y se retiró,
+porque vigilaba un proceso que no debería existir.
+
+**Y una nota que el mismo camino dejó, que conviene atender de una vez.**
 El 2026-09-19 quedó un vigilante de la pasada corriendo **5 h 46 min** —`until grep -q "^DONE"
 pasada.log; do sleep 45; done`— esperando una línea que el script **no imprime**: acaba en
 `== N mutaciones ==` y `PASADA: OK`, nunca en `DONE`. Era inofensivo (sólo leía) pero no podía
@@ -1251,3 +1265,98 @@ limpiarlas pide `DELETE` físico sobre una tabla publicada en `supabase_realtime
 duro de la constitución. Así que se arregla en las dos capas a la vez o no se arregla.
 
 No afecta a la Spec F: su clave de deduplicación es un uuid.
+
+## 71 — Un test de la verja puede tardar quince minutos, y nada lo acota (2026-09-20)
+
+Medido, no estimado. Con los contenedores de Supabase recién arrancados, una corrida de
+`pnpm test` dejó tres filas de base en rojo, y una de ellas —`unit/stale-membership.test.tsx` ›
+«un rechazado que reabre el link vuelve a pending»— tardó **914.773 ms: quince minutos y
+quince segundos**. Con los contenedores calientes (`Up 46 minutes (healthy)`) las tres pasan y
+la suite entera da 1.720 de 1.720.
+
+**Lo que importa no es el rojo —era arranque en frío— sino la cota.** Ese test no tiene
+ninguna: espera a que la base conteste y espera lo que haga falta. Un caso capaz de tardar
+quince minutos puede llevarse por delante el techo de cualquier orden que lo contenga, y la
+corrida que lo midió fue exactamente eso — una verja encadenada que se pasó de su límite y hubo
+que partirla. Es la misma familia que la pasada de mutación que no cabía: **no es un fallo de lo
+que se mide, es un fallo de acotar lo que mide**.
+
+Y trae su propia lección de lectura: aquella corrida imprimió `94 passed` y
+`ELIFECYCLE ... exit code 1`, y el encadenamiento de cuatro órdenes en un comando **escondió el
+código de salida** — la regla de leer la verja por su exit code, incumplida por quien la había
+escrito ese mismo día. La partición correcta son dos órdenes: `typecheck`+`test`, y
+`build`+`test:e2e`.
+
+Quien lo cierre necesita dos cosas: una cota explícita por caso en los tests que tocan la base
+—de modo que un arranque en frío falle **rápido** y diga que la base no estaba lista, en vez de
+colgarse— y una espera de preparación al principio de la suite, que es lo que de verdad hacía
+falta aquí.
+
+## 72 — Tres guardas con enunciado universal, y once formas medidas que lo desmienten (2026-09-20)
+
+Las tres hacen una afirmación sobre **todo** lo que el lenguaje admite, y ninguna la sostiene.
+Medido por la revisión con bancos que corren el código de cada guarda:
+
+**El barrido de prosa de F9** —«ningún documento afirma lo retirado»— deja pasar tres de cuatro
+reintroducciones inyectadas en el párrafo real: una pegada a la negación que el propio párrafo ya
+contiene (su ventana de 60 caracteres absuelve por construcción), un `pkey` suelto que ningún
+patrón nombra, y cualquier cosa escrita **debajo** del `*/`, donde el barrido ya no llega.
+
+**El lector AST del origen de la fila** —«el drenado no construye la fila que manda»— cambió un
+falso positivo por **cuatro falsos negativos** al desactivar `INVENTA` tras el salto:
+`Object.assign`, `structuredClone`, un ternario y un elemento de array, los cuatro con un uuid
+nuevo dentro, los cuatro invisibles hoy y los cuatro cazados antes.
+
+**El salto por `ref.current`** de la guarda de borrado físico entra en ámbitos anidados y se queda
+con la última declaración del documento, así que un `useRef(new Map())` en una función que no
+tiene nada que ver exime un `.delete()` peligroso de otra. El mismo fichero ya tiene un resolvedor
+con la disciplina correcta —no entra en anidados, cuenta, y devuelve ambiguo con más de uno— y el
+salto nuevo no heredó ninguna de las dos.
+
+**Y la conclusión es la del perímetro, no la de perseguir cobertura.** Este ciclo lleva cuatro
+instrumentos sobre la misma pregunta, cada uno mejor que el anterior y los cuatro cortos, y tres
+vueltas gastadas en eso. Lo que funcionó con R2 no fue cerrar formas: fue **escribir el límite** —
+qué cuenta como prueba suficiente y qué queda fuera— y apoyarlo en algo finito. Así que lo que
+hay que hacer con estas tres **no es cerrar las once formas**: es darle a cada una su límite
+escrito, y elegir para cada una el «perímetro» que la hace suficiente:
+
+- F9: su alcance es **tres ficheros nombrados y el párrafo entre el ancla y el `*/`**. Lo que
+  impide que importe lo de fuera es que las frases retiradas sólo pueden volver a donde estaban.
+- El AST: su alcance son **las formas donde la fila llega al envío como nombre o como acceso a
+  propiedad, con un salto de resolución**. Lo que responde por el resto es el comportamiento —
+  `unit/drenado.test.tsx` › «F3» compara las claves de dos pasadas y la fila de navegador «DoD F6»
+  caza la que F3 no puede ver.
+- El salto del borrado: su alcance es **una declaración, en el ámbito que gobierna el uso**, y con
+  más de una el veredicto es ambiguo y se marca. Eso ya está resuelto en el fichero; sólo hay que
+  reusarlo.
+
+Perseguir las once es el camino que ya costó tres vueltas. Acotar las tres es finito.
+
+## 73 — Lo que le queda a la pasada, medido y sin cerrar (2026-09-20)
+
+Forzado por la revisión sobre extracciones literales del script:
+
+- **El suelo no discrimina.** Exige 250 casos y un solo fichero de la suite ya da 261, así que
+  encoger `$SUITE` sigue pasando. Y el número de ficheros esperado se **deriva de `$SUITE`**, o sea
+  que esa comparación es tautológica. Lo que haría falta es un mínimo por fichero, o declarar la
+  lista aparte.
+- **`na` y `sup` no invalidan.** Ocho anclas caducadas, u ocho guardas ausentes, y la pasada se
+  declara válida con `PASADA: OK`. El marcador además cuenta los `na` como «partes atacadas», que
+  es la misma aritmética que ya se corrigió para el control.
+- **La línea de cierre nombra su causa en 6 de 7.** Falta la rama de «suite roja tras restaurar»,
+  que es justo la que el mensaje viejo sí nombraba.
+- **La ronda de navegador no tiene testigo medido**: su `<- DoD F6` es un literal, mientras la de
+  unidad lo saca de una corrida. Un playwright que no arranque sale ≠0 tres veces y se lee
+  `cazada (3/3)` igual. Y `grep -c timeout pasada.sh` = **0**: ninguna corrida propia está acotada,
+  que es lo que volvió inexplicable una muerte en el techo.
+
+## 74 — Dos registros que nada vigila (2026-09-20)
+
+El **requisito 5 de la iteración 2** —los cinco registros falsos corregidos— **no tiene fila en su
+tabla de DoD**, y sus correcciones son prosa de `docs/spec.md`, que el barrido de F9 excluye a
+propósito. O sea: cinco correcciones sin nada que las mire. Es literalmente el defecto que la
+iteración 1 narra —«la fila F5 desapareció sin declararse»— repetido dentro de su propio arreglo.
+
+Y **no hay lista de DoD para la iteración 2 ni para el trabajo posterior**: el fichero llega hasta
+la iteración 1. `unit/checkpoint.test.ts` compara recuentos de ficheros de prueba, y como no se
+añadió ninguno, la ausencia no pone nada rojo.

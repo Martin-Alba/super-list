@@ -49,8 +49,11 @@ items_nombre_unico UNIQUE, btree (group_id, translate(lower(btrim(name)), …)) 
 items_pkey         PRIMARY KEY, btree (id)
 ```
 
-**Parcial el de nombre; no parcial el de la clave primaria.** Eso es lo que decide la forma del
-arreglo, y no estaba medido en la deuda.
+**Parcial el de nombre.** Eso es lo que decide la forma del arreglo, y no estaba medido en la
+deuda. *(La primera redacción de esta línea apuntaba a la clave primaria como mecanismo; al
+construir se midió que el cliente **no puede escribirla** —privilegio por columna, `42501`— y la
+clave acabó en su propia columna, `origen_id`, con `items_origen_unico` no parcial. Corregido en la
+iteración 2, que encontró esta afirmación viva.)*
 
 ### 0.3 Hay un tercer consumidor del mismo booleano, y no está en ninguna de las dos deudas
 
@@ -70,8 +73,10 @@ justamente para no dejar nada detrás, y hoy no puede saber si lo consiguió.
 La deuda dice «honrar el booleano». Medido, hay algo mejor: **`Pendiente.id` ya es un
 `crypto.randomUUID()`** (`GroupView.tsx:389` y `app/sin-conexion/page.tsx:376`), y `addItem`
 (`lib/items.ts:67`) **no manda `id`**: deja el `gen_random_uuid()` del servidor. Si el envío
-lleva el id de la fila de la cola, un reenvío choca contra `items_pkey`, que **no es parcial**,
-y por tanto sigue chocando **después de que alguien tache el producto** — que es exactamente el
+lleva el id de la fila de la cola, un reenvío choca contra un índice único **no parcial** —al
+construir resultó ser `items_origen_unico` sobre `(group_id, origen_id)`, no `items_pkey`, porque
+el cliente no puede escribir la primaria— y por tanto sigue chocando **después de que alguien tache
+el producto** — que es exactamente el
 caso que el índice de nombre no puede cazar. Y el drenado ya trata ese código como hecho:
 `if (r.clase && r.code !== '23505') return`.
 
@@ -88,7 +93,7 @@ nada del `id`.
 
 | Mecanismo | ¿Cuándo tiene que volver a ocurrir? | Remedio |
 |---|---|---|
-| **M1** · un reenvío no puede crear fila nueva | **una vez por cada envío**, siempre, incluso el primero | el envío lleva el id de la fila; la clave primaria rechaza el repetido |
+| **M1** · un reenvío no puede crear fila nueva | **una vez por cada envío**, siempre, incluso el primero | el envío lleva el id de la fila; un índice único no parcial rechaza el repetido (al construir: `items_origen_unico`, no la primaria) |
 | **M2** · una baja que el almacén no confirmó no puede pasar por hecha | **una vez por cada intento de baja**, y cada consumidor necesita una respuesta distinta | el booleano se parte en tres estados y cada consumidor decide |
 
 **Dos respuestas distintas, y ninguno necesita al otro.** M1 cierra la resurrección sin tocar la
@@ -186,8 +191,8 @@ orden de llegada estrecha y no cierra, y por esta condición no vale.
 
 **Las dos frases son falsas en el caso que importa.** El índice de nombre es parcial, así que en
 cuanto alguien tacha el producto el reenvío **no** devuelve 23505: inserta. Y la clave de
-deduplicación no hay que inventarla ni ponerla «aquí»: la fila ya trae un uuid y la clave primaria
-ya existe. Es un documento que describe el mecanismo retirado, y es **el que haría que alguien
+deduplicación no hay que inventarla ni ponerla «aquí»: la fila ya trae un uuid. *(Y no va en la
+clave primaria, como decía esta línea: el cliente no puede escribirla.)* Es un documento que describe el mecanismo retirado, y es **el que haría que alguien
 revirtiera F** leyéndolo de buena fe. Corregirlo es requisito, no cortesía.
 
 ## Requisitos
@@ -283,11 +288,12 @@ entonces el requisito estaría verde por el mecanismo equivocado.
 
 ## Bordes
 
-- **Un id repetido de otro grupo.** `items_pkey` es global, así que un reenvío cuyo id ya exista
-  en **otro** grupo daría 23505 y el drenado lo daría por hecho sin haber insertado nada. Con
-  uuid v4 la probabilidad es despreciable, pero la consecuencia es silenciosa, y eso pide
-  decisión escrita: o se acepta por nombre, o el drenado comprueba que la fila que ya existe es
-  suya. **Sin decidir — está en la lista de abajo.**
+- **~~Un id repetido de otro grupo.~~ Este borde NO existe**, y decirlo importa porque la
+  §Decisión 2 pedía tu mano sobre un peligro inexistente. Al medir los privilegios la clave acabó
+  en `(group_id, origen_id)`, acotada al grupo, así que la misma clave en otro grupo entra sin
+  chocar — y lo prueba `unit/duplicados.test.ts` › «F1bis». Lo que **sí** queda sin decidir es su
+  hermano: un `origen_id` repetido **dentro del mismo grupo**, donde el drenado da el 23505 por
+  hecho sin haber insertado nada. Reenunciado así en la iteración 2.
 - **Un cliente eligiendo ids a propósito.** Puede aprender que un uuid existe provocando un
   23505. Para saberlo tiene que conocer el uuid, que él mismo generó. Se acepta y se nombra.
 - **La fila de la cola nace en dos pantallas** (`GroupView` y la cáscara) y las dos ya usan
@@ -369,7 +375,9 @@ y el reenvío es la resurrección. F sola es completa y segura. G sola **empeora
   `group_id` y `created_by` se siguen derivando, y la política los sigue exigiendo. Nombrado
   arriba porque es la regla que un revisor tiene que ver discutida, no dada por buena.
 - **§D.2 sin condiciones de carrera** — F pone el invariante en la base
-  (`INSERT` contra clave primaria) en vez de en memoria del proceso, que es lo que §D.2 pide.
+  (`INSERT` contra un índice único de la base) en vez de en memoria del proceso, que es lo que
+  §D.2 pide. **No contra la clave primaria**: ésta es la afirmación de la puerta de constitución, o
+  sea la que un revisor lee primero, y estuvo mal una iteración entera.
 - **§D.4 efectos idempotentes** — F es exactamente esto: «clave estable o constraint única».
 - **§A.1 un grupo es un límite de datos** — G4/G5 tocan lo que sobrevive a una salida. Ninguna
   de las dos specs afloja RLS ni añade un camino de lectura.
@@ -473,4 +481,127 @@ repetido **dentro del mismo grupo**, que es la §Decisión 2 que sigue sin conte
 NFC/NFD, que va al fichero de deuda y **no** se arregla sólo en el cliente, porque eso crearía la
 divergencia que hoy no existe.
 
-<!-- ACTIVE: F-iter1 -->
+---
+
+## Iteración 2 — la excusa, la guarda que no puede fallar, y una regresión que introduje
+
+Origen: revisión de la iteración 1. Entran los dos HIGH y la regresión de usabilidad que nadie
+había declarado. **Y entra un patrón que ya lleva dos vueltas seguidas**, escrito aquí porque es
+la causa común de los dos HIGH:
+
+> Las dos veces afirmé algo sobre **mi propia evidencia** sin medirlo: «rojo antes: sí» cuando el
+> barrido daba 0 ocurrencias, y «el arnés no compone hoy este caso» cuando lo compone en la línea
+> 1720 del fichero que esa misma lista cita para otra fila. Una afirmación sobre la evidencia es
+> una afirmación, y va medida como cualquier otra.
+
+### Requisitos
+
+1. **La guarda que impide volver a atribuir la idempotencia a la clave primaria tiene que poder
+   cazarlo.** Hoy no puede: medido, su regex da `False` contra el texto viejo —el que existe para
+   condenar— y `False` si se cambia una palabra. Es el defecto del punto que corta la ventana,
+   repetido dentro de su propio arreglo. La propiedad pasa a ser **positiva y literal** —el
+   párrafo contiene la frase correcta *y* el nombre del mecanismo— y llega con **sondas que deben
+   ser cazadas**: la frase histórica, la de una palabra cambiada, `items_pkey` y «la PK».
+2. **i1-4 deja de ser UNCOVERED, porque la excusa es falsa.** El caso se escribe en
+   `unit/drenado.test.tsx`, que ya compone `encolar → 'rechazado'` con `addItem → 'servidor'`. Y
+   el mutante que la pasada etiquetaba «debe SOBREVIVIR» pasa a ser una captura.
+3. **La clave heredada no puede convertir un alta legítima en un callejón.** Regresión que
+   introduje y que nadie declaró: si el intento anterior **sí** llegó al servidor y alguien tachó
+   el producto, el reintento hereda la clave, choca con el índice de origen —que no es parcial— y
+   el usuario lee «ya está en la lista» sobre algo que no está, sin ficha que enfocar y sin salida
+   salvo renombrar. Antes del cambio ese re-apunte **funcionaba**, porque el índice de nombre sí
+   es parcial. Mecanismo: **un reintento acotado con clave nueva** cuando el 23505 llega sobre una
+   clave heredada. No se olfatea el texto del error —lo prohíbe la constitución—: el cliente sabe
+   si heredó, y con eso basta.
+4. **La clave no sobrevive a su intención, y hay una por producto.** Hoy no se limpia en el camino
+   `'servidor'` + encolado con éxito, y la casilla es única: intercalar otro producto que falle
+   pierde la del primero. Las dos medidas rojas por la revisión.
+5. **Los registros falsos, corregidos**: la columna «rojo antes» de i1-3, que era falsa; las
+   cuatro afirmaciones **vivas** de `docs/spec.md` que siguen atribuyendo el invariante a la
+   primaria —incluida la puerta de constitución—; el borde «un id repetido de otro grupo», que con
+   `(group_id, origen_id)` **no existe**; el marcador de la pasada, que cuenta la NEUTRA como parte
+   atacada; y la cita de F4, que se apoya en un caso que sólo afirma la ausencia de aviso.
+6. **El falso positivo nuevo de la guarda del AST**: `const p = siguienteEnCola(cola, group.id,
+   Date.now())` se marca como fila fabricada porque `INVENTA` se aplica al texto entero del
+   inicializador. Es la clase que su propio docstring declara peligrosa.
+7. **La ronda de navegador de la pasada repite como la de unidad**, comprueba el `$?` de sus dos
+   `pnpm build`, y cualquier salida ≠ 0 del sembrador cuenta como «no aplica» y no como
+   superviviente.
+
+### Definición de hecho
+
+| # | Comprobación | Capa | Por qué no puede estar verde antes |
+|---|---|---|---|
+| i2-1 | La guarda caza las cuatro reintroducciones medidas | barrido | hoy no caza ninguna, ni el texto viejo |
+| i2-2 | Reiniciado el gesto tras `'rechazado'`, el segundo intento lleva la misma clave | la vista | hoy no lo mira nada, y el mutante sobrevive |
+| i2-3 | Con la clave heredada chocando, el producto **entra** y el usuario no lee «ya está en la lista» | la vista | hoy lee eso y no tiene salida |
+| i2-4 | La clave se olvida al encolarse con éxito, y dos productos fallidos conservan la suya | la vista | hoy sobrevive y la casilla es única |
+| i2-5 | El falso positivo de `Date.now()` en el inicializador no se marca | el módulo | hoy se marca |
+| i2-6 | La ronda de navegador fija veredicto por repetición | la pasada | hoy es muestra de 1 |
+
+### Fuera, por nombre
+
+El paso de CI o de despliegue · la §Decisión 2 reenunciada —el `origen_id` repetido **dentro del
+mismo grupo**— · el registro de `supabase_migrations`, que es de entorno · la sonda de §E.2 para
+las dos filas de catálogo, que va a deuda.
+
+---
+
+## Spec G2 — `devolver` hace dos trabajos con calendarios distintos · **SIN SELLAR**
+
+Sale del ciclo de la Spec F, y sale **medida**: el reintento acotado se congeló tras dos vueltas
+en las que cada arreglo abría el agujero de al lado. La revisión localizó la causa un nivel más
+abajo de donde yo la había puesto — no está en la rama del `23505`, está en `devolver()`.
+
+### La pregunta, hecha antes de escribir el requisito
+
+*¿Qué tendría que pasar para que `devolver()` se separe en dos y el fallo ocurra igual?* **Tres
+respuestas construidas, y las tres son cosas que este ciclo ya hizo sin haberse hecho la
+pregunta.** Ésa es la razón de que la spec empiece aquí y no por el requisito.
+
+1. **Se separa en dos funciones y la fusión se muda al sitio de llamada.** Partir el nombre no
+   parte la decisión: si el llamador sigue llamando a «recuerda la clave» en una rama donde el
+   servidor **probó** que no hay fila —porque en esa rama también quiere el texto de vuelta—, el
+   defecto es el mismo con dos nombres. Medido hoy: la clave se recuerda tras `42501` y tras
+   `23505`, y el bloque del reintento dispara sobre una clave que el servidor rechazó.
+   → El corte no es por función: es **por quién decide**. Recordar tiene que derivarse de la
+   **clase del resultado**, no elegirse en la rama.
+2. **Se separa bien y la clave sigue viviendo más que su intención.** «Recordar sólo cuando el
+   resultado es desconocido» no dice nada de cuándo muere. Medido: tres gestos seguidos dan seis
+   envíos y **cuatro claves distintas**, porque la salida no feliz del reintento vuelve a sembrar
+   el mapa. → La spec tiene que decir **cómo muere la clave**, no sólo cuándo nace.
+3. **Se separa bien, la clave muere bien, y el reintento sigue disparando en el duplicado de todos
+   los días.** `23505` no dice qué índice chocó y el cliente no puede preguntarlo. → Entonces el
+   disparador no puede ser «23505 + heredada»: tiene que ser «el resultado anterior es desconocido
+   **y** el producto no está vivo», y «no está vivo» **exige una lectura** — precisamente la
+   relectura de R7 que el código actual se salta al volver antes de ella.
+
+**La tercera es la que cambia el diseño:** el mecanismo necesita *leer*, no *adivinar*. Y por eso
+esta spec no puede escribirse como un ajuste de la rama.
+
+### Lo que hay que decidir, y no decido yo
+
+- **El coste de esa lectura.** R7 ya relee tras un `23505`; usarla antes de reintentar es
+  reordenar, no añadir. Pero con la red caída no hay lectura posible: ahí el mecanismo tiene que
+  elegir entre no reintentar (y dejar el callejón) o reintentar a ciegas (y arriesgar la fila
+  nueva). **Sin decidir.**
+- **Si `origen_id` debería poder leerse.** Con una lectura por clave de origen, «¿aterrizó mi
+  intento?» se contesta sin adivinar nada. Hoy el cliente tiene `SELECT` sobre la columna; lo que
+  no hay es un camino que la consulte. Eso es una superficie nueva, y es tuya.
+
+### La valla, por nombre de test
+
+`unit/drenado.test.tsx` › «i2-2: reintentado el mismo producto, el segundo envío lleva la misma
+clave» · › «i2-4: dos productos fallidos conservan cada uno su clave» · › «i2-4: la clave se olvida
+cuando el envío entra en el servidor» · › «i2-4: y la clave se olvida cuando el producto acabó
+encolado» · › «i2-3: con la clave heredada chocando, el producto entra con clave nueva» · › «i2-7:
+con clave heredada y el producto tachado, acaba una sola fila» · `unit/duplicado.test.tsx` ›
+«un duplicado no entra, no avisa, y lo dice».
+
+Las siete sostienen comportamiento que esta spec **puede** romper sin querer, y las siete existen
+hoy en esos ficheros.
+
+### Fuera, por nombre
+
+El índice, la columna y el privilegio —eso es la Spec F y está cerrado— · el drenado, que trata el
+`23505` como hecho y no acuña nada · las once formas de la deuda 72 · el paso de despliegue.

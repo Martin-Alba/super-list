@@ -100,6 +100,26 @@ function esColeccionSegura(nodo: ts.Expression | null, ctx: Contexto): boolean {
   }
   // AB2 — `url.searchParams`, `cookies()`, `req.headers`…
   if (ts.isPropertyAccessExpression(nodo) && ACCESORES_SEGUROS.has(nodo.name.text)) return true
+  /**
+   * Spec F / iteración 2 — **`ref.current` de un `useRef(new Map())`**, un salto.
+   *
+   * El receptor de un borrado puede ser la casilla de un ref, y hasta aquí eso no se podía
+   * demostrar inofensivo: `devueltas.current.delete(k)` salía marcado aunque `devueltas` sea
+   * `useRef(new Map())`, que es tan inofensivo como un `Map` declarado suelto — lo que importa es
+   * qué colección es, no dónde se guarda.
+   *
+   * Se atraviesa **un** salto y sólo por `.current`, y lo que se juzga es el argumento del
+   * `useRef`: un ref que no envuelva un `Set`/`Map` **sigue marcado**, y su sonda lo comprueba.
+   */
+  if (ts.isPropertyAccessExpression(nodo) && nodo.name.text === 'current'
+      && ts.isIdentifier(nodo.expression)) {
+    const ref = declaracionDe(nodo.expression)
+    if (ref && ts.isCallExpression(ref) && ts.isIdentifier(ref.expression)
+        && ref.expression.text === 'useRef') {
+      return esColeccionSegura(ref.arguments[0] ?? null, ctx)
+    }
+    return false
+  }
   if (ts.isCallExpression(nodo)) {
     const llamada = ts.isIdentifier(nodo.expression) ? nodo.expression.text : propiedad(nodo.expression)
     if (llamada && ACCESORES_SEGUROS.has(llamada)) return true
@@ -115,6 +135,23 @@ function esColeccionSegura(nodo: ts.Expression | null, ctx: Contexto): boolean {
    * que gobierna **este** uso.
    */
   return declaracionQueGobierna(nodo) === 'coleccion'
+}
+
+/** El inicializador que ata este nombre, subiendo por el ámbito. Un salto, para `ref.current`. */
+function declaracionDe(uso: ts.Identifier): ts.Expression | null {
+  for (let n: ts.Node | undefined = uso; n; n = n.parent) {
+    let hallado: ts.Expression | null = null
+    const ver = (m: ts.Node) => {
+      if (ts.isVariableDeclaration(m) && ts.isIdentifier(m.name) && m.name.text === uso.text
+          && m.initializer) hallado = m.initializer
+      ts.forEachChild(m, ver)
+    }
+    if (ts.isSourceFile(n) || ts.isBlock(n) || ts.isFunctionLike(n)) {
+      ver(n)
+      if (hallado) return hallado
+    }
+  }
+  return null
 }
 
 type Clase = 'coleccion' | 'otra' | 'ambigua' | 'ninguna'

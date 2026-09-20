@@ -1411,6 +1411,11 @@ describe('Spec F / R6 · el envío del drenado manda la fila que leyó', () => {
     const fabricado = (n: ts.Node, salto = true): boolean => {
       const x = desnudo(n)
       if (ts.isObjectLiteralExpression(x)) return true
+      // i2-R6 — `INVENTA` sólo sobre el **argumento** y sobre literales de objeto, nunca sobre el
+      // texto entero de un inicializador: `const p = siguienteEnCola(cola, g, Date.now())` es la
+      // forma legítima de leer la cola con el reloj en línea, y la versión anterior la marcaba.
+      // Acusar a lo legítimo es la clase que el docstring de arriba declara peligrosa.
+      if (!salto && !ts.isObjectLiteralExpression(x)) return false
       if (INVENTA.test(x.getText())) return true
       if (salto && ts.isIdentifier(x)) {
         const d = declaraciones.get(x.text)
@@ -1469,6 +1474,22 @@ describe('Spec F / R6 · el envío del drenado manda la fila que leyó', () => {
       expect(DEL_DRENADO(sembrado).filter(e => e.fabricada).length, `${nombre}: pasó inadvertida`)
         .toBeGreaterThan(0)
     }
+  })
+
+  /**
+   * Iteración 2 · i2-5 — El falso positivo que el arreglo de la iteración 1 introdujo: `INVENTA`
+   * se aplicaba al **texto entero** del inicializador tras el salto, así que la forma legítima de
+   * leer la cola con el reloj en línea quedaba acusada de fabricar la fila. Es la clase que el
+   * docstring de arriba declara peligrosa — una guarda que acusa a lo legítimo se relaja sola.
+   */
+  it('F7: la negativa — leer la cola con el reloj en línea no es fabricar la fila', () => {
+    const sembrado = `const drenarUnaVez = async () => {
+      const p = siguienteEnCola(cola, group.id, Date.now())
+      const r = await addItem(c, g, u, p)
+    }
+    const drenar = () => {}`
+    expect(DEL_DRENADO(sembrado).filter(e => e.fabricada),
+      'marca como fabricada la forma legítima de leer la cola').toEqual([])
   })
 
   it('F7: las negativas — los cinco adornos de la fila leída no se marcan', () => {
@@ -1567,12 +1588,120 @@ describe('Spec F / R5 · ningún documento afirma lo que F desmiente', () => {
    * Un barrido de ausencias está verde también cuando el párrafo entero desaparece, o cuando
    * nombra un mecanismo que no es. Esta fila se pone roja en los dos casos.
    */
-  it('F9: el fichero nombra el mecanismo que de verdad rechaza, y no la clave primaria', () => {
-    const real = readFileSync('app/g/[id]/GroupView.tsx', 'utf8')
-    expect(real, 'el drenado no nombra `items_origen_unico`: quien lo lea no sabrá qué rechaza')
-      .toContain('items_origen_unico')
-    expect(/idempotencia[^.]{0,120}\bclave\s+\n?\s*\*?\s*primaria\b/i.test(real),
-      'vuelve a atribuir la idempotencia a la clave primaria, que el cliente no puede escribir')
-      .toBe(false)
+  /**
+   * Iteración 2 · i2-R1 — **Esta fila no podía fallar, y es el mismo defecto que la lista de la
+   * iteración 1 narra un párrafo antes.** Su regex era
+   * `/idempotencia[^.]{0,120}…primaria/`, y medido: da `False` contra el fichero **anterior al
+   * arreglo** —el texto que existe para condenar— porque el punto de «la pone la base.» corta la
+   * ventana, y `False` también si se cambia una palabra (`tampoco`→`también`, que reintroduce la
+   * afirmación falsa). Una guarda de ausencia escrita con la misma trampa que acababa de
+   * documentar.
+   *
+   * La propiedad pasa a ser **positiva y literal**: el párrafo dice la frase correcta y nombra el
+   * mecanismo. Y llega con las cuatro reintroducciones medidas como sondas que **deben** caer.
+   */
+  /**
+   * Iteración 3 · i3-R1 — **La versión anterior de esta sonda era una tautología.** Interpolaba
+   * una frase de la lista en un texto y comprobaba que *alguna* frase de la lista estaba en el
+   * texto: verdad por construcción. Medido: sustituyendo las cuatro frases por
+   * `'zzz-frase-que-no-existe-jamas'`, las seis filas de F9 seguían **verdes** — los dientes de la
+   * guarda se podían cambiar por basura sin que nada se enterara.
+   *
+   * Tres cambios: el juicio se factoriza en una función que las filas comparten; la ventana llega
+   * al final del comentario en vez de a 800 caracteres contados a mano —medido: el párrafo son
+   * 1.109 y se quedaban 309 fuera, donde `items_pkey` se podía afirmar entero—; y la lista lleva
+   * su propia prueba de dientes contra el **texto histórico que de verdad estuvo en el fichero**,
+   * así que una lista de basura pone roja esa fila.
+   */
+  const AFIRMA_LA_PRIMARIA = [
+    'por el índice único de nombre normalizado, y eso es éxito',
+    'Y por la clave primaria',
+    'Y también por la clave',
+    'la pone `items_pkey`',
+    'la pone la PK',
+  ]
+  /** El texto que estuvo en `GroupView.tsx` hasta la iteración 2, palabra por palabra. */
+  const HISTORICO = 'La idempotencia no la pone este bucle: la pone la base. Y por la clave '
+    + 'primaria, no por el índice de nombre: `items_nombre_unico` es parcial.'
+
+  /** El párrafo: del ancla al cierre del comentario, no a un número contado a mano. */
+  const PARRAFO = (texto: string) => {
+    const i = texto.indexOf('La idempotencia no la pone este bucle')
+    if (i < 0) return ''
+    const fin = texto.indexOf('*/', i)
+    return texto.slice(i, fin < 0 ? texto.length : fin)
+  }
+
+  /**
+   * El juicio, en un solo sitio para que la fila y sus sondas midan lo mismo. Devuelve los
+   * problemas encontrados; vacío es limpio.
+   */
+  const juzga = (texto: string, lista: string[] = AFIRMA_LA_PRIMARIA): string[] => {
+    const parrafo = PARRAFO(texto)
+    if (!parrafo) return ['el párrafo no está: quien lea el drenado no sabrá qué rechaza']
+    const mal = lista.filter(f => parrafo.includes(f))
+      .map(f => `afirma lo retirado: «${f}»`)
+    if (!parrafo.includes('items_origen_unico')) mal.push('no nombra `items_origen_unico`')
+    // Y la forma que las cuatro literales no cubren: nombrar la primaria sin negarla al lado.
+    for (const m of parrafo.matchAll(/primaria|items_pkey|\bPK\b|primary\s+key/gi)) {
+      const antes = parrafo.slice(Math.max(0, m.index - 60), m.index)
+      if (!/tampoco|no es|no la pone|no por|no puede/i.test(antes))
+        mal.push(`nombra la primaria sin negarla: «…${antes.slice(-30)}${m[0]}»`)
+    }
+    return mal
+  }
+
+  it('F9: el párrafo dice la frase correcta y nombra el mecanismo que de verdad rechaza', () => {
+    expect(juzga(readFileSync('app/g/[id]/GroupView.tsx', 'utf8')),
+      'el drenado vuelve a atribuir la idempotencia a la primaria, o dejó de nombrar el mecanismo')
+      .toEqual([])
   })
+
+  /**
+   * Iteración 4 · **esta fila no podía fallar por su causa, y era la que existía para probar que
+   * las otras sí pueden.** Medido: con `AFIRMA_LA_PRIMARIA = []` las ocho filas de F9 seguían
+   * verdes. Pasaba por un tercer motivo que su nombre no mencionaba — `HISTORICO` no contiene
+   * `items_origen_unico`, así que `juzga` devolvía ese mensaje y `length > 0` se cumplía sin que la
+   * lista ni el regex intervinieran.
+   *
+   * Ahora mide **lo que la lista aporta**: que entre los problemas haya uno de la categoría «afirma
+   * lo retirado», y que **desaparezca si la lista se vacía**. Ésa es la propiedad que su nombre
+   * promete, y la segunda mitad es la que la hace capaz de ponerse roja.
+   */
+  const afirmaLoRetirado = (problemas: string[]) => problemas.filter(m => m.startsWith('afirma lo retirado'))
+
+  it('F9: la lista tiene dientes — caza el texto histórico que estuvo en el fichero', () => {
+    expect(afirmaLoRetirado(juzga(HISTORICO)),
+      'la lista no caza la frase que de verdad estuvo ahí: sus dientes son de adorno')
+      .not.toEqual([])
+  })
+
+  it('F9: y los dientes son de la lista — vaciarla los quita', () => {
+    expect(afirmaLoRetirado(juzga(HISTORICO, [])),
+      'los dientes no venían de la lista: la fila de arriba pasaría con la lista vacía').toEqual([])
+  })
+
+  it('F9: la sonda — las cinco reintroducciones, inyectadas en el párrafo real, se cazan', () => {
+    const real = readFileSync('app/g/[id]/GroupView.tsx', 'utf8')
+    for (const forma of AFIRMA_LA_PRIMARIA) {
+      const sembrado = real.replace('Y tampoco por la clave', `${forma}. Y tampoco por la clave`)
+      expect(juzga(sembrado).length, `«${forma}» pasó inadvertida en el párrafo real`).toBeGreaterThan(0)
+    }
+  })
+
+  it('F9: la sonda — y una quinta forma que la lista no enumera', () => {
+    const real = readFileSync('app/g/[id]/GroupView.tsx', 'utf8')
+    for (const forma of ['La rechaza la primary key de items.', 'Lo impone items_pkey.']) {
+      const sembrado = real.replace('Y tampoco por la clave', `${forma} Y tampoco por la clave`)
+      expect(juzga(sembrado).length, `«${forma}» pasó: la guarda sólo ve su propia lista`)
+        .toBeGreaterThan(0)
+    }
+  })
+
+  it('F9: la sonda — un párrafo sin el nombre del mecanismo se caza', () => {
+    const sembrado = 'La idempotencia no la pone este bucle: la pone la base, y tampoco la primaria. */'
+    expect(juzga(sembrado), 'un párrafo sin el mecanismo pasa por bueno')
+      .toContain('no nombra `items_origen_unico`')
+  })
+
 })

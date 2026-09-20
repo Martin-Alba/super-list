@@ -160,3 +160,26 @@ export const SQL_MAS_FORMAS: [string, string][] = [
   ['cuerpo de función como literal', "create function f() returns void as 'delete from public.items' language sql;"],
   ['merge', 'merge into public.items t using x on t.id = x.id when matched then delete;'],
 ]
+
+/**
+ * Spec F / iteración 2 — La sonda del salto por `ref.current`. La guarda atraviesa un `useRef`
+ * para demostrar inofensivo un `Map`; estas dos formas tienen que seguir marcadas, o el salto
+ * sería una puerta en vez de una resolución.
+ */
+export const REF_QUE_NO_ES_COLECCION = `
+const tienda = useRef(abrirAlmacen())
+export function limpiar(clave: string) {
+  tienda.current.delete(clave)
+}
+`
+export const REF_SIN_DECLARAR = `
+export function limpiar(clave: string) {
+  ajeno.current.delete(clave)
+}
+`
+export const REF_CON_MAP = `
+const devueltas = useRef(new Map<string, string>())
+export function olvidar(clave: string) {
+  devueltas.current.delete(clave)
+}
+`

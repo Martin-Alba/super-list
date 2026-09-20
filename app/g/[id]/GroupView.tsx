@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation'
 import { useSinRed } from '@/lib/useSinRed'
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
-import { activeItems, addItem, mergeItems, mismoProducto, softDeleteItem, updateItem,
+import { activeItems, addItem, mergeItems, mismoProducto, normNombre, softDeleteItem, updateItem,
   type FilaAEnviar, type Item } from '@/lib/items'
 import { caducados, EN_COLA, ESCRIBE_NOMBRE, esperasDeReintento, GONE, LISTA_EN_VIVO, mensajeDe,
   PENDIENTE, refinarSinRed, refinarSinSesion, RELECTURA, SIN_ALMACEN, SIN_CONEXION_LISTA, SIN_RED,
@@ -723,11 +723,23 @@ export function GroupView({
    *
    * Es la misma clase que F6 encontró —una intención con dos claves—, por el tercer camino.
    */
-  const claveDevuelta = useRef<FilaAEnviar | null>(null)
+  /**
+   * Iteración 2 · i2-R4 — **Una casilla por producto, no una sola.** Con una sola, apuntar un
+   * segundo producto que también falla pisaba la clave del primero, y el reintento del primero
+   * acuñaba otra: la clase «una intención, dos claves» seguía abierta por ahí. Medido por la
+   * revisión y reproducido en `unit/drenado.test.tsx` › «i2-4: dos productos fallidos conservan
+   * cada uno su clave».
+   *
+   * Indexado por `normNombre`, que es la misma pregunta que decide el duplicado: si dos escrituras
+   * son el mismo producto para la base, son el mismo producto para esto.
+   */
+  const devueltas = useRef(new Map<string, FilaAEnviar>())
+  const claveDe = (nombre: string) => devueltas.current.get(normNombre(nombre))
+  const olvidarClave = (nombre: string) => { devueltas.current.delete(normNombre(nombre)) }
   const devolver = (fila: FilaAEnviar, desde: number) => {
     // Se recuerda pase lo que pase con el campo: que el usuario haya tecleado otra cosa no
     // borra el hecho de que el servidor pueda tener la fila bajo esta clave.
-    claveDevuelta.current = fila
+    devueltas.current.set(normNombre(fila.nombre), fila)
     if (tecleado.current !== desde) return
     setName(fila.nombre); setQuantity(fila.cantidad ?? '')
   }
@@ -1093,11 +1105,13 @@ export function GroupView({
      * es el defecto que F6 midió.
      */
     const cantidadAhora = quantity.trim() || null
-    // i1-R4 — Si este gesto reintenta el producto que acaba de volver, hereda su clave: el
-    // servidor puede tener la fila bajo ella. `mismoProducto` y no igualdad de cadenas, para que
-    // cambiar una mayúscula al reescribir no acuñe una clave nueva.
-    const devuelta = claveDevuelta.current
-    const fila: FilaAEnviar = devuelta && mismoProducto(devuelta.nombre, trimmed)
+    // i1-R4 / i2-R4 — Si este gesto reintenta un producto cuya clave volvió, la hereda: el
+    // servidor puede tener la fila bajo ella. La casilla es **por producto** e indexada por
+    // `normNombre`, que es la misma pregunta que decide el duplicado en la base — así que cambiar
+    // una mayúscula al reescribir no acuña clave nueva, y apuntar otro producto que también falle
+    // no pisa esta.
+    const devuelta = claveDe(trimmed)
+    const fila: FilaAEnviar = devuelta
       ? { id: devuelta.id, nombre: trimmed, cantidad: cantidadAhora }
       : { id: crypto.randomUUID(), nombre: trimmed, cantidad: cantidadAhora }
     if (sinRed) {
@@ -1114,7 +1128,7 @@ export function GroupView({
       try {
         const r = await meterEnCola(fila, desde)
         if (!r.ok) return
-        claveDevuelta.current = null
+        olvidarClave(trimmed)
         limpiarAviso()
         /**
          * Spec B / iteración 4 · i4-R1 — **Después de `limpiarAviso()`, no antes.**
@@ -1146,7 +1160,7 @@ export function GroupView({
     setName(''); setQuantity(''); setBusy(true)
     try {
       const { clase, code } = await addItem(createClient(), group.id, me.id, fila)
-      if (!clase) claveDevuelta.current = null
+      if (!clase) olvidarClave(trimmed)
       if (clase) {
         /**
          * N1 — Deuda 34. `clasificar` devuelve `servidor` exactamente cuando el
@@ -1176,7 +1190,11 @@ export function GroupView({
            * Anunciarlo taparía `EN_COLA`: `apertura` es `una-vez` y `cola` es
            * `nivel`, y lo de una vez gana.
            */
+          // i2-R4 — También aquí: si el producto acabó en la cola, su clave ya vive en disco y
+          // esta casilla no tiene nada que recordar. Faltaba, y una clave que sobrevive a su
+          // intención es estado mutable de proceso aplicable a un alta que no tiene que ver.
           if (!(await meterEnCola(fila, desde)).ok) return
+          olvidarClave(trimmed)
           /**
            * N4 — El aviso se pinta directo, sin `avisar`. `avisar` lanza además
            * un `reintentar` de **carga**, y con `reintentarEnvio` ya en marcha
@@ -1204,6 +1222,31 @@ export function GroupView({
            */
           despachar({ tipo: 'avisar', origen: 'cola', texto: EN_COLA, clase: 'servidor' })
           void reintentarEnvio(++envio.current)
+          return
+        }
+        /**
+         * Iteración 2 · i2-R3 — **La clave heredada no puede convertir un alta legítima en un
+         * callejón.** Si el intento anterior sí llegó al servidor y alguien tachó el producto, el
+         * reintento hereda la clave, choca contra `items_origen_unico` —que no es parcial— y el
+         * usuario leería «ya está en la lista» sobre algo que no está, sin ficha que enfocar y sin
+         * salida salvo renombrar. Antes de la Spec F ese re-apunte funcionaba, porque el índice de
+         * nombre sí es parcial: era una regresión que introduje y que nadie había declarado.
+         *
+         * **Un** reintento, con clave nueva, y sólo cuando la clave era heredada: un 23505 sobre
+         * una clave que este gesto acuñó es un duplicado de nombre de verdad. No se olfatea el
+         * texto del error —la constitución lo prohíbe— porque no hace falta: el cliente sabe si
+         * heredó.
+         */
+        if (code === '23505' && devuelta) {
+          olvidarClave(trimmed)
+          const otra = { id: crypto.randomUUID(), nombre: trimmed, cantidad: cantidadAhora }
+          const r2 = await addItem(createClient(), group.id, me.id, otra)
+          if (!r2.clase) {
+            if (r2.data) setItems(prev => mergeItems([r2.data as Item], prev))
+            setBusy(false)
+            return
+          }
+          devolver(otra, desde); void avisar(r2.clase, r2.code); setBusy(false)
           return
         }
         devolver(fila, desde)

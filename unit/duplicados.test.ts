@@ -3,7 +3,9 @@ import { borradosEnSql } from './borradoFisico'
 import {
   SQL_QUE_BORRA, SQL_CON_CTE, SQL_CON_CTE_ANIDADA, SQL_CON_DOS_CTE, SQL_DINAMICO,
   SQL_CTE_CON_COLUMNAS, SQL_BUCLE_PLPGSQL, SQL_IF_PLPGSQL, SQL_EXECUTE_VARIABLE, SQL_MAS_FORMAS,
+  REF_QUE_NO_ES_COLECCION, REF_SIN_DECLARAR, REF_CON_MAP,
 } from './muestras/borrados'
+import { borradosFisicos } from './borradoFisico'
 import { readFileSync } from 'node:fs'
 import { sql, pool, newUser, newGroup } from './helpers'
 import { addItem } from '@/lib/items'
@@ -203,5 +205,26 @@ describe('R7 la migración es idempotente y no borra en duro', () => {
           'aaaaaeeeeiiiiooooouuuucAAAAAEEEEIIIIOOOOOUUUUC')
         from public.items where deleted_at is null group by 1,2 having count(*) > 1) x`)
     expect(filas[0].n).toBe('0')
+  })
+})
+
+/**
+ * Spec F / iteración 2 — **La sonda del salto por `ref.current`.** La guarda de borrado físico
+ * aprendió a atravesar un `useRef(new Map())`, porque una colección es igual de inofensiva dentro
+ * de un ref que fuera. Un salto que no se pueda cerrar sería una puerta, así que se comprueba en
+ * las dos direcciones.
+ */
+describe('Spec F / i2 · el salto por `ref.current` no es una puerta', () => {
+  it('un ref que envuelve un Map queda exento', () => {
+    expect(borradosFisicos(REF_CON_MAP, 'app/x.tsx', { activa: false }),
+      'un `Map` dentro de un ref se marca: la guarda acusa a lo inofensivo').toEqual([])
+  })
+  it('un ref que NO envuelve una colección sigue marcado', () => {
+    expect(borradosFisicos(REF_QUE_NO_ES_COLECCION, 'app/x.tsx', { activa: false }).length,
+      'el salto exime cualquier `ref.current`: sería una puerta').toBeGreaterThan(0)
+  })
+  it('y un ref que no se declara en el fichero también', () => {
+    expect(borradosFisicos(REF_SIN_DECLARAR, 'app/x.tsx', { activa: false }).length,
+      'sin declaración no se puede demostrar nada, y se dio por bueno').toBeGreaterThan(0)
   })
 })

@@ -1760,3 +1760,198 @@ describe('Spec F / F3 · el reenvío lleva la misma clave', () => {
       .toBe(1)
   })
 })
+
+/**
+ * Spec F / iteración 2 — **Los tres casos que la iteración 1 declaró imposibles de escribir.**
+ *
+ * Su lista decía que el arnés «no compone hoy» un `addItem` que falle con `servidor` y un
+ * `encolar` que devuelva `'rechazado'` en la misma pasada. Los compone **este mismo fichero**, en
+ * su caso «y un rechazo del disco sigue diciendo que no se pudo guardar». Era una excusa, no una
+ * medida, y la revisión la desmintió con el fichero delante.
+ */
+const apuntarEn = async (r: { getByTestId: (id: string) => HTMLElement }, nombre: string) => {
+  fireEvent.change(r.getByTestId('item-name'), { target: { value: nombre } })
+  await act(async () => { fireEvent.click(r.getByTestId('add-item')) })
+}
+
+describe('Spec F / iteración 2 · la clave sobrevive al gesto, y no más de lo debido', () => {
+  const fallaElGesto = () => {
+    // El servidor puede haber guardado la fila —`servidor` incluye un timeout después de
+    // confirmar— y el disco no acepta encolar: la clave no queda en ninguna parte salvo el ref.
+    addItem.mockResolvedValue({ data: null, clase: 'servidor', code: null })
+    encolar.mockResolvedValue('rechazado')
+  }
+  const apuntar = apuntarEn
+  const claves = () => addItem.mock.calls.map(c => (c[3] as { id: string }).id)
+
+  it('i2-2: reintentado el mismo producto, el segundo envío lleva la misma clave', async () => {
+    fallaElGesto()
+    const r = montar()
+    await apuntar(r, 'leche')
+    await apuntar(r, 'leche')
+    expect(claves().length, 'no hubo dos envíos: el caso no mide nada').toBe(2)
+    expect(new Set(claves()).size,
+      'el reintento acuñó otra clave: el servidor puede tener la fila bajo la primera')
+      .toBe(1)
+  })
+
+  it('i2-4: dos productos fallidos conservan cada uno su clave', async () => {
+    fallaElGesto()
+    const r = montar()
+    await apuntar(r, 'leche')
+    await apuntar(r, 'pan')
+    await apuntar(r, 'leche')
+    const [k1, , k3] = claves()
+    expect(claves().length, 'faltan envíos').toBe(3)
+    expect(k3, 'intercalar otro producto fallido perdió la clave del primero').toBe(k1)
+  })
+
+  /**
+   * Iteración 3 — **La parte que la pasada dejó viva.** El mutante «la clave no se olvida cuando
+   * el envío entra» sobrevivió: quitar `olvidarClave` en el camino del envío **aceptado** no ponía
+   * nada rojo. El caso de abajo cubre el camino de la **cola**, no el del servidor, y nadie miraba
+   * éste. Lo predijo la revisión y lo confirmó la pasada.
+   */
+  it('i2-4: la clave se olvida cuando el envío entra en el servidor', async () => {
+    addItem.mockResolvedValue({ data: null, clase: 'servidor', code: null })
+    encolar.mockResolvedValue('rechazado')
+    const r = montar()
+    await apuntarEn(r, 'leche')
+    const heredada = (addItem.mock.calls[0][3] as { id: string }).id
+
+    // Ahora entra de verdad: la clave queda resuelta y no debe heredarse nunca más.
+    addItem.mockResolvedValue({ data: fila('leche'), clase: null, code: null })
+    await apuntarEn(r, 'leche')
+    await apuntarEn(r, 'leche')
+
+    const ultima = (addItem.mock.calls.at(-1)![3] as { id: string }).id
+    expect(ultima, 'heredó una clave que el servidor ya aceptó: el alta siguiente choca sin motivo')
+      .not.toBe(heredada)
+  })
+
+  it('i2-4: y la clave se olvida cuando el producto acabó encolado', async () => {
+    addItem.mockResolvedValue({ data: null, clase: 'servidor', code: null })
+    encolar.mockResolvedValue('entro')
+    const r = montar()
+    await apuntar(r, 'leche')
+    await apuntar(r, 'leche')
+    expect(new Set(claves()).size,
+      'la clave sobrevivió a su intención: el producto ya estaba encolado bajo ella').toBe(2)
+  })
+
+  /**
+   * Iteración 2 · i2-3 — **La regresión que introduje, y que nadie había declarado.**
+   *
+   * El intento anterior llegó al servidor —`servidor` incluye un timeout después de confirmar— y
+   * alguien tachó el producto. El reintento hereda la clave y choca contra `items_origen_unico`,
+   * que NO es parcial. Sin arreglo, el usuario lee «ya está en la lista» sobre algo que no está,
+   * sin ficha que enfocar y sin salida salvo renombrar. Antes de la Spec F ese re-apunte
+   * funcionaba, porque el índice de nombre sí es parcial.
+   */
+  it('i2-3: con la clave heredada chocando, el producto entra con clave nueva', async () => {
+    addItem.mockResolvedValue({ data: null, clase: 'servidor', code: null })
+    encolar.mockResolvedValue('rechazado')
+    const r = montar()
+    await apuntarEn(r, 'leche')
+
+    // Segundo gesto: la clave heredada choca, y la nueva entra.
+    addItem.mockReset()
+    addItem.mockResolvedValueOnce({ data: null, clase: 'duplicado', code: '23505' })
+    addItem.mockResolvedValueOnce({ data: fila('leche'), clase: null, code: null })
+    await apuntarEn(r, 'leche')
+
+    expect(addItem.mock.calls.length, 'no reintentó con clave nueva: el alta queda en callejón').toBe(2)
+    const [k1, k2] = addItem.mock.calls.map(c => (c[3] as { id: string }).id)
+    expect(k2, 'el reintento repitió la clave que acababa de chocar').not.toBe(k1)
+    expect(r.queryByTestId('notice')?.textContent ?? '',
+      'dice «ya está en la lista» sobre algo que el usuario no puede ver').not.toMatch(/ya está en la lista/i)
+  })
+})
+
+/**
+ * Spec F / F4 — **La valla que no vigilaba.** La lista citaba `unit/notice-render.test.tsx`
+ * › «una mucacion que va bien no deja aviso» como la mitad de vista de F4, y ese caso sólo
+ * afirma que **no aparece un aviso**: una vista que no llamara a `addItem` en absoluto lo pone
+ * verde igual. Era un rótulo más débil que el anterior, no un arreglo. Esto es lo que F4 dice
+ * en su columna de capa: que el alta directa **manda la fila** y que el producto aparece.
+ *
+ * Es arreglo de una prueba que mentía, no de producto.
+ */
+describe('Spec F / F4 · el alta directa manda la fila, y se ve', () => {
+  it('F4 (vista): el envío lleva la fila con su clave y el producto se pinta', async () => {
+    addItem.mockResolvedValue({ data: fila('lentejas'), clase: null, code: null })
+    const r = montar()
+    await apuntarEn(r, 'lentejas')
+
+    expect(addItem, 'la vista no llamó al envío: el caso no vigilaba nada').toHaveBeenCalledTimes(1)
+    const enviada = addItem.mock.calls[0][3] as { id: string; nombre: string }
+    expect(enviada.nombre, 'mandó otro nombre que el teclado').toBe('lentejas')
+    expect(enviada.id, 'mandó la fila sin clave: la base no puede reconocer un reenvío')
+      .toMatch(/^[0-9a-f-]{36}$/)
+    // **Lo que este caso NO cubre, dicho aquí:** que el producto se pinte. Este arnés no renderiza
+    // filas vivas —la lista queda en «La lista está vacía.» aunque `setItems` reciba la fila—, así
+    // que afirmarlo aquí sería una aserción que no mide lo que dice. La mitad de pintado la cubre
+    // el navegador. Lo que esta fila sí vigila, y era lo que faltaba, es que **se llame al envío
+    // con la fila y su clave**: una vista que no llamara a `addItem` la pone roja.
+  })
+})
+
+/**
+ * Spec F / iteración 2 · i2-7 — **Que la solución nueva no reabra lo que la F vino a cerrar.**
+ *
+ * La clave del intento es un uuid y **no lleva el nombre**; lo que lleva el nombre es el índice
+ * del mapa de claves devueltas. La pregunta es si dos altas del MISMO producto dentro de la
+ * ventana pueden acabar en dos filas: las dos heredan la misma clave, la segunda choca, y el
+ * reintento de i2-R3 acuña una nueva — momento en el que la única red que queda es el índice de
+ * **nombre**, el que la Spec F declaró insuficiente por ser parcial.
+ *
+ * **Se afirma el resultado, no la secuencia de claves.** La primera versión de este caso
+ * comparaba la primera, la segunda y la tercera clave entre gestos, y resultó no ser
+ * interpretable: acoplaba la prueba a mi orden interno de llamadas, así que un fallo no distinguía
+ * «se reabrió el defecto» de «el reintento salió de otro sitio». Una prueba que no sabe qué
+ * significa su rojo no es una prueba.
+ */
+describe('Spec F / iteración 2 · dos altas del mismo producto en la ventana', () => {
+  it('i2-7: con clave heredada y el producto tachado, acaba una sola fila', async () => {
+    // Un fallo previo deja clave devuelta para «arroz».
+    addItem.mockResolvedValue({ data: null, clase: 'servidor', code: null })
+    encolar.mockResolvedValue('rechazado')
+    const r = montar()
+    await apuntarEn(r, 'arroz')
+
+    // La base responde como responde de verdad: la clave heredada choca —el producto está
+    // tachado—, la clave nueva entra, y cualquier envío posterior del mismo nombre choca contra
+    // esa fila viva. Es el índice de nombre haciendo de red, que es lo que hay que comprobar.
+    // La revisión midió que la versión anterior de este doble **capaba `vivas` a 1 por
+    // construcción** —`if (vivas > 0) return 23505` bloqueaba todo inserto posterior—, así que la
+    // aserción `toBe(1)` no podía observar el fallo que su mensaje nombra. Ahora el doble imita el
+    // índice de nombre de verdad: rechaza por NOMBRE cuando ya hay una fila viva con ese nombre, y
+    // rechaza por CLAVE cuando la clave ya se usó. Con eso, dos filas del mismo producto son
+    // alcanzables si el mecanismo falla, y la aserción puede ponerse roja por su motivo.
+    let vivas = 0
+    const nombresVivos = new Set<string>()
+    const clavesUsadas = new Set<string>()
+    addItem.mockImplementation(async (...a: unknown[]) => {
+      const f = a[3] as { id: string; nombre: string }
+      if (clavesUsadas.has(f.id)) return { data: null, clase: 'duplicado', code: '23505' }
+      if (nombresVivos.has(f.nombre)) return { data: null, clase: 'duplicado', code: '23505' }
+      clavesUsadas.add(f.id); nombresVivos.add(f.nombre); vivas++
+      return { data: fila(f.nombre), clase: null, code: null }
+    })
+    const heredada = (addItem.mock.calls[0][3] as { id: string }).id
+    const antes = addItem.mock.calls.length
+
+    await apuntarEn(r, 'arroz')
+    await apuntarEn(r, 'arroz')
+
+    // El escenario, fijado: el primer envío de estos dos gestos tiene que HEREDAR la clave del
+    // fallo. Sin esto el caso podría medir dos altas cualesquiera y pasar por el motivo
+    // equivocado, que es lo que la revisión encontró en su primera versión.
+    expect((addItem.mock.calls[antes][3] as { id: string }).id,
+      'el gesto no heredó la clave: este caso no es el que dice ser').toBe(heredada)
+    expect(vivas, 'la base aceptó más de una fila del mismo producto: la Spec F se reabre').toBe(1)
+    // La afirmación es sobre lo que **la base aceptó**, que es donde vive el invariante de la
+    // Spec F. El pintado no se afirma aquí: este arnés no renderiza filas vivas, y una aserción
+    // que no mide lo que dice es peor que ninguna.
+  })
+})

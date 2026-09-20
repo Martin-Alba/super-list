@@ -562,7 +562,9 @@ no todas las posibles. Perseguir formas dentro era infinito; afirmar el perímet
 ## La otra lección, ésta de la pasada
 
 Una pasada de mutación **muta ficheros del repositorio**, así que puede morir a media faena, y
-lo que deja es indistinguible de trabajo hecho. Pasó: un timeout ajeno la mató y dejó
+lo que deja es indistinguible de trabajo hecho. Pasó: la mató **el techo de diez minutos del
+comando que la lanzó** —no un timeout ajeno, como decía la primera redacción de esta línea: la
+pasada no cabía, y llamarlo «ajeno» escondía la causa— y dejó
 `lib/local.ts` mutado con un respaldo suelto — y como el mutante en vuelo era **el que no cambia
 comportamiento**, todas las puertas daban verde y la entrega habría pasado por buena. La regla
 está ahora en `build`: la comprobación del árbol es **dos**, una trampa a la salida y una
@@ -620,6 +622,114 @@ de ausencia **es él mismo una afirmación que necesita su sonda**. Escribí «e
 finito y se comprueba» y lo respaldé con una prueba que no podía fallar si el perímetro se
 encogía a cero. La regla de §E.3 —*decir en una línea qué cambio del producto pondría rojo este
 test*— es exactamente la que no apliqué a la fila que sellaba el ciclo.
+
+
+---
+
+# 2026-09-20 — El reenvío no crea fila nueva (Spec F, base + 3 iteraciones) y el ciclo que paró por su propia regla
+
+Octavo ciclo. Cierra el mecanismo y **para el bucle antes de cerrar el reintento**, que sale a su
+propia spec: tres vueltas seguidas lideradas por el sostén son la señal que `cycle` describe, y
+esta vez se leyó en vez de ignorarse.
+
+## Qué se construyó
+
+**La clave de deduplicación del envío, en su propia columna.** `items_nombre_unico` es parcial, así
+que un reenvío deja de chocar en cuanto alguien tacha el producto: inserta, y lo que el usuario
+quitó vuelve. El hueco es estructural —la baja local va después del `await`, con cota de 10 s— y
+por tanto **ningún booleano del cliente lo cierra**: un proceso muerto no honra nada. `origen_id`
+con índice único **no parcial** sobre `(group_id, origen_id)`, parcial sólo sobre la propia clave.
+
+**En su columna y no en `items.id`** porque la clave primaria es autoridad del servidor: el
+privilegio de INSERT es por columna y no la incluye. Lo dijo la base con un `42501` al construir, y
+mi comparación de formas había medido índices y migraciones **sin mirar los privilegios**.
+
+**Una clave por gesto de alta**, compartida por el envío inmediato y la entrada de la cola. Lo
+destapó una fila de navegador: el alta acuñaba un uuid para su envío y `meterEnCola` **otro** para
+la cola, así que en el caso exacto que esto cierra —el envío llega y su respuesta no vuelve— el
+reenvío llevaba una clave distinta de la guardada.
+
+## Los dos números, medidos en líneas y no por impresión
+
+Producto = `app/ lib/ supabase/` · sostén = `unit/ e2e/ docs/`. Contado con
+`git show --numstat` por commit:
+
+| Vuelta | Producto | Sostén | Proporción |
+|---|---|---|---|
+| Spec E, cierre (`cee461b`) | 126 | 1.369 | 1 : 10,9 |
+| Spec F, base (`3566406`+`1acf149`) | 94 | 800 | 1 : 8,5 |
+| Spec F, iteración 1 (`02bf4ac`+`a993807`) | 76 | 362 | 1 : 4,8 |
+| Spec F, iteraciones 2 y 3 | 53 | 671 | 1 : 12,7 |
+
+**Cuatro vueltas seguidas lideradas por el sostén, y las cuatro por un factor de entre 5 y 13.** En
+hallazgos, la Spec E fue 12 de producto contra 27 de sostén; las cuatro revisiones de la F
+devolvieron 14, 14, 20 y 12 mejoras, y la última **no tocó producto en absoluto**: su único cambio
+de producto estaba congelado.
+
+**Y el patrón dentro de eso, que es lo que decidió parar.** Tres vueltas seguidas con el mismo modo
+de fallo: una guarda que afirma tener dientes y no puede fallar. La sonda de F9 —tautología
+medida—, su arreglo, y el test que demostraba ese arreglo, verde con la lista vacía. Cada arreglo
+cambió un agujero por otros: el del AST quitó un falso positivo y metió **cuatro falsos negativos**
+medidos; el inventario arregló el total y **rompió la detección de la pérdida** que existía antes de
+partir la pasada. Eso es «cada arreglo destapa el de al lado», y significa que el bucle dejó de
+construir la spec.
+
+## Decisiones que conviene no volver a discutir
+
+- **El invariante va en la base, no en un booleano del cliente.** El hueco entre «el servidor tiene
+  la fila» y «la cola lo olvida» no se puede cerrar desde dentro del proceso que puede morir.
+- **La clave pertenece a la intención, no al intento.** Una clave por gesto, y muere cuando el
+  producto acaba en algún sitio —enviado o encolado—.
+- **El límite de un instrumento se escribe, no se persigue.** Es la lección de R2 en la Spec E,
+  reaprendida por las malas: cuatro instrumentos sobre la misma pregunta, cada uno mejor y los
+  cuatro cortos. La deuda 72 la aplica a las tres guardas que quedan.
+- **La pasada de mutación corre en primer plano y se parte para caber.** Desacoplarla no la hace
+  caber: le quita el único lector.
+
+## Terminal
+
+| | Antes del ciclo | Después |
+|---|---|---|
+| Casos unitarios | 1.684 | **1.721** |
+| Ficheros unitarios | 68 | 68 |
+| Casos de navegador | 92 | **95** |
+
+Medido el **2026-09-20** con la base local caliente y en dos órdenes, no en una.
+2026-09-20: `pnpm typecheck` 0 · `pnpm lint` 0 avisos · `pnpm test` 1.721 de 1.721.
+2026-09-20: `pnpm build` 0 con `.next` borrado · `pnpm test:e2e` 95 de 95.
+
+**Pasada de mutación, en dos partes y en primer plano.** Medido el 2026-09-20: diez mutaciones
+sobre 529 casos no caben en una orden de diez minutos, a 48 s por mutación. Cada parte con su base verde, su huella
+y **el control**, que corre en las dos. Con inventario declarado que compara **casos y no sumas**, y
+con su límite escrito: caza una parte perdida, añadida o reordenada, y **no** una edición doble
+coherente, porque una declaración y lo declarado editados juntos son indistinguibles de un cambio
+legítimo — lo que cierra ese caso es que la declaración vive en un fichero que se revisa.
+
+## Qué NO se verificó, y qué se hizo en su lugar
+
+- **El reintento acotado no se arregló, a propósito.** Dos defectos medidos —dispara en el
+  duplicado de todos los días y se lleva la relectura; su `'servidor'` pierde el producto bajo un
+  aviso que promete un reintento que nadie hace— y un tercero que la última revisión localizó un
+  nivel más abajo: la fusión está en `devolver()`, que devuelve el texto en **todo** fallo y
+  recuerda la clave, que sólo tiene sentido cuando el resultado es **desconocido**. Sale a la
+  **Spec G2**, sin sellar, con la pregunta hecha antes del requisito.
+- **Las once formas que las tres guardas dejan abiertas**: deuda 72, con la conclusión del perímetro
+  —acotar el enunciado— en vez de perseguirlas.
+- **Lo que le queda a la pasada**: deuda 73. El suelo no discrimina, `na`/`sup` no invalidan, la
+  ronda de navegador no tiene testigo medido, y ninguna corrida propia está acotada.
+- **Dos registros que nada vigila**: deuda 74. El requisito 5 de la iteración 2 no tiene fila de
+  DoD, y sus correcciones son prosa que el barrido excluye a propósito.
+- **Un test de la verja sin cota**, capaz de tardar quince minutos con la base fría: deuda 71.
+
+## La lección, que es la misma tres veces seguidas
+
+**Una afirmación sobre la propia evidencia es una afirmación, y va medida como cualquier otra.** Lo
+escribí como causa común en la iteración 2 y lo incumplí en la 3 dos veces: la fila que decía «una
+lista de basura pone roja esa fila» —falso, medido— y un comentario que decía que la unión de las
+dos particiones «se comprueba aparte porque es estático», comprobación que no existía. Las dos las
+encontró una revisión en contexto limpio, y ninguna puerta podía verlas: una guarda que miente
+sobre sí misma da verde por definición.
+
 ---
 
 <!-- ESTADO-VERIFICABLE -->
