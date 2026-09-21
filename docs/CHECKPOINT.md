@@ -746,8 +746,8 @@ vez (2026-09-07) el documento decía 221 tests en 36 ficheros cuando eran 245 en
 37, y la guarda que debía impedirlo daba verde sobre un documento con cifras
 inventadas.
 
-- Ficheros de prueba unitaria: 68
-- Ficheros de prueba de navegador: 16
+- Ficheros de prueba unitaria: 70
+- Ficheros de prueba de navegador: 17
 
 
 ---
@@ -1635,3 +1635,203 @@ construyó en veinte líneas. El error fue de encuadre —miré el reintento, qu
 puede producir, cuando el requisito hablaba de la petición en vuelo, que sí se observa en la
 señal inyectada—. Hoy ese cableado ya no se puede borrar en silencio. Un «no se puede
 probar» se gana midiendo, no razonando.
+
+---
+
+## 2026-09-20 — Spec G2: `devolver` hacía dos trabajos con calendarios distintos (3 iteraciones)
+
+Sale del ciclo de la Spec F, que se congeló tras dos vueltas en las que cada arreglo abría el agujero
+de al lado. La revisión localizó la causa un nivel más abajo de donde yo la había puesto: no estaba
+en la rama del `23505`, estaba en `devolver()`, que devolvía el texto al campo **y** decidía si la
+clave de deduplicación se recordaba. Dos efectos con disparadores distintos bajo un solo nombre.
+
+### Qué se construyó
+
+**Producto.** `devolver` sólo devuelve el texto. Recordar la clave se deriva de la **clase del
+resultado** en un único sitio (`cerrarGesto`), no de la rama donde ocurrió. El reintento pregunta
+antes de acuñar —una lectura contesta «¿es duplicado de verdad?» y «¿aterrizó mi intento y alguien lo
+tachó?»— y falla **cerrado**: si la relectura no vuelve, no se reintenta y no se acuña clave nueva.
+El resultado desconocido del reintento va a la cola por el mismo camino que el del primer intento,
+con su aviso y su bucle, en vez de perderse bajo una promesa que nadie cumplía. Y el reintento
+encola contra **lo que acaba de leer**, no contra la caché que esa lectura desmintió: `meterEnCola`
+recibe la lista visible como parámetro **sin valor por defecto**, para que ningún llamador futuro
+herede la caché rancia por olvido.
+
+Esa última es la que cerró una **pérdida de datos medida en navegador**, 2/2 con la caché obsoleta:
+cero pendientes, cero filas vivas, y el usuario leyendo «Ese producto ya está en la lista» sobre una
+lista vacía. `mergeItems` nunca quita una fila ausente de la lectura fresca, así que la caché
+conservaba el producto tachado y `decidirEncolar` contestaba «duplicado».
+
+**Instrumentos.** La pasada de mutación pasó de 13 a 16 mutaciones con inventario declarado que
+compara **casos y no totales**; sin `PARTE` ahora **se niega** con `exit 2` antes de gastar el
+baseline, en vez de morir atacando cero y salir 0; y un anclaje caduco pone `rc=1` y deja de cuadrar
+el inventario, con sonda propia. La cota de `lock_timeout` de las migraciones ganó la sonda que le
+faltaba. `g3` recuperó su aserción de foco y `g7` espera que el cliente conozca la fila antes de
+tacharla.
+
+### Verificación
+
+**Terminal**, medido el 2026-09-20 al cerrar:
+antes 1.730 casos en 68 ficheros, después **1.734 en 68**, `exit 0`. `typecheck` 0 ·
+`lint` 0 · `pnpm build` 0 con `.next` borrado.
+
+**Navegador**, misma fecha (2026-09-20):
+`pnpm test:e2e` **`exit 0`, 96/96** en 3,5 min contra la instancia local de Supabase,
+sobre el artefacto recién construido con el anterior descartado — nunca contra `next dev`.
+
+**Pasada de mutación**, primer plano, dos partes, leída por código de salida: `PARTE=1` exit 0 → 9
+atacadas, 9 cazadas, 472 s. `PARTE=2` exit 0 → 7 atacadas, 7 cazadas más la ronda de navegador.
+Control vivo en las dos, 0 sin guarda, 0 no aplicables, árbol idéntico al de partida y suite verde
+tras restaurar. Cada test nuevo con su rojo demostrado, el 2026-09-20,
+**3/3** revirtiendo su mecanismo — y el de
+navegador con `pnpm build` de por medio para no medir el bundle anterior.
+
+**Lo que NO se verificó, y qué se hizo en su lugar.** El requisito 2 quedó **construido sin guarda
+que lo distinga**. Medido el 2026-09-20:
+invirtiendo su puerta la suite sigue entera en verde. Está en la deuda 76 por su nombre, no
+en una lista. La instantánea de `items` anterior al `await` sigue abierta como deuda 75, marcada
+PRODUCTO. Y `g7` caza 5 de 6, no siempre: la revisión lo midió con seis vueltas y un solo build.
+El viewport de 390 px no se recorrió a mano porque el cambio no toca superficie visual.
+
+### El patrón de la iteración 3, que vale más que los dieciocho hallazgos
+
+**Es la primera vez en este ciclo que el propio ciclo genera el tipo de defecto que consume.** Tres
+casos, los tres en la misma iteración, y los tres encontrados por la revisión y no por mí:
+
+1. **Una atribución causal falsa.** Escribí en `restaurar()` que la trampa `EXIT` «fijaba el éxito»
+   con su `return 0`. Medido después en bash 3.2.57: el `return` de una trampa `EXIT` **no fija** el
+   código. Mi medición de `exit 0` era directa y real; la causa que le puse, no. Y la causa de verdad
+   —la tubería, `exit=2` directo frente a `exit=0` con `| tail`— **sigue abierta**.
+2. **§E.4(c) citada y luego incumplida.** La misma iteración que escribe «un arreglo que cambia el
+   mecanismo se prueba TAMBIÉN por la puerta que abre» dejó esa puerta sin test. Medido el
+   2026-09-20: invirtiendo el `seLeyo`, la suite entera sigue en verde y no cae una sola fila.
+3. **Una valla que cita el fichero equivocado.** La lista nombra `unit/duplicados.test.ts` › «F7» y
+   F7 vive en `unit/almacen.test.ts:1446`. La valla existe para que un refactor no rompa algo en
+   silencio; una que apunta a otro fichero no vigila nada.
+
+La señal no es el reparto de hallazgos —once de arnés contra dos de producto habría justificado una
+cuarta vuelta acotada—. La señal es que las tres cosas de arriba las produjo el trabajo de corregir
+registros falsos, que era el objeto de la vuelta anterior. Un bucle que empieza a alimentarse de sus
+propios errores de registro deja de medir el producto, y el corte se hizo ahí.
+
+**Las dos cuentas.** Dentro de la G2: **2 vueltas de producto** (la 1 y la 3) contra **1 de arnés**
+(la 2). En el arco de seis vueltas que llega hasta aquí —tres lideradas por el sostén en la Spec F,
+con el producto congelado en dos— son **2 de producto contra 4 de arnés**, pero las tres últimas
+alternan (producto, arnés, producto), así que la regla de tres seguidas no se disparó en ningún
+momento.
+
+### Un defecto de proceso, declarado y no tapado
+
+**La iteración 2 se construyó sin sección de spec**, y el marcador `ACTIVE` se quedó en `G2-iter1`
+porque no había sección que lo recibiera. Se construyó contra una lista aprobada en conversación, no
+contra un requisito escrito. El ciclo dice que escribir la spec después no cuenta: registra, pero no
+guió nada. No se le fabricó una sección retroactiva — eso habría sido el mismo defecto con mejor
+aspecto. Su trabajo está gradado en `.claude/fathom/spec-g2/dod.md`, que **no** es un contenedor
+permanente; por eso queda dicho aquí, que sí lo es.
+
+### `/spec` y la regla de comparar mecanismos
+
+Sí se paró sola, **dos veces y con tabla, en la spec que precede a la G2** — la que midió las deudas
+63 y 64. Su sección «Una o dos: la regla de la Spec E aplicada» tiene una tabla cuya segunda columna
+es literalmente «¿Cuándo tiene que volver a ocurrir?», concluye «**Dos respuestas distintas, y
+ninguno necesita al otro**», y de ahí sale la decisión de que eran **dos specs, F y G**. Volvió a
+dispararse más abajo para decir que `olvidarTodo` es un tercer mecanismo por la misma regla.
+
+Dentro del cuerpo de la G2 **no** hay una segunda tabla, y no falta: la G2 **es** la conclusión de
+esa comparación —su título, «hace dos trabajos con calendarios distintos», es lo que la regla
+dictamina—, y sus requisitos 1 y 2 escriben los dos calendarios por separado (devolver el texto en
+*todo* fallo; recordar la clave *sólo* en el desconocido). Lo que la G2 sí hizo por su cuenta es la
+**otra** regla: «La pregunta, hecha antes de escribir el requisito», con tres respuestas
+**construidas** y las tres cosas que este ciclo ya había hecho sin haberse hecho la pregunta.
+
+---
+
+## 2026-09-21 — Spec H: transferir y borrar grupo (base + 4 iteraciones)
+
+Primera spec de un dominio distinto tras seis vueltas en el mecanismo de avisos/cola/reintento. El
+ciclo de vida del grupo: cómo cambia de dueño, cómo muere, y qué pasa con lo que cuelga de él.
+
+### Qué se construyó
+
+**Producto.** El owner transfiere la propiedad a un miembro activo —sólo si hay otro— y borra el
+grupo. La propiedad vive en un solo sitio, `group_members.role`, y **un índice único parcial** hace
+cumplir «exactamente un owner activo» donde la constitución manda: en la base, no en un `if`.
+
+**Borrar es expulsar a todos, el owner incluido, y sin un solo `DELETE`.** `groups` cascadea a
+`group_members` e `items`, las dos publicadas en `supabase_realtime`, y un borrado físico ahí es
+*hard fail* por §B.3. Las invitaciones se revocan en la misma transacción —si no, un link vivo
+readmite gente a un grupo muerto donde nadie puede aprobar— y `request_join` deja de admitir
+solicitudes en un grupo sin dueño.
+
+Funciona **sin tocar ninguna política**, y el motivo merece quedar escrito: `group_members_select` es
+`USING (user_id = auth.uid() OR is_active_member(group_id))`, y esa primera mitad deja que cada quien
+vea siempre su propia fila. Así que el UPDATE que te pone en `removed` **sí se te entrega** por
+realtime: el predicado que autoriza el evento sobrevive al cambio que el evento anuncia. Por `groups`
+sería al revés —su política se vuelve falsa y filtraría el aviso de su propia desaparición—, que es
+por lo que esta spec **no publica ninguna tabla nueva**.
+
+`groups.deleted_at` se añadió contra lo que la spec decía, y por una razón medida: sin marcador, un
+grupo borrado y uno huérfano son indistinguibles, y la guarda del invariante central se vuelve
+incomprobable. No es una puerta —`is_active_member` no lo consulta, ninguna política lo menciona— y
+no abre un deshacer.
+
+### Verificación
+
+**Terminal**, medido el 2026-09-21 al cerrar: antes 1.734 casos en 68 ficheros, después **1.767 en
+70**, `exit 0`. `typecheck` 0 · `lint` 0 · `pnpm build` 0 con `.next` borrado.
+
+**Navegador**, misma fecha (2026-09-21): `pnpm test:e2e` **`exit 0`, 106 de 106** en 3,7 min contra la
+instancia local, sobre el artefacto recién construido. Más un recorrido a mano a 390 px con capturas.
+
+**Invariantes de la base tras correr la verja entera**, las cuatro consultas a **0**: grupos vivos sin
+dueño, grupos con dos owners activos, `owner_id` divergente del rol, y filas de owner en espera o
+rechazadas.
+
+**Lo que NO se verificó, y qué se hizo en su lugar.** Nada se midió contra el proyecto hosted, porque
+no existe. Y la fila `i3-3` nace verde y se declara así: creí que la cáscara sin conexión tenía el
+defecto de desbordamiento y medí que no.
+
+### Las carreras, que son lo que esta spec de verdad cerró
+
+Dos, las dos con **dos conexiones reales** esperando a ver el bloqueo en el catálogo antes de
+confirmar —no dos `await` seguidos, que nunca se solapan—:
+
+1. **Un grupo vivo y sin dueño.** Transferir y expulsar cruzados: la puerta de `decide_member` veía
+   al viejo owner todavía activo, pasaba, y al desbloquearse expulsaba al nuevo. Grupo vivo, cero
+   owners activos, un miembro atrapado, irreparable desde la interfaz. **La propia spec había escrito
+   esa carrera** en su sección de respuestas construidas; la cerré en `transfer_group` y no en
+   `decide_member`, que es la otra mitad exacta. Tener la respuesta escrita no bastó.
+2. **Un `pending` en un grupo borrado.** Solicitar mientras el borrado está en vuelo. Las dos
+   funciones serializan ahora sobre la fila de owner con `select … for update`.
+
+### El patrón de los registros falsos: sexta aparición, y dentro de su propio arreglo
+
+Esta spec produjo **seis** afirmaciones de registro falsas, y la sexta la escribí en la iteración que
+existía para quitar la quinta:
+
+1. «h11, h12 e i1-8 limpian ahora» — h12 no limpia, y nunca lo necesitó.
+2. «los ayudantes duplicados se comparten» — sobrevivió una copia byte a byte. Eran tres, no dos.
+3. «783 px» en la deuda 78, sin decir con qué entrada — con la de la guarda son 663.
+4. La fila `i1-2` quedó en la spec con su test borrado.
+5. «la cáscara sin conexión es un tercer sitio con el defecto» — no lo era; lo escribí por la forma
+   del CSS y lo desmentí al medirlo.
+6. «un fallo de la reparación no es construible» — sí lo era: enumeré restricciones y me dejé los
+   temporizadores del rol `authenticator`.
+
+Las seis son de registro; ninguna es del producto. **El argumento está hecho en `skills/DEBT.md`**,
+porque a la cuarta dejó de ser un accidente de este ciclo y pasó a ser una pregunta del método.
+
+### Cuatro sondas envenenaron guardas de otros ficheros
+
+Demostrar que un test se pone rojo exige revertir su mecanismo, y con el mecanismo revertido el
+escenario produce **exactamente el estado que el mecanismo impide**. Ese estado sobrevive a la
+corrida y pone rojas a las guardas del invariante en ficheros ajenos, sin que nada señale de dónde
+salió. Cerrado con `limpiarAlTerminar`, que repara en `onTestFinished` —corre aunque el caso falle,
+medido— y **afirma lo que encontró**, porque reparar en silencio no distingue «pasó» de «se rompió y
+borré la prueba».
+
+### Cinco guardas del propio proyecto cazaron este trabajo
+
+`grants.test.ts` (las funciones nuevas quedaban invocables por `anon`), `create-group.test.ts` (el
+invariante de «ningún grupo sin owner» se ponía rojo sobre la conducta correcta), `harness-no-delete`,
+`checkpoint.test.ts` y `migrations.test.ts`. Ninguna es de esta spec y las cinco hicieron su trabajo.

@@ -177,6 +177,54 @@ medida— y la **68**. La **64** siguió fuera por su nombre, como pedía el enc
 del límite de R2 no podía fallar si el recorrido del perímetro se encogía: sólo instrumento, sin
 una línea de producto. Abrió la **69**. El detalle está en el acta.
 
+### Specs F y G2 — **CERRADAS el 2026-09-20**
+
+Salieron de la misma medición: la regla de la Spec E aplicada a las deudas **63** y **64** dio dos
+respuestas distintas a «¿cuándo tiene que volver a ocurrir?», así que fueron **dos specs** y no una.
+
+**F — el reenvío no puede crear fila nueva** (base + 3 iteraciones). El envío lleva el id de la fila
+en `origen_id` y un índice único no parcial sobre `deleted_at` rechaza el repetido; una clave por
+gesto de alta, y la clave sobrevive a reiniciar el gesto. Cerró la **64**. Acta y detalle en
+`docs/CHECKPOINT.md`.
+
+**G2 — `devolver` hacía dos trabajos con calendarios distintos** (base + 3 iteraciones). Acta en
+`docs/CHECKPOINT.md` › «2026-09-20 — Spec G2». Texto íntegro en
+`.claude/fathom/spec-g2/spec-g2-verbatim.md` y la lista del DoD en `.claude/fathom/spec-g2/dod.md`
+(ambos fuera del repo; sobreviven a la sesión). Cerró una **pérdida de datos medida en navegador** en
+el camino del reintento. Abrió la **75** —PRODUCTO, lo primero que se toca—, la **76** —un requisito
+construido sin guarda que lo distinga— y la **77**, la cola larga con su medida. Enmendó la **73** y
+dejó la **74** abierta con una tercera instancia.
+
+**Se cerró en la tercera vuelta y no en una cuarta**, por decisión explícita: los hallazgos que
+quedaban eran once de arnés contra dos de producto, y la iteración 3 había producido tres defectos de
+la clase que venía a cerrar. El razonamiento completo está en el acta, bajo «El patrón de la
+iteración 3».
+
+### Spec H — Transferir y borrar grupo · **CERRADA el 2026-09-21** (base + 4 iteraciones)
+
+Primera spec de un dominio distinto tras seis vueltas en avisos/cola/reintento. Acta en
+`docs/CHECKPOINT.md` › «2026-09-21 — Spec H». Texto íntegro en
+`.claude/fathom/spec-h/spec-h-verbatim.md` (fuera del repo, sobrevive a la sesión).
+
+Cerró dos carreras que dejaban el grupo inservible —una lo dejaba **vivo y sin dueño**, irreparable
+desde la interfaz— y una fuga hacia quien ya no es miembro. Abrió las deudas **78** y **79**. La
+migración añade `transfer_group`, `delete_group`, el índice de un solo owner, el `check` que hace
+irrepresentable `owner`+`pending`, y `groups.deleted_at` como marcador de distinguibilidad.
+
+**Se cerró en la cuarta vuelta y no en una quinta** porque lo que quedaba era todo LOW y se hizo en
+un solo lote, como manda la regla de impacto. La condición que el usuario puso —cerrar sin quinta si
+la vuelta traía sólo registro— no llegó a aplicarse: la cuarta la abrió un hallazgo de producto que
+el ciclo había medido **dos veces** y dejado caer sin escribir.
+
+### Lo siguiente, decidido el 2026-09-20
+
+1. **Desplegar**, medido: el único trabajo de código era la deuda 31 (el service worker), y el resto
+   es panel —proyecto Supabase hosted, 13 migraciones, OAuth de Google, y dos variables en Vercel,
+   porque los tres clientes usan la anon key y en producción no hay clave de servicio—. El frente
+   nuevo no es desplegar: es **verificar lo desplegado** sin escribir usuarios de prueba en la base
+   de la familia.
+2. **Ciclo de vida del grupo** — hecho, es esta Spec H.
+
 El diagnóstico que la motivaba —la regla sin dueño, y cada lector naciendo sin ella— no cambió
 al medirla, y está entero en el acta. Lo que **sí** cambió es el recuento, y conviene que quede: se hablaba de «tres sitios en la vista y un
 cuarto en la cáscara». Contados con el instrumento son **ocho lectores de la cola**, de los que

@@ -1360,3 +1360,177 @@ iteración 1 narra —«la fila F5 desapareció sin declararse»— repetido den
 Y **no hay lista de DoD para la iteración 2 ni para el trabajo posterior**: el fichero llega hasta
 la iteración 1. `unit/checkpoint.test.ts` compara recuentos de ficheros de prueba, y como no se
 añadió ninguno, la ausencia no pone nada rojo.
+
+## 75 — PRODUCTO · La instantánea de `items` es anterior al `await`, y un tachado que llegue en esa ventana la desmiente (2026-09-20)
+
+**Prioridad: la más alta de las abiertas.** Es la última variante del CRITICAL que la Spec G2
+cerró, llega al usuario, y se distingue del resto de lo que queda en que no es arnés.
+
+La iteración 3 arregló que el **reintento** encolara contra la caché que su propia relectura
+acababa de desmentir: `meterEnCola` recibe ahora `visibles` como parámetro sin valor por defecto.
+Los dos sitios que pasan `items` —`GroupView.tsx:1204` (sin red) y `:1274` (desconocido del primer
+intento)— pasan una instantánea del cierre tomada **antes** del `await addItem(...)`, que tiene
+`TIMEOUT_MS` de 10 s. Un tachado que llegue por realtime dentro de esa ventana es exactamente una
+lectura que desmiente la instantánea, y el síntoma es el mismo que se acaba de arreglar: «Ese
+producto ya está en la lista» sobre una lista que no lo tiene, sin encolar, producto perdido.
+
+Lo que **no** es el arreglo: releer. En `:1274` el servidor acaba de no contestar, así que una
+lectura cuesta otros 10 s en un camino muerto y §A.3 prohíbe fabricar un saber que no se puede
+tener. Lo que falta es leer de un ref en vez de del cierre. El repo ya tiene el idioma en dos
+sitios —`sinRedVivo` (`:61`) y `reintentarVivo` (`:336`)—, así que es un `itemsVivo` y nada más.
+`visibles` sigue explícito en el reintento, porque ahí `mergeItems` tampoco quita ausentes.
+
+Medido por la revisión de la iteración 3 (#10). No se arregló en esa vuelta porque habría sido la
+cuarta iteración de un ciclo cuyos hallazgos ya eran de sostén; queda como lo primero que se toca.
+
+## 76 — El requisito 2 de la iteración 3 está construido sin guarda que lo distinga (2026-09-20)
+
+i3-R2 dice que con la relectura caída y una clave heredada el resultado sigue siendo **desconocido**
+y la clave sobrevive: `cerrarGesto(fila, devuelta && !seLeyo ? 'desconocido' : 'rechazado')`.
+
+**Medido dos veces, por la revisión y por mí:** invirtiendo la puerta a `devuelta ? 'desconocido' :
+'rechazado'` la suite queda **1.734/1.734 verde**. `i3-3` cubre la mitad `!seLeyo` —la clave
+sobrevive cuando nadie pudo mirar—; la mitad `seLeyo && ya`, donde la clave **debe morir** porque
+alguien sí miró, no la mira nadie. Falta el hermano de `i3-3`: producto vivo, lectura correcta,
+clave heredada → el gesto siguiente **no** hereda. Y su mutación invertida al inventario de la
+pasada.
+
+**Por qué esto va en la primera línea de su propia entrada y no en una lista:** es §E.4(c) literal
+—«un arreglo que cambia el mecanismo se prueba TAMBIÉN por la puerta que abre»— incumplida por la
+iteración que **cita la regla en su propia spec**. Un requisito verde sin guarda que lo distinga es
+precisamente lo que el checklist existe para no dejar pasar; contarlo entre dieciocho hallazgos
+sería enterrarlo.
+
+Efecto colateral sin escribir (#16 de la revisión): mientras las relecturas sigan fallando, **todo**
+gesto sobre ese producto hereda la clave y muere en el 23505 — antes el tercero acuñaba clave nueva
+y **entraba**, porque el índice de nombre es parcial sobre `deleted_at` (verificado en catálogo).
+Se cura en cuanto una lectura acierta, y está acotado al montaje. Pero hay que decirlo donde se
+explica por qué la clave sobrevive.
+
+## 77 — La cola larga de la revisión de la iteración 3, medida y sin cerrar (2026-09-20)
+
+Se cerró la G2 en vez de abrir una cuarta vuelta: los hallazgos que quedaban eran once de arnés y
+registro contra dos de producto, y el propio ciclo había empezado a producir el tipo de defecto que
+consume. Lo que queda, con su medida:
+
+- **El veredicto de la pasada se pierde en una tubería.** Medido: `bash pasada.sh` directo da
+  `exit=2`; `bash pasada.sh 2>&1 | tail -2` da **`exit=0`**. La negativa no imprime ninguna línea
+  `PASADA:`, así que con tubería no queda **ni** código **ni** stdout. Arreglo: imprimir
+  `PASADA: NO VALE — falta-parte` y escribir veredicto y `rc` a un fichero que el operador lea.
+- **Y la causa que la iteración 3 escribió para ese `exit 0` es falsa.** El comentario de
+  `restaurar()` dice que la trampa `EXIT` «fijaba el éxito» con su `return 0`. Medido por mí en
+  bash 3.2.57: el `return` de una trampa `EXIT` **no fija** el código (unbound → 1, `exit 2` → 2),
+  así que `return $codigo` es un no-op. Mi medición del `exit 0` fue directa y real; la atribución
+  no. El comentario hay que corregirlo o quitarlo.
+- **`cazada (3/3)` no distingue una guarda de un fichero que no parsea.** Medido por mí: con un
+  paréntesis desbalanceado en `GroupView.tsx`, la suite sale `exit=1` con «127 passed» —el fichero
+  no carga— y la pasada lo anotaría como capturado. El testigo se imprime y **nunca se comprueba**.
+  Arreglo: la misma puerta que ya tiene la ronda de navegador — compila o es `NO APLICA`.
+- **La sonda de cerrojos declara montado su escenario con el cerrojo de otro.** `tomado()`
+  (`unit/migrations.test.ts`) cuenta `AccessShareLock` sobre `public.items` sin filtrar por
+  `application_name`; el teardown sí filtra, el setup no. Y toma cerrojos sobre la tabla real: un
+  `select` ajeno tarda 2.046 ms mientras corre. Arreglo: filtrar por identidad y cerrar sobre una
+  tabla de usar y tirar — `lock_timeout` es agnóstico de tabla.
+- **g7 caza 5 de 6, no 3 de 3.** La revisión midió con un solo `pnpm build` para seis vueltas y la
+  cuarta salió **verde con el defecto puesto**. La espera de `toHaveCount(1)` subió la detección de
+  1/6 a 5/6, no a siempre: la precondición discriminante no es «el cliente conoció la fila» sino
+  «el cliente **sigue** creyéndola viva al gesticular», y eso corre carrera con el UPDATE de
+  realtime, que sí la quita. Arreglo estructural: cortar el socket antes del `admin.update`.
+- **Registros que siguen mal**, todos medidos: la valla de la iteración 3 cita
+  `unit/duplicados.test.ts` › «F7» y F7 vive en `unit/almacen.test.ts:1446` (`grep -c F7` en el
+  primero = **0**) · `docs/spec.md` seguía diciendo i1-2 «y el producto vivo» · la fila i1-8 de
+  `dod.md` dice «ataca las 13» con **17** declaradas · la referencia a `activeItems` en
+  `GroupView.tsx:517` apunta a una línea de comentario · cuatro sitios dicen que
+  `items_origen_unico` «no es parcial» cuando el catálogo dice
+  `WHERE origen_id IS NOT NULL` — es parcial, lo que no es es parcial **sobre `deleted_at`**.
+- **Dos aserciones negativas que pasan con el aviso ausente:** `i3-2` (`not.toMatch` sobre
+  `textContent ?? ''`) debería afirmar en positivo `toMatch(/se envía solo/i)`. Y `i3-3` usa
+  `clase: RELECTURA`, que es el texto de pantalla y no un miembro de `Clase`: compila sólo porque
+  el doble es un `vi.fn()` desnudo.
+- **Dos variables para un solo hecho:** `seLeyo` y `visibles`, con `let visibles = items` como
+  inicializador muerto —su único lector está dentro de `if (seLeyo && …)`—. Un
+  `let leidos: Item[] | null = null` deja «sin valor por defecto» como garantía del compilador en
+  vez de comentario.
+- **Adyacente, preexistente:** `if (busy) return` (`GroupView.tsx:1156`) es check-then-act sobre
+  estado de React y no sobre un ref, con el idioma `…Vivo` al lado. Acotado por los índices únicos.
+
+### Enmienda a la deuda 73
+
+Cerrado por i3-R6: «`na` no invalida» —hoy `na > 0` pone `rc=1` y el anclaje caduco deja de cuadrar
+el inventario, con sonda en `.claude/fathom/spec-g2/sonda-ancla.sh`—. Siguen abiertos el suelo que
+no discrimina, `sup`, `INESTABLE`, y el testigo literal de la ronda de navegador, que además es el
+mismo agujero que el punto 3 de la deuda 77 mide para la ronda de unidad.
+
+### Enmienda a la deuda 74
+
+Sigue abierta y se repitió: **i3-R7 y tres cuartos de i3-R8 tampoco tuvieron fila de DoD**, y dos de
+los registros que la iteración decía haber corregido no lo estaban. El patrón ya tiene tres
+instancias en tres iteraciones seguidas. Lo que lo cerraría no es otra fila: es que las correcciones
+de registro dejen de ser prosa que ninguna herramienta lee.
+
+## 78 — El eje transversal del `body` y los `main` centrados (2026-09-21) — **CERRADA al abrirse**
+
+Se anota porque un comentario de `e2e/mobile.spec.ts` afirmó que estaba anotada cuando no lo estaba
+—la revisión lo midió, `grep` en `docs/` daba cero—, y una afirmación de registro falsa es el defecto
+que este ciclo lleva persiguiendo. Queda cerrada en la misma entrada porque la iteración 2 la arregló,
+pero el diagnóstico vale más que el arreglo y conviene que sobreviva:
+
+`app/layout.tsx` pinta `<body className="flex min-h-full flex-col">` y los ocho `main` de la app eran
+`mx-auto … max-w-md`. **Un margen automático en el eje transversal suprime el `align-self: stretch`**,
+así que cada `main` dejaba de tomar el ancho del `body` y pasaba a dimensionarse por su contenido,
+topándose en `max-w-md` = 448 px. Con la pantalla en 390, cualquier contenido que no pudiera encoger
+estiraba la página y aparecía scroll horizontal.
+
+Lo que no podía encoger era `truncate`, que fija `white-space: nowrap` y hace que el ancho mínimo del
+elemento sea el texto entero. Ni `w-full` ni `min-w-0` lo arreglaban: el primero resuelve el 100 %
+contra un ancho que depende del propio elemento, y el segundo sólo acota el paso de reparto del flex,
+no el tamaño intrínseco del contenedor.
+
+**Las tres medidas, sobre la app real a 390 px:**
+
+- Fila de miembro con un nombre de persona largo: documento a **448 px**, 58 de desborde, «Expulsar»
+  acabando en x=432.
+- Fila de solicitud (`pending-request`) con el mismo nombre: «Rechazar» con **42 de sus 86 px fuera
+  de pantalla** — el owner no podía rechazar la solicitud.
+- Cabecera con un nombre de grupo **de un solo token sin espacios**: con el token de 53 caracteres
+  que usa la guarda (`Familiaalbaconunnombredeunsolotokensinespaciosningunos`), **663 px**. Con
+  espacios no desbordaba, porque el `h1` partía por ellos: por eso la guarda que ya existía, que usa
+  un nombre largo *con espacios*, pasaba.
+  *(Esta entrada decía **783 px** sin decir con qué entrada, tres líneas encima de la 79, que declara
+  que una guarda de disposición tiene que decir con qué entrada discrimina. Corregido con la medida y
+  su entrada al lado, que es lo que la 79 pide.)*
+
+**Arreglo:** `w-full` en los ocho `main`, más `min-w-0 truncate` en el `h1` del grupo y `shrink-0` en
+el enlace de vuelta, para que lo que ceda sea el título y no la salida. Con eso `truncate` vuelve a
+funcionar como se anuncia en toda la app. Lo vigilan `e2e/mobile.spec.ts` › «i2-3» e › «i2-4».
+
+## 79 — El desbordamiento a 390 px no lo veía ninguna guarda, y el motivo es la entrada (2026-09-21)
+
+Las dos guardas de 390 px existían desde hacía semanas y ninguna vio nada de lo de arriba. No porque
+no miraran la pantalla correcta, sino por **las entradas que usaban**: nombres cortos, y nombres
+largos con espacios. La propiedad «no desborda» depende del contenido, y un test de layout con datos
+amables comprueba el layout con datos amables.
+
+Lo que queda abierto es la regla, no el caso: **una guarda de disposición necesita declarar qué
+entrada la hace discriminante.** Hoy ninguna de las tres lo declara; las nuevas usan un nombre de
+persona largo y un nombre de grupo de un solo token porque eso fue lo que rompió, y eso está escrito
+en su docstring — pero es una convención de dos ficheros, no una regla con guarda.
+
+## 80 — Lo que la Spec H dejó sin cerrar, medido (2026-09-21)
+
+Cerrado en el lote final: las cinco clases `min-w-0` muertas y la regla falsa que las justificaba, y
+los ficheros en las filas de DoD. Lo que queda:
+
+- **`decide_member` no tiene canal para «no pasó nada».** Un `update` de cero filas devuelve éxito, y
+  desde i4-R1 eso incluye el rechazo de una fila de owner: indistinguible de una reentrega idempotente
+  (§D.4). No se arregla con un `raise` —rompería la idempotencia—; lo que falta es decirlo donde se
+  lee.
+- **`cabe()` sólo la usan tres filas.** `add-item`, `delete-item` y `create-invite` siguen
+  comprobando alto y no posición horizontal, que es lo que cazó el desbordamiento de i1-R5.
+- **La restricción `group_members_owner_no_espera` entró sin `not valid` + `validate`.** Sobre los
+  datos de hoy es gratis; sobre una tabla grande son un `ACCESS EXCLUSIVE` y una validación completa
+  en el despliegue (§D.5).
+- **La deuda 78 nombra su entrada pero no su estado de marcado.** Los 663 px se tomaron sobre el
+  marcado anterior a la iteración 2; desde el árbol de hoy, quitar sólo el `truncate` del `h1` da 682.
+  Es la otra mitad de lo que pide la regla 79: una medida de disposición necesita entrada **y**
+  estado.
