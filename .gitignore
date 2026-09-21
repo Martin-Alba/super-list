@@ -49,3 +49,6 @@ next-env.d.ts
 
 # sonda de la puerta del linter (unit/puerta-lint.test.ts)
 .sonda-lint.ts
+
+# Spec I / I-R4 — generado en cada build a partir del sha del commit.
+public/sw-version.js

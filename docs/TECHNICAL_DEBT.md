@@ -1534,3 +1534,78 @@ los ficheros en las filas de DoD. Lo que queda:
   marcado anterior a la iteración 2; desde el árbol de hoy, quitar sólo el `truncate` del `h1` da 682.
   Es la otra mitad de lo que pide la regla 79: una medida de disposición necesita entrada **y**
   estado.
+
+## 81 — `/login` tarda 15 s en blanco con la API caída (2026-09-21)
+
+Medido con `supabase_auth_super` pausado y los otros diez contenedores arriba, con sesión real en el
+navegador: `/login` tarda **15.024 ms** y se queda donde está. La cifra se explica sola: **5 s** de la
+cota del veredicto del proxy, más los **10 s** de `NETWORK_TIMEOUT_MS` que paga el `getUser()` del
+propio render, al que la cota del proxy no alcanza.
+
+**Es su propiedad declarada y por eso no se tocó**: `unit/guarda-sesion.test.ts` › «DoD 8» afirma que
+una ruta pública con la API caída se sirve sin redirección, y para `/login` e `/invite` eso tiene
+sentido — con la API caída no puedes entrar ni aceptar una invitación, pero la pantalla que pides es
+la tuya, y desviarla sería decidir por ti.
+
+**Y una espera en blanco sigue siendo una espera en blanco.** Quince segundos mirando nada antes de
+ver el formulario de entrada no es una pantalla propia: es una pantalla ausente.
+
+Lo que lo cerraría, y por qué no entró aquí: acotar el veredicto del **render** con el mismo mecanismo
+que el proxy — la carrera de `lib/supabase/middleware.ts` aplicada a `lib/supabase/server.ts`. Eso
+haría que `/login` pintara su formulario en la cota en vez de a los 15 s, sin desviar nada y sin tocar
+`DoD 8`. Queda fuera de la Spec I porque toca el cliente de servidor que usan **las cuatro páginas**,
+y esta spec ya cambió cuatro filas de valla.
+
+## 82 — La Spec C tiene dos reglas revisadas, y su acta no lo dice (2026-09-21)
+
+**Esto no es deuda de código: es deuda de lectura.** Quien lea el acta de la Spec C la tomará como
+vigente entera, y dos de sus reglas ya no lo están. Las dos las revisó la Spec I, las dos con su
+medida, y las dos siguen escritas en su forma original allí.
+
+**1 · «Agotar la cota no desvía» — invertida.** La Spec C decía que un timeout no es evidencia de
+nada: `status 0` dice que la red falló, una espera agotada sólo dice que no sabemos, y desviar sobre
+«no sé» relajaba R3. Su justificación escrita era que «las sesiones inválidas tardan en ser
+rechazadas y acababan en la cáscara».
+
+Medido por la Spec I: una sesión inválida tarda **3 ms**; la de un usuario borrado, **6 ms**; una sana
+con refresco, **76 ms**. Y lo que **no** contesta tarda **25.428 ms** (servidor caído) o **30.611 ms**
+(servidor que acepta y calla). Tres órdenes de magnitud de separación y nada en medio: agotar una cota
+corta **sí** es evidencia.
+
+Y lo que la regla costaba: con la cota anterior de 12 s, **ni un proyecto dormido ni uno caído llegaban
+nunca a la cáscara**. Los dos agotaban la cota, no desviaban, y caían al login — el callejón exacto
+que la Spec C se construyó para cerrar, con su mecanismo construido y sin alcanzar su caso.
+
+**2 · «Una ruta pública con la API caída se sirve sin redirección» — vale para tres de cuatro.** `/`
+se desvía a la cáscara. Motivo medido: es `start_url` del manifiesto, o sea el punto de entrada de la
+app instalada, y tardaba **15.022 ms** en blanco para acabar pintando la portada de invitado a alguien
+que tiene sesión y tiene su lista guardada en el dispositivo. `/login` e `/invite` conservan la
+propiedad (ver deuda 81).
+
+Lo que cerraría esta entrada: una nota en el acta de la Spec C que apunte aquí. No se ha escrito
+porque un acta cerrada no se reescribe — pero entonces hace falta que algo la enlace, y eso es esto.
+
+## 83 — La primera cifra falsa la trajo el revisor, no el constructor (2026-09-21)
+
+La revisión de la base de la Spec I midió que `/` tardaba **32.627 ms** con la API colgada, y ese
+número motivó un cambio de mecanismo. Medido después por el constructor, con el entorno declarado
+—`supabase_auth_super` pausado, los otros diez contenedores arriba, sesión real en el navegador—: **15.022 ms**.
+
+**El doble.** Y la diferencia importa porque los 15 s se explican solos —5 de la cota del proxy más 10
+de `NETWORK_TIMEOUT_MS` en el render— mientras que 32,6 no corresponde a ninguna suma del sistema. Lo
+que falta en el informe de la revisión es **con qué entorno se tomó**: no dice qué contenedores
+estaban arriba ni cuál se paró, así que no se puede saber si midió el mismo estado.
+
+**Una medida sin el entorno declarado no es una medida.** Es un número con una historia que nadie
+puede reconstruir, y este proyecto ya tiene registrado lo que pasa con esos: se creen, se citan de
+vuelta, y la siguiente decisión se toma encima (`skills/DEBT.md` §8).
+
+**Lo nuevo, y por eso tiene entrada propia:** las seis afirmaciones falsas anteriores las escribió el
+constructor y las cazó la revisión. **Ésta es la primera al revés.** El argumento de §8 daba por
+supuesto que la revisión es el mecanismo que caza los registros falsos porque no arrastra el recuerdo
+de haberlos razonado; esta entrada dice que ese mecanismo tampoco es gratis — y que lo que lo hace
+comprobable no es quién mide, es que la medida venga con su entorno.
+
+Cerrado en parte el mismo día: el `Runtime check` de `CLAUDE.md` exige ahora registrar el estado del
+entorno antes de cada corrida y declarar toda caída deliberada con su contenedor. Lo que queda abierto
+es que esa exigencia **no llega a los encargos de revisión**, que se escriben a mano.

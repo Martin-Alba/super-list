@@ -746,8 +746,8 @@ vez (2026-09-07) el documento decía 221 tests en 36 ficheros cuando eran 245 en
 37, y la guarda que debía impedirlo daba verde sobre un documento con cifras
 inventadas.
 
-- Ficheros de prueba unitaria: 70
-- Ficheros de prueba de navegador: 17
+- Ficheros de prueba unitaria: 71
+- Ficheros de prueba de navegador: 18
 
 
 ---
@@ -1835,3 +1835,97 @@ borré la prueba».
 `grants.test.ts` (las funciones nuevas quedaban invocables por `anon`), `create-group.test.ts` (el
 invariante de «ningún grupo sin owner» se ponía rojo sobre la conducta correcta), `harness-no-delete`,
 `checkpoint.test.ts` y `migrations.test.ts`. Ninguna es de esta spec y las cinco hicieron su trabajo.
+
+---
+
+## 2026-09-21 — Spec I: desplegar, y el defecto que la medición encontró antes (base + 1 iteración)
+
+Salió del encargo de desplegar y empezó corrigiendo su propia premisa. Lo que encontró no estaba en
+el despliegue: estaba en el código, desde antes, y no lo veía nadie.
+
+### La premisa, corregida en tres puntos
+
+**No hay ningún `force-dynamic` en la app** — cero en todo `app/`. `/g/[id]` e `/invite/[token]` son
+dinámicas, pero por leer la sesión, que no se puede quitar. **La plataforma tampoco era la
+restricción**: 300 s en Hobby con Fluid Compute, y `proxy.ts` en Next 16 corre en Node bajo ese mismo
+límite. Y **el bloqueo era el proxy**, que corre antes que cualquier ruta y preguntaba a Supabase
+**antes** de mirar si la ruta era pública — así que hasta la cáscara esperaba el veredicto de la base
+que la cáscara existe para no necesitar.
+
+Las tres premisas falsas salieron de informes anteriores míos y volvieron como hecho medido en el
+encargo. Dos de ellas habrían llevado esta spec a optimizar contra una restricción inexistente.
+
+### Qué se construyó
+
+**Producto.** La cáscara se sirve sin preguntarle nada a Supabase. La cota del veredicto baja de 12 s
+a **5 s** y **agotarla desvía** — invirtiendo una regla de la Spec C con la medida delante. La
+portada, que es `start_url` del manifiesto, va a la cáscara en vez de esperar 15 s en blanco. Y la
+versión del service worker sale del sha del commit, cerrando la deuda 31 antes del primer despliegue,
+que es el único momento en que arreglarla es gratis.
+
+**El defecto que la medición encontró, y que no traía el despliegue:** con la cota anterior, ni un
+proyecto dormido ni uno caído llegaban **nunca** a la cáscara. Los dos agotaban la cota, no desviaban,
+y caían al login — el callejón exacto que la Spec C se construyó para cerrar, con su mecanismo
+construido y sin alcanzar su caso. Existía en local, sin desplegar nada.
+
+### Verificación
+
+**Terminal**, medido el 2026-09-21 al cerrar: antes 1.767 casos en 70 ficheros, después **1.780 en
+71**, `exit 0`. `typecheck` 0 · `lint` 0 · `pnpm build` 0 con `.next` borrado.
+
+**Navegador**, misma fecha (2026-09-21): `pnpm test:e2e` **`exit 0`, 108 de 108** en 4,1 min.
+
+**Entorno declarado**, que es la regla que esta spec metió en el `Runtime check`: los 11 contenedores
+que el proyecto usa, arriba y sanos, antes y después de cada corrida. Las caídas deliberadas fueron
+todas `docker pause supabase_auth_super` con los otros diez vivos. Y se descubrió de paso que
+`edge_runtime`, `imgproxy` y `pooler` llevaban días parados sin que nadie lo notara — ninguno lo toca
+este proyecto, pero saberlo es la diferencia entre «no afecta» y «no miré».
+
+**Camino feliz, recorrido a mano en el navegador a 390 px:** entrar, crear grupo, apuntar dos
+productos, verlos en la portada. Funciona. Antes de esto llevábamos cuatro specs probando sólo el
+caso degradado.
+
+**Lo que NO se verificó.** La iteración 1 **se cerró sin pasar por revisión**, por decisión explícita:
+lo construido está medido y con su rojo demostrado, pero nadie ajeno lo ha gradado. Y nada se midió
+contra un proyecto hosted, que no existe — **cuánto tarda en despertar uno pausado sigue siendo la
+única cifra que podría cambiar el diseño**, y está escrita como tal.
+
+### Cuatro filas de valla cambiadas, y una parada en medio
+
+La spec sellada declaró **una**. El build encontró una segunda que cambiaba de propiedad sin estar
+declarada —«si el veredicto llega dentro de la cota, se respeta aunque tarde»— y **el ciclo se paró
+ahí**, por la condición que el usuario había puesto. Se declaró con su intercambio escrito como
+**provisional**: qué se acepta, de qué depende, y cuándo se revisa. Más tarde una tercera (constante,
+no propiedad) y una cuarta —`DoD 8`, la portada—, ésta también parando antes de tocarla.
+
+### El mecanismo que se probó en la capa equivocada
+
+I-R4 quedó **escrito, probado en verde y sin funcionar**. `/sw-version.js` no estaba excluido del
+proxy, así que la petición anónima que hace el service worker recibía **307 a `/login`**,
+`importScripts` lanzaba, y entraba el respaldo: en Chromium real el worker se instalaba como
+`super-sin-version`. Las dos filas que lo vigilaban leían el fichero **de disco** (§E.1).
+
+Lo arregló la revisión de la base señalándolo, y el sitio donde acabó lo decidió **una guarda nueva
+rechazando al autor**: meterlo en `RUTAS_SIN_SESION` lo habría arreglado, y el invariante
+`RUTAS_SIN_SESION ⊆ PUBLIC_ROUTES` lo rechazó con razón. Ese rechazo es el que dijo que no era su
+sitio: no es una página, es el hermano de `sw.js`.
+
+### Las dos cuentas
+
+Base y iteración 1, **las dos lideradas por producto**: el callejón de la Spec C, la versión del
+worker que no llegaba al navegador, y los 15 s en blanco del punto de entrada. Ninguna vuelta de esta
+spec fue sólo de arnés.
+
+### Reglas de la Spec C revisadas por ésta
+
+Dos, y están en la **deuda 82** con su medida, porque un acta cerrada no se reescribe pero alguien
+tiene que enlazarla: «agotar la cota no desvía» queda **invertida**, y «una ruta pública con la API
+caída se sirve sin redirección» vale para **tres de cuatro**.
+
+### Y la primera cifra falsa que no vino del constructor
+
+La revisión midió que `/` tardaba 32.627 ms; medido después con el entorno declarado, **15.022**. El
+doble, y motivando un cambio de mecanismo. Está en la **deuda 83**, y lo que dice vale más que el
+número: **una medida sin el entorno declarado no es una medida.** Las seis afirmaciones falsas
+anteriores de esta racha las escribió el constructor y las cazó la revisión; ésta es la primera al
+revés, y dice que el mecanismo que cazaba las otras tampoco es gratis.

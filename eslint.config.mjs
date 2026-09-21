@@ -18,6 +18,11 @@ const eslintConfig = defineConfig([
     // analizaba esta carpeta y una sonda de medición ponía roja la puerta — que es
     // justo lo que la carpeta ignorada debía evitar.
     ".claude/fathom/**",
+    // Spec I / I-R4 — `public/sw-version.js` lo escribe `scripts/version-sw.mjs` en cada
+    // `prebuild` y no entra en git. Lintear un generado es pedirle estilo a una plantilla:
+    // lo cazó `unit/puerta-lint.test.ts`, que compara lo que eslint analiza contra lo que el
+    // barrido mira — y un fichero que aparece y desaparece no lo puede mirar nadie.
+    "public/sw-version.js",
   ]),
 ]);
 

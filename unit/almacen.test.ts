@@ -1203,6 +1203,9 @@ describe('Spec E / R2 · el perímetro: un solo fichero del producto abre el alm
     docs: 'documentación', unit: 'pruebas unitarias', e2e: 'pruebas de navegador',
     supabase: 'migraciones y configuración de la base', 'test-results': 'salida de playwright',
     node_modules: 'dependencias',
+    /** Spec I / I-R4 — corre en `prebuild`, en Node, y escribe un fichero. Nunca llega al
+     *  navegador, así que el almacén del dispositivo no está a su alcance. */
+    scripts: 'generadores del build',
   }
   /** Configuración de la raíz: corre en el build o en el runner, no en el navegador. */
   const CONFIG = new Set(['next.config.ts', 'postcss.config.mjs', 'eslint.config.mjs',

@@ -111,37 +111,43 @@ describe('DoD 4 y 5 · R3, lo que NO cambia: sin sesión válida se sigue yendo 
   })
 })
 
-describe('DoD 6 y 6b · R4, la cota es del veredicto — y agotarla NO desvía', () => {
+describe('Spec I / I-R2 · la cota es del veredicto — y agotarla SÍ desvía', () => {
   /**
-   * Medido en la spec (§2): `getUser()` **reintenta** los fallos de red, así que acotar
-   * cada intento no acota nada — una sonda con la API colgada no dio veredicto en 80 s.
-   * Aquí el doble no resuelve nunca, que es exactamente ese caso.
+   * **Esta fila invierte su aserción, y es una de las dos que la Spec I declara.**
    *
-   * Y el destino es el **login**, no la cáscara: un timeout no es evidencia de nada.
-   * `status 0` dice que la red falló; una espera agotada sólo dice que no sabemos, y
-   * desviar sobre «no sé» relaja R3. La primera versión desviaba, y puso rojos cuatro
-   * casos de navegador —uno de ellos fila de la valla— porque las sesiones **inválidas**
-   * tardan en ser rechazadas y acababan en la cáscara.
+   * Decía: el destino es el login, porque «un timeout no es evidencia de nada». Ahora es la
+   * cáscara, y la evidencia que lo justifica es un abismo medido: contra la instancia local, todo lo
+   * que el servidor contesta se resuelve **por debajo de 100 ms** —sana con refresco 76 ms, inválida
+   * 3 ms, usuario borrado 6 ms— y todo lo que no contesta tarda **25–31 s**, porque `getUser`
+   * reintenta. Con tres órdenes de magnitud de separación, agotar una cota corta **sí** dice algo.
+   *
+   * Y su motivo escrito —«las sesiones inválidas tardan en ser rechazadas y acababan en la
+   * cáscara»— se midió falso: tardan 3 y 6 ms.
+   *
+   * Lo que esto arregla: con la cota anterior de 12 s, ni un proyecto dormido ni uno caído llegaban
+   * **nunca** a la cáscara. Los dos la agotaban, no desviaban, y caían al login — el callejón que la
+   * Spec C existía para cerrar, con su mecanismo construido y sin alcanzar su caso.
    */
-  it('si getUser no contesta, la espera termina y cae al login', async () => {
+  it('si getUser no contesta, la espera termina y desvía a la cáscara', async () => {
     getUser.mockReturnValue(new Promise(() => {}))
     vi.useFakeTimers()
     try {
       const enCurso = pedir('/g/abc')
       /**
-       * iter3 DoD 4 — A los 10,5 s —ya pasada la cota del **transporte**— todavía no hay
-       * veredicto: la del veredicto va estrictamente por encima. Igualadas, el destino lo
-       * decidía una diferencia de milisegundos. Este `race` contra un temporizador propio
-       * es lo que pone rojo el caso si alguien las vuelve a empatar.
+       * La relación con la cota del transporte se invirtió: el veredicto (2 s) vence **antes** que
+       * el transporte (10 s), y a propósito. Ya no hay empate que romper: el veredicto siempre gana,
+       * que es lo que hace el destino determinista. A 1,5 s todavía no hay veredicto; esta línea se
+       * pone roja si alguien baja la cota hasta empatarla con el render.
        */
       let resuelta = false
       void enCurso.then(() => { resuelta = true })
-      await vi.advanceTimersByTimeAsync(10_500)
-      expect(resuelta, 'la cota del veredicto empató con la del transporte').toBe(false)
+      await vi.advanceTimersByTimeAsync(4_000)
+      expect(resuelta, 'la cota venció antes de su plazo').toBe(false)
 
-      await vi.advanceTimersByTimeAsync(2_000)
+      await vi.advanceTimersByTimeAsync(1_000)
       expect(destino(await enCurso)?.pathname,
-        'agotar la cota desvió a la cáscara: eso es desviar sobre «no sé»').toBe('/login')
+        'agotar la cota cayó al login: quien tiene sesión se queda fuera de su propia lista')
+        .toBe('/sin-conexion')
     } finally { vi.useRealTimers() }
   })
 })
@@ -173,22 +179,47 @@ describe('R3 · lo que la pasada de mutación encontró sin guardar', () => {
   })
 })
 
-describe('iter1 · una respuesta lenta pero sana no se confunde con una caída', () => {
+describe('Spec I / I-R2 · una respuesta sana pero tardía SÍ se desvía — decisión provisional', () => {
   /**
-   * El hueco por el que entró la regresión. Con la cota en 3 s, cuatro casos de navegador
-   * se pusieron rojos —tres tardando 15–16 min— porque `getUser` **tarda** cuando refresca
-   * el token, y tardar se estaba leyendo como «no contesta»: la misma confusión que esta
-   * spec arregla, una capa más abajo. Ningún caso ejercitaba «tarda y contesta bien», así
-   * que ni los tests ni la pasada de mutación podían verlo.
+   * **La segunda fila que la Spec I invierte, y la que no estaba declarada cuando se selló.** Salió
+   * del build, se paró, y se declaró antes de tocarla.
+   *
+   * Afirmaba que una respuesta sana a los 9 s debía respetarse, sobre el lema «tardar no es no
+   * contestar». Ese lema era **una suposición sobre el servidor, no una propiedad del producto**, y
+   * su justificación escrita —que `getUser` tarda al refrescar, y que 3 s enrojeció cuatro casos—
+   * se midió falsa dos veces: un refresco cuesta 29 ms, y los cuatro casos no se reproducen por
+   * ninguno de los tres caminos que se probaron.
+   *
+   * **El intercambio, escrito como decisión PROVISIONAL y no como cerrada:**
+   *
+   * - *Qué se acepta:* una respuesta sana que tarde más que la cota se desvía a la cáscara. No es un
+   *   callejón —la cáscara enseña la lista que el dispositivo guarda y deja apuntar—, pero es una
+   *   pantalla distinta de la que el usuario pidió.
+   * - *De qué depende:* de cuánto tarda en contestar un proyecto de Supabase **despertando**, que
+   *   **no está medido** y no se puede medir desde local, porque el contenedor no duerme.
+   * - *Cuándo se revisa:* en el primer despliegue, con esa medida delante. **Si un proyecto dormido
+   *   contesta en varios segundos, este intercambio manda a la cáscara a quien abra la app tras una
+   *   semana sin usarla — que es el uso normal de una lista familiar, no un caso raro.**
    */
-  it('si el veredicto llega dentro de la cota, se respeta aunque tarde', async () => {
+  it('si el veredicto llega después de la cota, se desvía aunque sea sano', async () => {
     vi.useFakeTimers()
     try {
       getUser.mockReturnValue(new Promise((ok) => { setTimeout(() => ok(conSesion), 9_000) }))
       const enCurso = pedir('/g/abc')
       await vi.advanceTimersByTimeAsync(9_500)
+      expect(destino(await enCurso)?.pathname,
+        'una respuesta tardía se respetó: la cota no está acotando nada').toBe('/sin-conexion')
+    } finally { vi.useRealTimers() }
+  })
+
+  it('y si llega DENTRO de la cota, se respeta — la mitad que no cambia', async () => {
+    vi.useFakeTimers()
+    try {
+      getUser.mockReturnValue(new Promise((ok) => { setTimeout(() => ok(conSesion), 1_000) }))
+      const enCurso = pedir('/g/abc')
+      await vi.advanceTimersByTimeAsync(4_000)
       expect(destino(await enCurso),
-        'una respuesta lenta pero válida acabó desviada: tardar no es no contestar').toBeNull()
+        'una respuesta sana dentro de la cota acabó desviada').toBeNull()
     } finally { vi.useRealTimers() }
   })
 })
@@ -219,7 +250,7 @@ describe('iter4 R1 · al vencer la cota, la señal que llega al transporte se ab
     vi.useFakeTimers()
     try {
       const enCurso = pedir('/g/abc')
-      await vi.advanceTimersByTimeAsync(12_500)
+      await vi.advanceTimersByTimeAsync(5_500)
       await enCurso
       expect(señal?.aborted,
         'la guarda venció su cota y dejó la petición viva: puede rotar el token después de responder')
@@ -239,17 +270,40 @@ describe('iter4 R1 · al vencer la cota, la señal que llega al transporte se ab
     vi.useFakeTimers()
     try {
       const enCurso = pedir('/g/abc')
-      await vi.advanceTimersByTimeAsync(5_000)
+      // Spec I — sólo la constante: la cota bajó de 12 s a 2 s y la propiedad que esta sonda
+      // vigila —«no aborta antes de vencer»— no cambia.
+      await vi.advanceTimersByTimeAsync(4_000)
       expect(señal?.aborted, 'abortó antes de vencer la cota').toBe(false)
-      await vi.advanceTimersByTimeAsync(8_000)
+      await vi.advanceTimersByTimeAsync(2_000)
       await enCurso
     } finally { vi.useRealTimers(); vi.unstubAllGlobals() }
   })
 })
 
-describe('DoD 8 · una ruta pública con la API caída se sirve sin redirección', () => {
-  it.each(['/', '/login', '/sin-conexion', '/invite/tok3n'])('%s', async (ruta) => {
+describe('DoD 8 · una ruta pública con la API caída se sirve sin redirección — salvo la portada', () => {
+  /**
+   * **Spec I / i1-R8 — esta fila pierde `/`, y es la cuarta de la valla que esta spec cambia.**
+   *
+   * La propiedad se conserva donde tiene sentido: con la API caída no puedes entrar ni aceptar una
+   * invitación, pero la pantalla que pides es la tuya, y desviarla sería decidir por ti.
+   *
+   * `/` es distinta por una razón medida y no por gusto: es `start_url` del manifiesto, o sea el
+   * punto de entrada de la app instalada, y tardaba **15.022 ms** en blanco para acabar pintando la
+   * portada de invitado a alguien que tiene sesión y tiene su lista guardada en el dispositivo.
+   * (Medido con `supabase_auth_super` pausado y los otros diez contenedores arriba; los 15 s son los
+   * 5 de la cota del proxy más los 10 de `NETWORK_TIMEOUT_MS` que paga el `getUser()` del render.)
+   * La cáscara enseña esa lista y deja apuntar.
+   */
+  it.each(['/login', '/sin-conexion', '/invite/tok3n'])('%s', async (ruta) => {
     getUser.mockResolvedValue(sinRed)
     expect(destino(await pedir(ruta)), 'se desvió una ruta pública').toBeNull()
+  })
+
+  it('la portada sí, y con el destino conservado', async () => {
+    getUser.mockResolvedValue(sinRed)
+    const d = destino(await pedir('/'))
+    expect(d?.pathname, 'la portada se quedó esperando: 15 s en blanco en la app instalada')
+      .toBe('/sin-conexion')
+    expect(d?.searchParams.get('next'), 'se perdió el destino').toBe('/')
   })
 })

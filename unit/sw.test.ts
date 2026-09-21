@@ -1,5 +1,9 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { execSync } from 'node:child_process'
+
+/** El respaldo de `sw.js` cuando `importScripts` no existe, que es el caso de este banco. */
+const VERSION_EN_BANCO = 'super-sin-version'
 
 /**
  * R9 / DoD 15 — El criterio de prueba suficiente que la spec escribió antes de
@@ -43,7 +47,13 @@ function cargarSW(origen = 'https://app.example', traidas: Record<string, Traida
       },
     }),
     match: async (clave?: string) => guardado.get(clave ?? ''),
-    keys: async () => ['super-v2', 'super-vieja', 'otra-cosa'],
+    /**
+     * Spec I / I-R4 — La versión del worker ya no es un literal de `sw.js`: la trae
+     * `sw-version.js`, generado a partir del sha del commit. En este banco `importScripts` no
+     * existe, así que el worker cae a su respaldo y se llama `super-sin-version`. Lo que estas
+     * filas vigilan —purgar sólo lo ajeno, borrar lo propio al fallar— no cambia; cambia el nombre.
+     */
+    keys: async () => [VERSION_EN_BANCO, 'super-vieja', 'otra-cosa'],
     delete: async (n: string) => { borradas.push(n); return true },
   }
   const yo = {
@@ -196,7 +206,7 @@ describe('R9 el service worker no toca datos ni sesión', () => {
     const nuevo = cargarSW()
     await nuevo.activar()
     expect(nuevo.borradas, 'no purgó la caché de la versión anterior').toContain('super-vieja')
-    expect(nuevo.borradas, 'se llevó por delante su propia caché').not.toContain('super-v2')
+    expect(nuevo.borradas, 'se llevó por delante su propia caché').not.toContain(VERSION_EN_BANCO)
     /**
      * I8 / DoD 29 — La versión anterior de este test afirmaba que una caché
      * ajena **debía** borrarse, que es lo contrario de lo que el DoD dice. El
@@ -334,7 +344,7 @@ describe('M4 una instalación a medias no deja nada escrito', () => {
     })
     await expect(sw.instalar()).rejects.toThrow()
     expect(sw.borradas, 'el intento fallido dejó la caché a medias: el siguiente la reutiliza')
-      .toContain('super-v2')
+      .toContain(VERSION_EN_BANCO)
   })
 
   it('DoD 67: un chunk que vuelve como HTML —un portal cautivo— no se guarda', async () => {
@@ -404,5 +414,60 @@ describe('Spec C la sonda de la cáscara no la responde el worker', () => {
       'dejó de servir el documento: no hay modo sin red').toBe(true)
     expect(sw.pide('https://app.example/_next/static/chunks/a.js', 'cors'),
       'dejó de servir el estático: el shell no hidrata').toBe(true)
+  })
+})
+
+describe('Spec I / I-R4 · la versión del worker viene del build, no de este fichero', () => {
+  /**
+   * Deuda 31. `VERSION` era `'super-v2'`, un literal escrito a mano, y `sw.js` no se regenera: sus
+   * bytes eran **idénticos entre despliegues**. El navegador no reinstala si los bytes no cambian,
+   * y `activate` sólo purga cachés `super-*` distintas de la actual — que nunca las hay. Resultado
+   * medido y escrito en la deuda: el shell se congela en el build de la primera instalación.
+   *
+   * Lo que pone roja esta fila: que alguien devuelva un literal a `sw.js`.
+   */
+  it('i6: `sw.js` no lleva ninguna versión escrita a mano', () => {
+    const fuente = readFileSync('public/sw.js', 'utf8')
+    /**
+     * Se busca la **forma de una asignación**, no el literal suelto. La primera versión buscaba
+     * `'super-vN'` en cualquier parte y se puso roja sobre el comentario que explica el arreglo, que
+     * cita el valor viejo a propósito: una guarda que no distingue código de prosa es la que «detecta
+     * todo», y ésas se acaban desactivando.
+     */
+    // i1-R10 — las tres formas de escribir un literal, no sólo la de comillas simples. Medido por
+    // la revisión: `"super-v3"` y las comillas graves pasaban por delante de la guarda.
+    const asignaciones = fuente.match(/VERSION\s*=\s*['"`]super-[^'"`]*['"`]/g) ?? []
+    expect(asignaciones, 'hay una versión escrita a mano: los bytes no cambiarán entre despliegues')
+      .toEqual([])
+    expect(fuente, 'la versión no se toma del generado').toContain("importScripts('/sw-version.js')")
+  })
+
+  it('i6 bis: el generado existe y su versión sale del commit', () => {
+    const gen = readFileSync('public/sw-version.js', 'utf8')
+    const m = gen.match(/self\.SW_VERSION = '([^']+)'/)
+    expect(m, 'el generado no declara una versión').not.toBeNull()
+    /**
+     * §E.2 — Que exista no basta: tiene que **atarse al artefacto**. Se compara contra el sha que
+     * el propio script usa, así que un generador que escribiera una constante pondría esto rojo.
+     */
+    let sha: string | null = null
+    try { sha = execSync('git rev-parse --short HEAD', { encoding: 'utf8' }).trim() } catch { /* sin git */ }
+    if (sha) {
+      expect(m![1], 'la versión generada no corresponde al commit del árbol').toBe(`super-${sha}`)
+    }
+  })
+
+  it('i7: la prosa de `sw.js` no afirma un mecanismo que no existe', () => {
+    /**
+     * Deuda 32. El comentario de la purga decía que un reintento «sólo pediría los recursos que
+     * faltaban». `guardarRecurso` hace `fetch` siempre: no hay rama que salte lo cacheado. La fila
+     * vigila las dos mitades — que la frase no vuelva, y que el mecanismo que sí cierra la cadena
+     * (la comprobación de `content-type`) siga en pie.
+     */
+    const fuente = readFileSync('public/sw.js', 'utf8')
+    expect(fuente, 'volvió la afirmación de que el reintento sólo pide lo que falta')
+      .not.toMatch(/sólo pediría los recursos que\s+\*?\s*faltaban/)
+    expect(fuente, 'desapareció la comprobación que sí cierra la cadena del portal cautivo')
+      .toMatch(/text\/html/)
   })
 })

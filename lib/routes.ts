@@ -17,6 +17,48 @@
  */
 export const PUBLIC_ROUTES = ['/', '/login', '/auth/callback', '/invite', '/sin-conexion'] as const
 
+/**
+ * Spec I / I-R1 — **Rutas que no consumen la sesión.** La guarda se las sirve sin preguntar a
+ * Supabase, que es lo que permite que la cáscara llegue con la base dormida.
+ *
+ * Es **una sola**, y no «las públicas», porque se midió ruta por ruta: `/`, `/login` e
+ * `/invite/[token]` llaman a `getUser()` en su propio render —consumen la sesión— y además la guarda
+ * es el único punto donde el token se renueva, porque un Server Component no puede escribir cookies.
+ * Saltársela ahí dejaría la sesión sin refrescar. `/sin-conexion` no toca Supabase en absoluto: lee
+ * de IndexedDB.
+ *
+ * La lista va aquí y no en el matcher del proxy a propósito: excluir rutas del matcher es un parche
+ * que hay que mantener a mano cada vez que se añade una pública, y se olvida.
+ *
+ * **`/sw-version.js` NO está aquí, y dónde acabó lo decidió esta misma guarda.** El generado no era
+ * ruta pública, así que la petición anónima que hace el service worker al importarlo recibía **307 a
+ * `/login`**: `importScripts` lanzaba y entraba el respaldo — en Chromium real el worker se instalaba
+ * como `super-sin-version`. Meterlo en esta lista lo arreglaba, y el invariante de abajo lo rechazó
+ * con razón: se serviría sin sesión **sin ser una ruta pública**, que es el agujero que el invariante
+ * existe para impedir.
+ *
+ * Lo que dice ese rechazo es que la lista no era su sitio: `/sw-version.js` no es una página, es **el
+ * fichero del propio worker**, y su hermano `sw.js` lleva excluido en el matcher del proxy desde que
+ * existe, con su motivo escrito al lado. Ahí es donde está.
+ *
+ * **Dos afirmaciones que este comentario hacía y eran falsas, corregidas:**
+ *
+ * 1. Decía «con la misma guarda que comprueba que coincide con lo declarado». **Esa guarda no
+ *    existía.** Ahora sí: `unit/public-routes.test.ts`.
+ * 2. Decía «su modo de fallo es benigno: una ruta de más sólo pierde el refresco». **Medido falso**:
+ *    con `/g` en la lista, `/g/<uuid>` **sin sesión ninguna** devuelve 200 sin redirección — la
+ *    denegación de §A.3 desaparece del proxy y el destino se pierde. Lo que lo hace benigno de verdad
+ *    es el invariante de abajo, que lo impide en vez de confiarlo.
+ *
+ * **`RUTAS_SIN_SESION ⊆ PUBLIC_ROUTES`**, comprobado por su guarda: una ruta que no consume sesión
+ * pero tampoco es pública sería exactamente el agujero que la afirmación 2 negaba.
+ */
+export const RUTAS_SIN_SESION = ['/sin-conexion'] as const
+
+export function noConsumeSesion(pathname: string): boolean {
+  return RUTAS_SIN_SESION.some(r => pathname === r || pathname.startsWith(`${r}/`))
+}
+
 export function isPublicRoute(pathname: string): boolean {
   for (const route of PUBLIC_ROUTES) {
     if (route === '/') {

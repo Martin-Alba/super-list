@@ -218,12 +218,37 @@ el ciclo había medido **dos veces** y dejado caer sin escribir.
 
 ### Lo siguiente, decidido el 2026-09-20
 
-1. **Desplegar**, medido: el único trabajo de código era la deuda 31 (el service worker), y el resto
-   es panel —proyecto Supabase hosted, 13 migraciones, OAuth de Google, y dos variables en Vercel,
-   porque los tres clientes usan la anon key y en producción no hay clave de servicio—. El frente
-   nuevo no es desplegar: es **verificar lo desplegado** sin escribir usuarios de prueba en la base
-   de la familia.
+1. **Desplegar** — preparado por la Spec I, ver abajo.
 2. **Ciclo de vida del grupo** — hecho, es esta Spec H.
+
+### Spec I — Desplegar · **CERRADA el 2026-09-21** (base + 1 iteración)
+
+Acta en `docs/CHECKPOINT.md` › «2026-09-21 — Spec I». Texto íntegro en
+`.claude/fathom/spec-i/spec-i-verbatim.md` (fuera del repo, sobrevive a la sesión).
+
+**Corrigió tres premisas del encargo** —no hay `force-dynamic`, la plataforma da 300 s y no 10, y el
+bloqueo era el proxy y no las rutas— y con ellas encontró un defecto que existía **sin desplegar**:
+la cota del veredicto cortaba antes de que llegara la señal de red, así que el mecanismo de la Spec C
+no alcanzaba nunca su caso. Abrió las deudas **81**, **82** y **83**, y cerró la **31**.
+
+**La iteración 1 se cerró sin revisión**, por decisión explícita: está medida y con su rojo
+demostrado, pero nadie ajeno la ha gradado.
+
+### Lo que queda para desplegar, tras la Spec I
+
+Trabajo de código: **ninguno bloqueante**. El único que había —la deuda 31, la versión del service
+worker— está cerrado, y era el único que hay que hacer **antes** del primer despliegue, porque después
+cada dispositivo que instale queda congelado.
+
+Lo que falta son manos en el panel: crear el proyecto Supabase hosted · `link` + `db push` de las
+migraciones · el client id/secret de Google y la URL de callback en Google Cloud · Site URL y lista de
+redirecciones al dominio de Vercel · crear el proyecto Vercel con **dos** variables, porque los tres
+clientes usan la anon key y en producción no hay clave de servicio.
+
+**Y la primera medición que el despliegue habilita, que no se puede adelantar:** cuánto tarda en
+contestar un proyecto pausado al despertar. Es la única cifra que podría cambiar el diseño de la cota,
+y está declarada como decisión provisional en el acta con de qué depende y cuándo se revisa. En local
+no se puede medir: el contenedor no duerme.
 
 El diagnóstico que la motivaba —la regla sin dueño, y cada lector naciendo sin ella— no cambió
 al medirla, y está entero en el acta. Lo que **sí** cambió es el recuento, y conviene que quede: se hablaba de «tres sitios en la vista y un

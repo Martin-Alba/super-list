@@ -8,8 +8,46 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { appOrigin, esHostLocal } from './appOrigin'
 
+/**
+ * Spec I / i1-R6 — **La reparación va al empezar, no sólo al terminar.**
+ *
+ * `e2e/api-colgada.spec.ts` pausa el contenedor de auth para montar su escenario y lo despausa en su
+ * `finally` y en su `afterAll`. Eso cubre el caso normal y **no cubre el que importa**: medido, con
+ * `SIGKILL` el contenedor queda `Paused` indefinidamente, y con `SIGINT` despausa pero deja un
+ * `next start` huérfano. Un `pause` heredado envenena las 18 pasadas siguientes y el `pnpm test`
+ * unitario sin que nada lo nombre — el calentamiento de abajo devuelve 200 igual, porque esas dos
+ * rutas no piden sesión al arrancar.
+ *
+ * Es la **quinta** vez en este proyecto que una sonda deja el entorno roto para sus vecinas. Lo que
+ * corta la clase entera no es otra red de seguridad al salir: es reparar al entrar, que se ejecuta
+ * aunque el proceso anterior muriera de la peor forma.
+ *
+ * Idempotente a propósito: sin ese contenedor —otra máquina, otro proyecto— no hace nada y no falla.
+ */
+async function repararEntornoHeredado() {
+  const { execFileSync } = await import('node:child_process')
+  const CONTENEDOR = 'supabase_auth_super'
+  const estado = (() => {
+    try {
+      return execFileSync('docker', ['ps', '-a', '--format', '{{.Status}}', '--filter', `name=${CONTENEDOR}`],
+        { encoding: 'utf8' }).trim()
+    } catch { return '' }
+  })()
+  if (!estado.includes('Paused')) return
+  console.log('[global-setup] el contenedor de auth venía pausado de una pasada anterior: se repara')
+  try { execFileSync('docker', ['unpause', CONTENEDOR], { stdio: 'ignore' }) } catch { /* carrera */ }
+  for (let i = 0; i < 60; i++) {
+    const st = execFileSync('docker', ['ps', '--format', '{{.Status}}', '--filter', `name=${CONTENEDOR}`],
+      { encoding: 'utf8' }).trim()
+    if (st.includes('healthy') && !st.includes('unhealthy')) return
+    await new Promise(r => setTimeout(r, 500))
+  }
+  throw new Error('el contenedor de auth no volvió a estar sano: la tanda mediría otra cosa')
+}
+
 export default async function globalSetup() {
   const base = appOrigin()
+  if (esHostLocal(new URL(base).hostname)) await repararEntornoHeredado()
 
   for (const path of ['/', '/login']) {
     // J15 — la fecha límite es POR RUTA. Compartida, si `/` consumía los 60 s,

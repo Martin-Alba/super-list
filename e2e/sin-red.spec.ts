@@ -1647,3 +1647,36 @@ test('DoD g7: resultado desconocido, producto tachado, y al reintentar entra una
  * Complemento en la capa de módulo, que mira la otra mitad —lo que la caché rancia le hace al
  * encolado—: `unit/drenado.test.tsx` › «i3-1» y › «i3-2».
  */
+
+/**
+ * Spec I / i1-R2 — **La versión del worker, mirada donde de verdad existe.**
+ *
+ * `unit/sw.test.ts` lee `public/sw.js` **de disco** y por eso daba verde mientras el worker real se
+ * instalaba como `super-sin-version`: el generado no era ruta pública, el proxy lo redirigía a
+ * `/login`, `importScripts` lanzaba y entraba el respaldo. Escrito, probado y roto, porque las filas
+ * que lo vigilaban miraban la capa equivocada (§E.1).
+ *
+ * Esta fila mira el artefacto en un navegador, tras activar. Cierra la clase entera: el matcher, un
+ * 404 del generado, un build sin `prebuild`, o un respaldo que vuelva a tragárselo en silencio.
+ */
+test('j1 y j2: el worker se instala con la versión del commit, y su generado se sirve sin redirección',
+  async ({ browser }) => {
+    const a = await entrar(browser, 'swver')
+    await grupoCon(a.page, 'Familia Alba')
+    await shellGuardado(a.page)
+
+    // j2 — el generado, pedido tal cual lo pide el worker: sin sesión y sin seguir redirecciones.
+    const anon = await browser.newContext()
+    const res = await anon.request.get('/sw-version.js', { maxRedirects: 0 })
+    expect(res.status(),
+      'el generado redirige: `importScripts` lanzará y el worker caerá al respaldo').toBe(200)
+    expect(await res.text(), 'el generado no declara versión').toMatch(/self\.SW_VERSION = 'super-/)
+    await anon.close()
+
+    // j1 — y la caché que el worker abrió lleva esa versión, no la del respaldo.
+    const nombres: string[] = await a.page.evaluate(() => caches.keys())
+    expect(nombres.filter(n => n.startsWith('super-')),
+      `el worker se instaló con ${JSON.stringify(nombres)}: la versión no llegó al artefacto`)
+      .toEqual([expect.stringMatching(/^super-[0-9a-f]{7,40}$/)])
+    await a.ctx.close()
+  })

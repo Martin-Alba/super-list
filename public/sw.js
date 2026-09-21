@@ -17,7 +17,20 @@
  * la instantánea local del usuario que estaba dentro. Los datos siguen viviendo en
  * IndexedDB, que es lo único que `olvidarTodo` puede vaciar.
  */
-const VERSION = 'super-v2'
+/**
+ * Spec I / I-R4 — **La versión viene del build, no de este fichero.**
+ *
+ * Era `'super-v2'`, un literal escrito a mano, así que los bytes de `sw.js` no cambiaban entre
+ * despliegues — y el navegador no reinstala si los bytes no cambian. `scripts/version-sw.mjs` genera
+ * `sw-version.js` a partir del sha del commit; con `importScripts` esos bytes entran aquí, así que
+ * cambiar de despliegue cambia este fichero.
+ *
+ * El respaldo no es cosmético: si el generado faltara —un checkout sin `prebuild`—, `importScripts`
+ * lanza y el `install` entero falla. Con el `try` el worker se instala con una versión constante, que
+ * es el comportamiento de antes: peor que la versión atada, mejor que sin service worker.
+ */
+try { importScripts('/sw-version.js') } catch { /* respaldo abajo */ }
+const VERSION = self.SW_VERSION ?? 'super-sin-version'
 const SHELL = '/sin-conexion'
 /** Lo que acompaña al shell y puede faltar sin que deje de servir. */
 const ACCESORIOS = ['/icon-192.png', '/icon-512.png']
@@ -128,12 +141,19 @@ self.addEventListener('install', (evento) => {
       await self.skipWaiting()
     } catch (e) {
       /**
-       * M4 — Una instalación a medias es peor que ninguna. Lo que quedara escrito
-       * se serviría de caché sin revalidar, y el reintento del día siguiente se
-       * encontraría el shell ya guardado y sólo pediría los recursos que
-       * faltaban: bajo un portal cautivo, eso es guardar su HTML bajo la clave de
-       * cada chunk. Medido con un banco que conserva la caché entre intentos, que
-       * es lo que hace el navegador. Se deja el sitio vacío.
+       * M4 — Una instalación a medias es peor que ninguna: lo que quedara escrito se serviría de
+       * caché sin revalidar. Se deja el sitio vacío.
+       *
+       * **Spec I / I-R5 — y lo que este párrafo decía de más, retirado (deuda 32).** Afirmaba que
+       * «el reintento del día siguiente se encontraría el shell ya guardado y sólo pediría los
+       * recursos que faltaban». Es falso, y se comprueba en diez líneas más arriba:
+       * `guardarRecurso` hace `fetch` **siempre**, sin mirar si el recurso ya está en la caché — no
+       * hay ninguna rama que salte lo cacheado, así que un reintento vuelve a pedirlo todo.
+       *
+       * Con eso cae también la conclusión que colgaba de ahí: quien cierra la cadena del portal
+       * cautivo **no es esta purga**, es la comprobación de `content-type` de `guardarRecurso`, que
+       * rechaza cualquier `text/html`. La purga sigue siendo correcta —una caché a medias no sirve
+       * para nada— pero no es lo que impide guardar el HTML del portal bajo la clave de un chunk.
        */
       await caches.delete(VERSION)
       throw e
