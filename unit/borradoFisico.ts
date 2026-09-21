@@ -14,9 +14,17 @@ import { analizar } from './comentarios'
  * es un rojo hasta que alguien la declare segura por escrito.
  */
 export const RPC_DEL_PRODUCTO = new Set([
-  'create_group', 'create_invite', 'decide_member', 'invite_preview', 'is_active_member',
-  'is_group_owner', 'leave_group', 'owns_group_of', 'request_join', 'shares_active_group',
+  'create_group', 'create_invite', 'decide_member', 'delete_group', 'invite_preview',
+  'is_active_member', 'is_group_owner', 'leave_group', 'owns_group_of', 'request_join',
+  'shares_active_group', 'transfer_group',
 ])
+/**
+ * Spec H — `delete_group` entra en esta lista y el nombre asusta a propósito. Lo que hace es poner
+ * `status='removed'` en cada membresía y `revoked_at` en cada invitación: **ni un `delete`**. Un
+ * borrado físico sobre `group_members` o `items` sería hard fail, porque las dos están publicadas en
+ * `supabase_realtime` y los DELETE están exentos de RLS. Quien dude tiene la migración
+ * `20260920000100_transferir_borrar.sql` y `unit/no-physical-delete.test.ts` al lado.
+ */
 
 const PELIGRO_SQL = /\b(delete\s+from|truncate)\b/i
 
