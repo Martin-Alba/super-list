@@ -31,7 +31,7 @@ export function PendingView({ groupId, userId }: { groupId: string; userId: stri
   })
 
   return (
-    <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center gap-4 p-6 text-center">
+    <main className="mx-auto flex w-full min-h-dvh max-w-md flex-col justify-center gap-4 p-6 text-center">
       <h1 className="text-2xl font-semibold" data-testid="pending">Esperando aprobación</h1>
       <p className="text-neutral-500">
         Ya has pedido entrar. Cuando quien creó el grupo lo acepte, verás la lista aquí.

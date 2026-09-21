@@ -403,7 +403,7 @@ export default function SinConexion() {
   }
 
   return (
-    <main className="mx-auto flex min-h-dvh max-w-md flex-col gap-4 p-4">
+    <main className="mx-auto flex w-full min-h-dvh max-w-md flex-col gap-4 p-4">
       <div className="flex items-center justify-between gap-2">
         {/**
           * R6 — La salida. La navegación la intercepta el service worker y, si
@@ -467,14 +467,14 @@ export default function SinConexion() {
           {items?.map(i => (
             <li key={i.id} data-testid="item"
                 className="flex items-center gap-2 rounded-xl border border-neutral-200 p-3">
-              <span className="min-w-0 flex-1 truncate">{i.name}</span>
+              <span className="flex-1 truncate">{i.name}</span>
               {i.quantity && <span className="shrink-0 text-neutral-500">{i.quantity}</span>}
             </li>
           ))}
           {pendientes.map(p => (
             <li key={p.id} data-testid="pendiente"
                 className="flex items-center gap-2 rounded-xl border border-dashed border-neutral-400 p-3">
-              <span className="min-w-0 flex-1 truncate">{p.nombre}</span>
+              <span className="flex-1 truncate">{p.nombre}</span>
               {p.cantidad && <span className="shrink-0 text-neutral-500">{p.cantidad}</span>}
             </li>
           ))}

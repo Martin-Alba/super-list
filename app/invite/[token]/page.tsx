@@ -12,7 +12,7 @@ export default async function InvitePage({ params }: { params: Promise<{ token: 
   // Borde 1 y 9: caducado, revocado, inexistente y malformado dicen lo mismo.
   if (!preview?.valid) {
     return (
-      <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center gap-4 p-6 text-center">
+      <main className="mx-auto flex w-full min-h-dvh max-w-md flex-col justify-center gap-4 p-6 text-center">
         <h1 className="text-2xl font-semibold" data-testid="invite-invalid">Este link ya no sirve</h1>
         <p className="text-neutral-500">Puede haber caducado o haber sido reemplazado por uno nuevo.</p>
       </main>
@@ -23,7 +23,7 @@ export default async function InvitePage({ params }: { params: Promise<{ token: 
   // pero unirse exige sesión; el token se conserva en el destino.
   if (!user) {
     return (
-      <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center gap-4 p-6 text-center">
+      <main className="mx-auto flex w-full min-h-dvh max-w-md flex-col justify-center gap-4 p-6 text-center">
         <h1 className="text-2xl font-semibold">Te invitan a un grupo</h1>
         <Link href={`/login?next=${encodeURIComponent(`/invite/${token}`)}`}
           data-testid="invite-login" className="min-h-[44px] rounded-xl bg-neutral-900 px-5 py-3 text-white">

@@ -12,7 +12,7 @@ export default async function LoginPage({
   if (user) redirect(safeNext(next))
 
   return (
-    <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center gap-8 p-6">
+    <main className="mx-auto flex w-full min-h-dvh max-w-md flex-col justify-center gap-8 p-6">
       <div>
         <h1 className="text-3xl font-semibold">Super</h1>
         <p className="mt-2 text-neutral-500">La lista de la compra, compartida.</p>
