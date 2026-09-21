@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { claseDe, mensajeDe , refinarSinRed } from '../lib/errors'
+import { CANTIDAD_FUERA, claseDe, mensajeDe, refinarSinRed, TEXTO } from '../lib/errors'
 
 /**
  * L5 / DoD 67 — `failed to fetch` es el texto del navegador; Node, en servidor,
@@ -131,5 +131,43 @@ describe('Spec C · el sondeo sube y luego se sostiene', () => {
     const { esperasDeReintento } = await import('@/lib/errors')
     expect(esperasDeReintento(), 'se cambió una cadencia compartida')
       .toEqual([1_000, 2_000, 4_000, 8_000, 8_000])
+  })
+})
+
+/**
+ * Spec J / i1-R3, i4 — **El aviso del rango dice el rango.**
+ *
+ * `23514` lo levantan cuatro restricciones distintas de este esquema, y sin desviar la de la
+ * cantidad, teclear `100` se le anunciaba a alguien como «revisa que no esté vacío y que no
+ * sea demasiado largo»: ni una cosa ni la otra, y sin ninguna pista de qué hacer. El borde de
+ * la spec promete que la base lo rechaza **y el aviso lo dice**.
+ */
+describe('Spec J · i4 el 23514 de la cantidad se distingue del resto', () => {
+  const comoLoManda = (message: string) => mensajeDe(claseDe({ message, code: '23514' }))
+
+  it('el de la cantidad nombra el rango', () => {
+    expect(comoLoManda(
+      'new row for relation "items" violates check constraint "items_quantity_num"'))
+      .toBe(CANTIDAD_FUERA)
+  })
+
+  /**
+   * La sonda, y es la que importa: los otros tres `23514` del esquema **no** pueden acabar
+   * diciendo lo de la cantidad. Sin ella, desviar el código entero cumpliría la fila de
+   * arriba y estropearía los tres de al lado.
+   */
+  it.each([
+    ['el nombre en blanco', 'violates check constraint "items_name_check"'],
+    ['el nombre demasiado largo', 'violates check constraint "items_name_len"'],
+    ['la cantidad demasiado larga', 'violates check constraint "items_quantity_len"'],
+    ['el nombre del grupo', 'violates check constraint "groups_name_check"'],
+  ])('y %s sigue siendo el aviso de texto', (_n, message) => {
+    expect(comoLoManda(message), 'se desvió un 23514 que no es el de la cantidad').toBe(TEXTO)
+  })
+
+  it('la sonda al revés — sin el desvío, el rango se anuncia como problema de texto', () => {
+    // Se ataca el criterio: si `ES_CANTIDAD` dejara de distinguir, esto es lo que se vería.
+    expect(TEXTO, 'los dos avisos son el mismo: la fila de arriba no prueba nada')
+      .not.toBe(CANTIDAD_FUERA)
   })
 })

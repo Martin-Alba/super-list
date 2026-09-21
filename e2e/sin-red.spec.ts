@@ -3,7 +3,7 @@ import { nuevoFlujoPkce, nuevoTarro, paraNavegador } from './pkce'
 import { admin } from './fixtures'
 import { DUPLICADO, EN_COLA, PENDIENTE, RED, SERVIDOR, SIN_INSTANTANEA, SIN_RED, SIN_RED_ACCION,
   SIN_RED_FUERA, SIN_RED_CON_COPIA, SIN_RED_ESPERANDO } from '../lib/errors'
-import { addActiveMember, createUser, makeGroup, signedInContext } from './fixtures'
+import { addActiveMember, createUser, makeGroup, signedInContext, tokenVivo } from './fixtures'
 import { appOrigin } from './appOrigin'
 
 /**
@@ -597,7 +597,8 @@ test('DoD 36 y 37: un pending no ve, sin red, la lista del anterior en el mismo 
     expect(await ultimoUsuario(a.page), 'no se registró quién estaba dentro').toBe(a.id)
 
     await a.page.getByTestId('create-invite').click()
-    const enlace = await a.page.getByTestId('invite-link').inputValue()
+    // Spec J / j15 — por API: el campo de sólo lectura era un atajo del arnés, no un requisito.
+    const enlace = `${appOrigin()}/invite/${await tokenVivo(gid)}`
 
     // A se va sin pulsar «salir»: la sesión simplemente deja de valer.
     await ctx.clearCookies()

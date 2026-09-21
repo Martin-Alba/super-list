@@ -12,11 +12,22 @@ test('ninguna pantalla del flujo desborda a 390 px', async ({ browser }) => {
   const member = await createUser('mob-member')
   const { groupId, client } = await makeGroup(owner, 'Familia Alba con nombre bastante largo')
   await addActiveMember(owner, groupId, member)
-  await client.from('items').insert({
+  /**
+   * Spec J — la cantidad pasa de `'12 unidades'` a `'99'`, y para lo que esta prueba mide
+   * —desbordamiento a 390 px— es **el peor caso de verdad**: desde J-R1 la columna no puede
+   * contener nada más ancho que dos dígitos, así que estresar con once caracteres medía una
+   * anchura que el producto ya no puede producir.
+   *
+   * Y se comprueba el error del insert, que no se comprobaba: sin esto la restricción nueva
+   * habría dejado la lista vacía y la prueba de desbordamiento habría pasado por no tener
+   * nada que desbordar.
+   */
+  const puesto = await client.from('items').insert({
     group_id: groupId, created_by: owner.id,
     name: 'un producto con un nombre francamente larguísimo para forzar el desbordamiento',
-    quantity: '12 unidades',
+    quantity: '99',
   })
+  expect(puesto.error, 'no se pudo sembrar el ítem: no hay nada que pueda desbordar').toBeNull()
   const token = await makeInvite(owner, groupId)
 
   const ctx = await signedInContext(browser, owner)
@@ -64,6 +75,59 @@ test('los controles de acción miden al menos 44 px', async ({ browser }) => {
     expect(box, `${id} no está en pantalla`).not.toBeNull()
     expect(box!.height, `${id} mide ${box!.height}px de alto`).toBeGreaterThanOrEqual(44)
   }
+
+  /**
+   * Spec J / k8 — **El mando del enlace, que sólo existe después de generarlo.**
+   *
+   * No estaba en la lista de arriba porque no está en pantalla hasta que se pulsa «Generar»,
+   * y un `getByTestId` sobre algo que no existe no falla: devuelve una caja nula y el bucle
+   * ni lo mira. Hoy cumple por el texto que lleva dentro, no por declaración, que es
+   * literalmente la cicatriz R9 —«declaraba alto mínimo pero no ancho»—.
+   *
+   * Cuál de los dos se pinta lo decide el navegador, así que se mide **el que haya**: en el
+   * Chromium de Playwright no hay `navigator.share` y sale `copy-invite`.
+   */
+  await page.getByTestId('create-invite').click()
+  const mando = page.getByTestId('copy-invite').or(page.getByTestId('share-invite'))
+  await expect(mando, 'no se pintó ninguno de los dos mandos del enlace').toBeVisible()
+  const cajaMando = await mando.boundingBox()
+  expect(cajaMando!.height, `el mando del enlace mide ${cajaMando!.height}px de alto`)
+    .toBeGreaterThanOrEqual(44)
+  // m8 — **Y el ancho**, que es lo que la cicatriz R9 midió: «declaraba alto mínimo y no ancho».
+  expect(cajaMando!.width, `el mando del enlace mide ${cajaMando!.width}px de ancho`)
+    .toBeGreaterThanOrEqual(44)
+  await ctx.close()
+})
+
+/**
+ * Spec J / m8 — **El OTRO mando, el que este navegador no pinta.**
+ *
+ * El `.or()` de arriba resuelve al único que existe —`copy-invite`, porque el Chromium de
+ * Playwright no trae `navigator.share`—, así que `share-invite` no se medía nunca. Y su
+ * inalcanzabilidad **no estaba ganada**: sembrar `navigator.share` lo pinta, que es lo que hace
+ * esta prueba. Es el mando que ve un móvil, o sea el único que mucha gente va a tocar.
+ */
+test('el mando de compartir mide al menos 44x44 cuando el navegador lo ofrece', async ({ browser }) => {
+  const owner = await createUser('mob-owner3')
+  const { groupId } = await makeGroup(owner)
+  const ctx = await signedInContext(browser, owner)
+  const page = await ctx.newPage()
+  // Se siembra antes de cargar: `puedeCompartir` se decide en el handler del click, con el
+  // `navigator` que haya entonces.
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'share', { value: async () => {}, configurable: true })
+    Object.defineProperty(navigator, 'canShare', { value: () => true, configurable: true })
+  })
+  await page.goto(`/g/${groupId}`)
+
+  await page.getByTestId('create-invite').click()
+  const compartir = page.getByTestId('share-invite')
+  await expect(compartir, 'con navigator.share sembrado no se pintó el mando de compartir')
+    .toBeVisible()
+  await expect(page.getByTestId('copy-invite'), 'se pintaron los dos').toHaveCount(0)
+  const caja = await compartir.boundingBox()
+  expect(caja!.height, `share-invite mide ${caja!.height}px de alto`).toBeGreaterThanOrEqual(44)
+  expect(caja!.width, `share-invite mide ${caja!.width}px de ancho`).toBeGreaterThanOrEqual(44)
   await ctx.close()
 })
 

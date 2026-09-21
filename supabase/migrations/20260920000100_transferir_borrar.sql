@@ -144,8 +144,13 @@ begin
 end;
 $$;
 
+-- **Sólo `transfer_group` aquí.** El de `delete_group` estaba en esta línea y su función se crea
+-- 28 líneas más abajo: una referencia hacia adelante que en local nunca falló —la función ya existía
+-- de una aplicación anterior del fichero, porque su primera versión la definía arriba— y que reventó
+-- el `db push` contra el proyecto hospedado, donde la base estaba vacía:
+--   `ERROR: function public.delete_group(uuid) does not exist (SQLSTATE 42883)`
+-- Sus `grant` y `revoke` viven al final, junto a la definición.
 grant execute on function public.transfer_group(uuid,uuid) to authenticated;
-grant execute on function public.delete_group(uuid)        to authenticated;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Privilegios: revocar el `execute` implícito a `PUBLIC`.
@@ -156,7 +161,7 @@ grant execute on function public.delete_group(uuid)        to authenticated;
 -- cerrar por defecto. Lo cazó `unit/grants.test.ts` › «sólo invite_preview es invocable por anon», que
 -- existe exactamente para esto.
 revoke all on function public.transfer_group(uuid,uuid) from public, anon;
-revoke all on function public.delete_group(uuid)        from public, anon;
+-- (el de `delete_group`, al final del fichero: aquí su función todavía no existe)
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- `groups.deleted_at` — y esto contradice el «fuera de alcance» de la spec, con su motivo medido.

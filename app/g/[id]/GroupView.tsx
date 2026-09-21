@@ -7,11 +7,13 @@ import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
 import { activeItems, addItem, mergeItems, mismoProducto, normNombre, softDeleteItem, updateItem,
   type FilaAEnviar, type Item } from '@/lib/items'
-import { caducados, EN_COLA, ESCRIBE_NOMBRE, esperasDeReintento, GONE, LISTA_EN_VIVO, mensajeDe,
+import { caducados, CANTIDAD_FUERA, COMPARTIR_FALLO, COPIADO, COPIAR_FALLO, esCancelacion,
+  EN_COLA, ESCRIBE_NOMBRE, esperasDeReintento, GONE, LISTA_EN_VIVO, mensajeDe,
   PENDIENTE, refinarSinRed, refinarSinSesion, RELECTURA, SIN_ALMACEN, SIN_CONEXION_LISTA, SIN_RED,
   SIN_RED_ACCION, type Clase } from '@/lib/errors'
 import { avisoInicial, reducirAviso, visible, type Origen } from '@/lib/aviso'
 import { decidirEncolar } from '@/lib/cola'
+import { normalizar, soloCantidad, TECLEABLE, valeComoCantidad } from '@/lib/cantidad'
 import { alCambiarLaCola, barrerCaducados, encolar, guardarLista, guardarNombre, leerCola, leerLista, quitarDeCola, siguienteEnCola,
   type Pendiente } from '@/lib/local'
 import { useGroupChannel } from '@/lib/useGroupChannel'
@@ -27,7 +29,7 @@ type Profile = { id: string; display_name: string | null }
  * alertas. Se discrimina por origen y no por `clase`: `'servidor'` la comparten la
  * carga y la edición fallidas, que son errores de verdad.
  */
-const ES_ESTADO = new Set<Origen>(['cola', 'apertura'])
+const ES_ESTADO = new Set<Origen>(['cola', 'apertura', 'enlace'])
 
 export function GroupView({
   group, initialItems, members, profiles, me, loadClase,
@@ -66,6 +68,19 @@ export function GroupView({
   const [name, setName] = useState('')
   const [quantity, setQuantity] = useState('')
   const [invite, setInvite] = useState<string | null>(null)
+  /**
+   * Spec J / J-R7 — **Se decide en el cliente, y sólo con `invite` en la mano.** El
+   * servidor no sabe qué navegador hay al otro lado, así que esto no puede salir del
+   * render del servidor: lo pone el handler del click, que por definición corre después
+   * de montar y con el `navigator` de verdad delante.
+   */
+  const [puedeCompartir, setPuedeCompartir] = useState(false)
+  /**
+   * Decisión 3 — El enlace **a la vista, como texto**, y sólo cuando las dos vías han
+   * fallado. No es el campo de sólo lectura de vuelta: aquél estaba siempre, éste es la
+   * salida de un callejón y sólo aparece cuando hay callejón.
+   */
+  const [enlaceALaVista, setEnlaceALaVista] = useState(false)
   // Mientras alguien escribe, su texto manda sobre lo que llegue por el canal;
   // en cuanto suelta el campo, vuelve a mandar el dato del servidor.
   /**
@@ -220,7 +235,6 @@ export function GroupView({
    * estado aterrizaría —y con un `limpiarAviso()` antes del `await`, no podía—.
    */
   const tokenAviso = useRef(0)
-
 
   /**
    * T6 — La fila cuya cantidad hay que enfocar viaja en una **ref**, no en
@@ -580,7 +594,26 @@ export function GroupView({
         }
         return
       }
-      const r = await addItem(createClient(), group.id, me.id, p)
+      /**
+       * Spec J / J-R4 · decisión 2 — **La cantidad se normaliza AQUÍ, al drenar, no al
+       * encolar.** Las entradas que necesitan esto son justamente las que ya están en
+       * disco: se escribieron antes de que la regla existiera, en un bundle que invitaba
+       * a teclear «2 briks», y en dispositivos reales que nadie puede migrar.
+       *
+       * Sin esto la base las rechaza una por una y **el producto se queda en la cola para
+       * siempre**: el bucle para en el primer fallo para conservar el orden, así que una
+       * sola entrada con texto bloquea todo lo que hay detrás. Lo que se pierde es el
+       * matiz —«2 briks» entra como `2`, «briks de leche» entra sin cantidad—, y se acepta
+       * porque la alternativa es perder la línea de la lista.
+       *
+       * **No se hace dentro de `addItem`**, aunque cubriría los tres sitios de una vez:
+       * ahí se llevaría por delante el alta directa, donde teclear `100` tiene que llegar
+       * a la base y que la base lo rechace con su aviso. `normalizar('100')` es nulo, así
+       * que hacerlo en el transporte convertiría un rechazo visible en un dato borrado en
+       * silencio.
+       */
+      const r = await addItem(createClient(), group.id, me.id,
+        { ...p, cantidad: normalizar(p.cantidad) })
       // Cualquier otro fallo deja la cola como está: se reintentará. Parar en el
       // primero conserva el orden, que es lo que el usuario apuntó.
       if (r.clase && r.code !== '23505') return
@@ -723,7 +756,6 @@ export function GroupView({
     document.addEventListener('visibilitychange', alVolver)
     return () => { dejarDeOir(); document.removeEventListener('visibilitychange', alVolver) }
   }, [releerLaCola, drenar])
-
 
   /**
    * K2/L4 — Devuelve al campo el alta que no llegó a entrar, **sólo si nadie ha
@@ -1103,6 +1135,81 @@ export function GroupView({
     return true
   }
 
+  const BOTON_ENLACE = 'min-h-[44px] rounded-xl bg-neutral-900 px-4 text-sm text-white'
+
+  /**
+   * i3-R5 — La guarda de reentrada va en una **ref**, no en el estado: dos toques seguidos
+   * ocurren antes de que React vuelva a pintar, así que un `useState` todavía valdría `false`.
+   * Es la misma cicatriz que `enviandoRef` en la cáscara.
+   */
+  const enlaceEnVuelo = useRef(false)
+
+  /**
+   * i2-R7 — **Una sola forma de intentar el enlace, para las dos vías.**
+   *
+   * Eran treinta líneas casi iguales, y esa duplicación **ya produjo un defecto**: i1-R10
+   * añadió «al salir bien, se sale del callejón» al camino de copiar y no a su gemelo, así que
+   * compartir bien después de un fallo dejaba el enlace pintado para siempre. Con un solo
+   * sitio, esa regla es estructural y no hay dos lugares donde acordarse de ella.
+   *
+   * Las tres respuestas, en un sitio:
+   * - **Sale bien** → se limpia la pantalla, se sale del callejón, y se dice sólo si hay algo
+   *   que decir.
+   * - **Se cancela** → **nada**, literalmente. Ni aviso, ni estado, ni limpiar.
+   * - **Falla de verdad** → se avisa, y el enlace sale a la vista, porque si la vía no funciona
+   *   sin esto no queda ninguna forma de conseguirlo.
+   */
+  const intentarEnlace = (via: () => Promise<void>, siFalla: string, siSaleBien?: string) => {
+    /**
+     * i3-R5 — **Un solo intento en vuelo.** Medido: el segundo toque sobre «Compartir» recibe
+     * `InvalidStateError` —«share already in progress»—, pinta «No se ha podido compartir» y
+     * saca el enlace; y cuando la persona **completa** el envío, el texto se retira pero el
+     * aviso de fallo se queda. Un envío que sale bien anunciado como fallido, en el camino del
+     * móvil, donde el doble toque del pulgar es el gesto normal y no el raro.
+     */
+    if (enlaceEnVuelo.current) return
+    enlaceEnVuelo.current = true
+    startTransition(async () => {
+      try {
+        await via()
+        /**
+         * i3-R4 — `limpiarAviso()` **después de saber el desenlace**, no antes. Estaba arriba,
+         * así que cerrar la hoja de compartir borraba un aviso que había en pantalla — y el
+         * borde de J-R8 dice «nada: ni aviso, ni error, **ni cambio de estado**». Cancelar es
+         * un cambio de opinión, y un cambio de opinión no tiene efectos.
+         *
+         * Aquí sí: limpiar al salir bien es la regla que `lib/aviso.ts` ya declara —un aviso de
+         * una vez se va cuando una operación con éxito lo limpia—.
+         */
+        limpiarAviso()
+        setEnlaceALaVista(false)
+        // i4-R1 — Origen `'enlace'`, no `'mutacion'`: «Enlace copiado.» es el único mensaje
+        // de éxito de esta vista, y con `'mutacion'` se pintaba rojo y se anunciaba con
+        // `role="alert"` — la cicatriz i1-R4, otra vez. Los dos fallos de abajo se quedan
+        // donde están, que es lo que hace que el origen discrimine.
+        if (siSaleBien) avisarTexto(siSaleBien, 'texto', 'enlace')
+      } catch (fallo) {
+        /**
+         * J-R8 — Cancelar **no** es un error, y se distingue por `name`, nunca por el mensaje:
+         * lo redacta cada navegador y cambia entre versiones e idiomas, así que un
+         * `includes('abort')` se rompe en silencio y vuelve a avisar de una cancelación.
+         *
+         * Y la variable no se llama `e`: `usosIndebidosDelError` mancha el nombre de la
+         * variable de un `catch` y lo persigue **por nombre en todo el fichero**, así que con
+         * `e` los siete `onChange={e => …}` de esta vista contaban como usos del error de la
+         * base — siete falsos positivos y ninguna fuga. No es la cicatriz AF1 al revés: la
+         * semilla de esa guarda es la **posición**, no el nombre, y sigue viendo este bloque.
+         * Comprobado por `unit/texto-crudo.test.ts`, que inyecta aquí un `String(fallo)`.
+         */
+        if (esCancelacion(fallo)) return
+        setEnlaceALaVista(true)
+        avisarTexto(siFalla, 'generico', 'mutacion')
+      } finally {
+        enlaceEnVuelo.current = false
+      }
+    })
+  }
+
   async function confirmar(item: Item, campo: 'nombre' | 'cantidad') {
     // U2 — Esto salía por `valor === undefined` ANTES de comprobar si la fila ya
     // no existe, así que soltar un campo sin borrador la dejaba en pantalla para
@@ -1111,7 +1218,17 @@ export function GroupView({
     const valor = escrito(item.id, campo)
     if (valor === undefined) return
     const limpio = valor.trim()
-    const actual = campo === 'nombre' ? item.name : (item.quantity ?? '')
+    /**
+     * i3-R6 — **Se compara contra lo que la pantalla ENSEÑA, no contra el crudo.** El campo
+     * pinta `normalizar(item.quantity)` desde i2-R3, así que comparar con el valor guardado
+     * volvía a poner los dos gemelos a leer fuentes distintas: en una fila heredada con
+     * `2 briks`, teclear un dígito y borrarlo —la pantalla queda exactamente como estaba—
+     * escribía `2` encima y se llevaba el «briks» sin decir nada.
+     *
+     * Es la tercera aparición de esta clase en el ciclo, y la regla que restaura es la de
+     * siempre: **si la pantalla no cambió, no se escribe.**
+     */
+    const actual = campo === 'nombre' ? item.name : (normalizar(item.quantity) ?? '')
     if (campo === 'nombre' && !limpio) { soltar(item.id, campo); return }
     if (limpio === actual) { soltar(item.id, campo); return }
 
@@ -1125,6 +1242,19 @@ export function GroupView({
      * tecleado espera a que vuelva la red.
      */
     if (sinRed) { avisarTexto(SIN_RED_ACCION, 'red', 'mutacion'); return }
+    /**
+     * i1-R2 — La tercera entrada, por la misma función que las otras dos. **El borrador se
+     * queda**, igual que en el camino sin red: un guardado que no entra no se lleva lo escrito,
+     * y aquí además es lo único que permite corregir el `100` en `10`.
+     *
+     * i2-R8 — Y va **después** de `sinRed`, no antes: sin red, editar una fila a `100` decía
+     * «tiene que ser un número del 1 al 99» e invitaba a corregir, y al corregir decía «sin
+     * conexión sólo puedes apuntar». Dos viajes para llegar al motivo verdadero. R7 —sin red se
+     * apunta, no se corrige— manda sobre el rango, porque es la razón por la que no va a entrar.
+     */
+    if (campo === 'cantidad' && !valeComoCantidad(limpio)) {
+      avisarTexto(CANTIDAD_FUERA, 'cantidad', 'mutacion'); return
+    }
     limpiarAviso()
     const patch = campo === 'nombre' ? { name: limpio } : { quantity: limpio || null }
     const { data: fila, clase, code } = await updateItem(createClient(), item.id, patch)
@@ -1168,6 +1298,14 @@ export function GroupView({
     // R2 — esto era un `return` mudo. El usuario pulsaba y no pasaba nada: ni
     // ítem, ni explicación. Medido en el navegador: "NADA CAMBIO".
     if (!trimmed) { avisarTexto(ESCRIBE_NOMBRE, 'texto', 'mutacion'); return }
+    /**
+     * i1-R2 — **Antes de la rama de red, para que las dos respondan igual.** Estaba sólo
+     * implícito en el camino con red —lo contestaba la base— y sin red no lo contestaba
+     * nadie: `100` se encolaba y al drenar desaparecía en silencio. Aquí, una vez, para
+     * los dos. La base sigue rechazando por su cuenta (j1): esto es defensa en
+     * profundidad, no el invariante.
+     */
+    if (!valeComoCantidad(quantity)) { avisarTexto(CANTIDAD_FUERA, 'cantidad', 'mutacion'); return }
     /**
      * R3 — Sin red, lo apuntado entra en cola y se ve. El campo se vacía para
      * poder seguir apuntando, que es el gesto real en un lineal: se apuntan tres
@@ -1575,7 +1713,12 @@ export function GroupView({
       <form onSubmit={onAdd} className="flex gap-2">
         <input value={name} onChange={e => { tecleado.current++; setName(e.target.value) }} placeholder="Producto"
           data-testid="item-name" className="min-h-[44px] w-full min-w-0 rounded-xl border border-neutral-300 px-4" />
-        <input value={quantity} onChange={e => { tecleado.current++; setQuantity(e.target.value) }} placeholder="Cantidad"
+        {/* J-R2/J-R3 — Teclado numérico y sólo dígitos. `inputMode`, no `type="number"`: ése
+            trae la ruedecita del escritorio, acepta `e`, `+` y `-`, y deja el `value` vacío
+            cuando el contenido no parsea, con lo que «escribí algo que no vale» y «no escribí
+            nada» dejan de distinguirse. */}
+        <input value={quantity} onChange={e => { tecleado.current++; setQuantity(soloCantidad(e.target.value)) }} placeholder="Cantidad"
+          inputMode="numeric" pattern={TECLEABLE}
           data-testid="item-qty" className="min-h-[44px] w-24 shrink-0 rounded-xl border border-neutral-300 px-3" />
         <button data-testid="add-item" disabled={busy}
           /* R9 — medido 41x44: declaraba alto mínimo pero no ancho. */
@@ -1613,8 +1756,21 @@ export function GroupView({
               aria-label={`Cantidad de ${item.name}`}
               data-cantidad-de={item.id}
               placeholder="Cantidad"
-              value={escrito(item.id, 'cantidad') ?? (item.quantity ?? '')}
-              onChange={e => anotar(item.id, 'cantidad', e.target.value)}
+              inputMode="numeric" pattern={TECLEABLE}
+              /**
+               * i2-R3 — **El campo nunca enseña lo que no puede producir.** Medido en rojo:
+               * una fila heredada con `2 briks` —el estado normal de la ventana de §6, código
+               * desplegado y `db push` todavía no— pintaba `2 briks`; teclear un `5` al final
+               * entregaba `2 briks5` al `onChange`, `soloCantidad` lo dejaba en **`25`**, y
+               * `25` es una cantidad válida, así que se guardaba. Es el mismo `1.5`→`15` que
+               * i1-R1 cerró, vivo en la tercera entrada.
+               *
+               * Se pinta con `normalizar`, que es **la misma regla** que aplican la cola y la
+               * migración: lo que se ve es exactamente lo que esa fila va a valer en cuanto la
+               * migración pase por ella. No es esconder el dato, es adelantarlo.
+               */
+              value={escrito(item.id, 'cantidad') ?? (normalizar(item.quantity) ?? '')}
+              onChange={e => anotar(item.id, 'cantidad', soloCantidad(e.target.value))}
               onBlur={() => void confirmar(item, 'cantidad')}
               className="min-h-[44px] w-20 shrink-0 bg-transparent text-right text-sm text-neutral-500" />
             <button aria-label={`Borrar ${item.name}`} data-testid="delete-item"
@@ -1756,12 +1912,50 @@ export function GroupView({
               limpiarAviso()
               const r = await createInviteAction(group.id)
               if (r.mensaje) avisarTexto(r.mensaje, r.clase ?? 'generico', 'mutacion')
-              else if (r.token) setInvite(`${window.location.origin}/invite/${r.token}`)
+              else if (r.token) {
+                const url = `${window.location.origin}/invite/${r.token}`
+                setInvite(url)
+                // Un enlace nuevo empieza sin callejón: el texto del anterior no se hereda.
+                setEnlaceALaVista(false)
+                setPuedeCompartir(navigator.canShare?.({ url }) ?? !!navigator.share)
+              }
             })}>
             Generar link de invitación
           </button>
-          {invite && <input readOnly value={invite} data-testid="invite-link"
-            className="min-h-[44px] w-full rounded-xl border border-neutral-200 bg-neutral-50 px-3 text-xs" />}
+          {/**
+            * Spec J / J-R6 — Fuera el campo de sólo lectura. Un enlace de invitación no se
+            * lee, se manda: el campo obligaba a seleccionar a mano en un móvil, que es
+            * donde se usa esto.
+            *
+            * **Uno de los dos botones, no los dos**: cuál se pinta lo dice `puedeCompartir`,
+            * y se ve antes de pulsar.
+            */}
+          {invite && puedeCompartir && (
+            <button data-testid="share-invite" className={BOTON_ENLACE}
+              onClick={() => intentarEnlace(() => navigator.share({ url: invite }), COMPARTIR_FALLO)}>
+              Compartir el enlace
+            </button>
+          )}
+          {invite && !puedeCompartir && (
+            <button data-testid="copy-invite" className={BOTON_ENLACE}
+              onClick={() => intentarEnlace(
+                /**
+                 * J-R7 — El portapapeles puede **no existir** —contexto no seguro— además de
+                 * poder rechazar. Las dos cosas acaban igual: sin él, la promesa que no hay se
+                 * sustituye por un rechazo, y hay un solo camino de fallo en vez de dos formas
+                 * de fallar que alguien tenga que acordarse de tratar igual.
+                 */
+                async () => {
+                  if (!navigator.clipboard) throw new Error('sin portapapeles')
+                  await navigator.clipboard.writeText(invite)
+                },
+                COPIAR_FALLO, COPIADO)}>
+              Copiar el enlace
+            </button>
+          )}
+          {invite && enlaceALaVista && (
+            <p data-testid="invite-text" className="select-all break-all text-xs text-neutral-500">{invite}</p>
+          )}
 
           {/* H-R3 — Borrar el grupo. Abajo y separado del resto: es la única acción de esta
               pantalla que no se deshace. */}

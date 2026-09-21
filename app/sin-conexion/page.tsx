@@ -4,9 +4,10 @@ import { useEffect, useRef, useState } from 'react'
 import { alCambiarLaCola, encolar, leerCola, leerLista, leerNombre, leerUltimoUsuario } from '@/lib/local'
 import { haySesionLocal } from '@/lib/sesionLocal'
 import { decidirEncolar } from '@/lib/cola'
+import { soloCantidad, TECLEABLE, valeComoCantidad } from '@/lib/cantidad'
 import { safeNext } from '@/lib/routes'
-import { bannerSinRed, DUPLICADO, ESCRIBE_NOMBRE, esperaDeSondeo, sinInstantanea, SIN_ALMACEN,
-  SIN_RED_FUERA } from '@/lib/errors'
+import { bannerSinRed, CANTIDAD_FUERA, DUPLICADO, ESCRIBE_NOMBRE, esperaDeSondeo, sinInstantanea,
+  SIN_ALMACEN, SIN_RED_FUERA } from '@/lib/errors'
 import type { Item } from '@/lib/items'
 import type { Pendiente } from '@/lib/local'
 
@@ -344,6 +345,12 @@ export default function SinConexion() {
     // R2 de `GroupView` — esto era un `return` mudo allí, y lo volvió a ser aquí:
     // el usuario pulsa y no pasa nada, ni ítem ni explicación.
     if (!nombre) { setAviso(ESCRIBE_NOMBRE); return }
+    /**
+     * i1-R2 — La misma comprobación que la vista, por la misma función. Aquí es donde
+     * más falta hace: sin red no hay base que conteste, así que sin esto la cantidad
+     * se encolaba cruda y el drenado la dejaba en nulo **sin aviso ninguno**.
+     */
+    if (!valeComoCantidad(cantidad)) { setAviso(CANTIDAD_FUERA); return }
     if (!grupo || !usuario) return
     const cantidadAhora = cantidad.trim() || null
 
@@ -440,8 +447,11 @@ export default function SinConexion() {
           <input data-testid="item-name" placeholder="Producto" value={texto}
                  onChange={e => setTexto(e.target.value)}
                  className="min-w-0 flex-1 rounded-xl border border-neutral-700 p-3" />
+          {/* J-R2/J-R3 — Teclado numérico y sólo dígitos. `inputMode`, no `type="number"`:
+              ver el motivo en `lib/cantidad.ts` y en la spec. */}
           <input data-testid="item-qty" placeholder="Cantidad" value={cantidad}
-                 onChange={e => setCantidad(e.target.value)}
+                 inputMode="numeric" pattern={TECLEABLE}
+                 onChange={e => setCantidad(soloCantidad(e.target.value))}
                  className="w-24 rounded-xl border border-neutral-700 p-3" />
           <button type="submit" data-testid="add-item" disabled={enviando}
                   className="min-h-11 rounded-xl border border-neutral-700 px-4">+</button>

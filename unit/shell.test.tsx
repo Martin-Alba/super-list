@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor, cleanup, act, fireEvent } from '@testing-library/react'
-import { DUPLICADO, SIN_ALMACEN, SIN_INSTANTANEA, SIN_RED_FUERA } from '@/lib/errors'
+import { TECLEABLE } from '@/lib/cantidad'
+import { CANTIDAD_FUERA, DUPLICADO, SIN_ALMACEN, SIN_INSTANTANEA, SIN_RED_FUERA } from '@/lib/errors'
 
 /**
  * K4/K5 — El shell, atacado donde vive. La mitad de navegador (DoD 49) prueba la
@@ -219,6 +220,62 @@ describe('Spec C · desde la cáscara se apunta, con la misma regla', () => {
       nombre: 'aceitunas', cantidad: null,
     })
     await waitFor(() => expect(screen.getByTestId('pendiente').textContent).toContain('aceitunas'))
+  })
+
+  /**
+   * Spec J / j5, j6 — **La tercera entrada de cantidad**, la de la cáscara sin red. Es la que
+   * se olvida: no vive en la vista del grupo y ninguna prueba de allí la alcanza. Y es
+   * justamente la que escribe las entradas de cola que después se drenan (j7), así que si
+   * aquí entrara texto, el filtro de la vista no lo vería nunca.
+   */
+  it('j5/j6: la entrada de la cáscara pide teclado numérico y sólo deja dígitos', async () => {
+    enGrupo()
+    render(<SinConexion />)
+    await waitFor(() => expect(screen.getByTestId('item-qty')).toBeTruthy())
+    const qty = screen.getByTestId('item-qty') as HTMLInputElement
+    expect(qty.inputMode, 'la cáscara no pide teclado numérico').toBe('numeric')
+    expect(qty.getAttribute('pattern')).toBe(TECLEABLE)
+    expect(qty.getAttribute('type'), 'type=number, que la spec descarta').not.toBe('number')
+
+    fireEvent.change(screen.getByTestId('item-name'), { target: { value: 'pan' } })
+    fireEvent.change(qty, { target: { value: '2 briks' } })
+    expect(qty.value, 'el campo de la cáscara se quedó con el texto').toBe('2')
+    fireEvent.click(screen.getByTestId('add-item'))
+    await waitFor(() => expect(encolar).toHaveBeenCalled())
+    expect(encolar.mock.calls[0][0], 'la cáscara encoló texto, y eso es lo que el drenado hereda')
+      .toMatchObject({ nombre: 'pan', cantidad: '2' })
+  })
+
+  /**
+   * i3 — **Sin red, la misma respuesta que con red.** Es la mitad que faltaba y la que más
+   * importa: aquí no hay base al otro lado que conteste, así que antes `100` se encolaba
+   * crudo y el drenado lo dejaba en **nulo sin decir nada**. El producto entraba en la lista
+   * sin su cantidad y nadie se enteraba nunca.
+   *
+   * La decisión 2 autoriza descartar lo que se escribió **antes** de que la regla existiera
+   * —eso lo sigue haciendo el drenado, y j7 lo sostiene—, no lo que alguien acaba de teclear.
+   */
+  it.each(['100', '0', '1.5', '007'])('i3: sin red, «%s» avisa y no se encola', async (valor) => {
+    enGrupo()
+    render(<SinConexion />)
+    await waitFor(() => expect(screen.getByTestId('item-qty')).toBeTruthy())
+    fireEvent.change(screen.getByTestId('item-name'), { target: { value: 'pan' } })
+    fireEvent.change(screen.getByTestId('item-qty'), { target: { value: valor } })
+    fireEvent.click(screen.getByTestId('add-item'))
+    await waitFor(() => expect(screen.getByTestId('aviso-local').textContent).toContain(CANTIDAD_FUERA))
+    expect(encolar, `se encoló ${valor}, que al drenar habría desaparecido en silencio`)
+      .not.toHaveBeenCalled()
+    expect((screen.getByTestId('item-qty') as HTMLInputElement).value,
+      'lo tecleado se perdió con el rechazo').toBe(valor)
+  })
+
+  it('i1: pegar «1.5» en la cáscara no deja 15', async () => {
+    enGrupo()
+    render(<SinConexion />)
+    await waitFor(() => expect(screen.getByTestId('item-qty')).toBeTruthy())
+    const qty = screen.getByTestId('item-qty') as HTMLInputElement
+    fireEvent.change(qty, { target: { value: '1.5' } })
+    expect(qty.value, 'la cáscara concatenó los dígitos de un decimal').toBe('1.5')
   })
 
   it('iter1 DoD 4: un duplicado se rechaza con el mismo criterio que en la vista', async () => {

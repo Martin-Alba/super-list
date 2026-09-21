@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, cleanup, act, fireEvent } from '@testing-library/react'
+import { render, cleanup, act, fireEvent, waitFor } from '@testing-library/react'
 import type { Item } from '@/lib/items'
 import type { Pendiente } from '@/lib/local'
-import { caducados, EN_COLA, LISTA_EN_VIVO, SERVIDOR } from '@/lib/errors'
+import { caducados, COPIADO, COPIAR_FALLO, EN_COLA, LISTA_EN_VIVO, SERVIDOR } from '@/lib/errors'
 import { dobleDeLaPuerta } from './puertaDeLaCola'
 import { reparte, VIDA_COLA_MS } from '@/lib/local'
 import type { ChannelState } from '@/lib/channelState'
@@ -45,7 +45,8 @@ const ponerCanal = async (v: ChannelState) => {
 
 vi.mock('@/lib/supabase/client', () => ({ createClient: () => ({}) }))
 vi.mock('@/app/actions', () => ({
-  createInviteAction: vi.fn(), decideMemberAction: vi.fn(), leaveGroupAction: vi.fn(),
+  createInviteAction: (...a: unknown[]) => createInviteAction(...a),
+  decideMemberAction: vi.fn(), leaveGroupAction: vi.fn(),
 }))
 vi.mock('next/navigation', () => ({ useRouter: () => ({ refresh: vi.fn(), replace: vi.fn() }) }))
 vi.mock('@/lib/useGroupChannel', async () => {
@@ -108,6 +109,8 @@ const pendiente = (nombre: string, grupo = 'g1', edad = 1000): Pendiente =>
   ({ id: `p-${nombre}`, usuario: 'u1', grupo, nombre, cantidad: null, creado: Date.now() - edad })
 /** Una entrada que la regla de las 24 h manda descartar. */
 const caducada = (nombre: string) => pendiente(nombre, 'g1', VIDA_COLA_MS + 60_000)
+
+const createInviteAction = vi.fn()
 
 const montar = (iniciales: Item[] = []) => render(
   <GroupView group={{ id: 'g1', name: 'Familia' }} initialItems={iniciales}
@@ -465,6 +468,40 @@ describe('i1-R4 · lo encolado se anuncia como estado, no como alerta', () => {
     await act(async () => { fireEvent.blur(campo) })
     expect(r.getByTestId('notice').getAttribute('role'),
       'se degradó a estado un fallo que sí perdió lo que el usuario escribió').toBe('alert')
+  })
+
+  /**
+   * Spec J / i4-R1 — **Y el acuse del enlace, que es el otro mensaje de esta vista que dice
+   * que todo salió bien.** Nació con origen `'mutacion'`, así que se pintaba rojo y se
+   * anunciaba `role="alert"`: la misma cicatriz de arriba, reproducida por código escrito
+   * tres iteraciones después de escribirla.
+   *
+   * La fila afirma las **dos** mitades, porque sin la segunda «todo es estado» cumpliría la
+   * primera: el acuse es `status`, y el fallo de la misma vía sigue siendo `alert`.
+   */
+  it('i4-1: «Enlace copiado.» es `status`; un fallo de copiar sigue siendo `alert`', async () => {
+    const escribir = vi.fn(async () => {})
+    const nav = navigator as unknown as Record<string, unknown>
+    delete nav.share; delete nav.canShare
+    Object.defineProperty(nav, 'clipboard', { value: { writeText: escribir }, configurable: true })
+    createInviteAction.mockResolvedValue({ token: 'tok-i4' })
+
+    const r = montar([])
+    fireEvent.click(r.getByTestId('create-invite'))
+    const copiar = await r.findByTestId('copy-invite')
+
+    fireEvent.click(copiar)
+    await waitFor(() => expect(r.getByTestId('notice').textContent).toContain(COPIADO))
+    expect(r.getByTestId('notice').getAttribute('role'),
+      'se anuncia como alerta un mensaje que dice que el enlace está copiado').toBe('status')
+    expect(r.getByTestId('notice').className,
+      'el acuse de copiado se pinta de rojo, como un error').not.toContain('red')
+
+    escribir.mockImplementation(async () => { throw new Error('denied') })
+    fireEvent.click(copiar)
+    await waitFor(() => expect(r.getByTestId('notice').textContent).toContain(COPIAR_FALLO))
+    expect(r.getByTestId('notice').getAttribute('role'),
+      'se degradó a estado un fallo que dejó al usuario sin el enlace').toBe('alert')
   })
 })
 

@@ -17,7 +17,7 @@ const URL_ = process.env.NEXT_PUBLIC_SUPABASE_URL!
 const ANON = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 
 describe('T8 los códigos salen de la base, no de la memoria', () => {
-  it('los ocho errores reales se clasifican como la tabla dice', async () => {
+  it('los diez errores reales se clasifican como la tabla dice', async () => {
     const owner = await newUser('cod'); const gid = await newGroup(owner)
     const ajeno = await newUser('cod2')
     const { data: fila } = await owner.client.from('items')
@@ -38,6 +38,28 @@ describe('T8 los códigos salen de la base, no de la memoria', () => {
       ['resucitar borrado', async () => { await admin.from('items').update({ deleted_at: new Date().toISOString() }).eq('id', fila!.id)
         return owner.client.from('items').update({ deleted_at: null }).eq('id', fila!.id) }, 'integridad'],
       ['cambiar el autor', () => owner.client.from('items').update({ created_by: ajeno.id }).eq('group_id', gid), 'integridad'],
+      /**
+       * Spec J / k5 — **El desvío del 23514, con el error que da la base.**
+       *
+       * `unit/errors.test.ts` lo prueba con una cadena que escribe el propio test, así que
+       * si PostgREST dejara de poner el nombre de la restricción en `message` —o lo pusiera
+       * sin comillas, o lo moviera a `details`— todo caería a `'texto'` **sin un solo rojo**.
+       * Es literalmente la cicatriz que este fichero documenta, aplicada a la regla nueva.
+       *
+       * Y `items_quantity_len` está al lado a propósito: los dos son `23514` sobre la misma
+       * columna, y sólo uno se desvía. Sin el segundo, ensanchar el patrón a
+       * `/items_quantity/` pasaría por bueno.
+       */
+      ['cantidad fuera de rango', () => owner.client.from('items')
+        .insert({ group_id: gid, name: 'cant', quantity: '100', created_by: owner.id }), 'cantidad'],
+      /**
+       * i3-R10 — Esta espera `'texto'` porque Postgres reporta el `check` que falla **por
+       * nombre alfabético**, no por orden de creación, y `items_quantity_len` va antes que
+       * `items_quantity_num`. Queda escrito: renombrar cualquiera de las dos invierte la clase
+       * esperada, y sin esta nota ese rojo se lee como un fallo del producto.
+       */
+      ['cantidad demasiado larga', () => owner.client.from('items')
+        .insert({ group_id: gid, name: 'cant2', quantity: 'q'.repeat(51), created_by: owner.id }), 'texto'],
     ]
 
     const observado: string[] = []
@@ -52,6 +74,6 @@ describe('T8 los códigos salen de la base, no de la memoria', () => {
       observado.push(`${etiqueta}: ${error!.code} → ${clase}`)
       expect(clase, `"${etiqueta}" da ${error!.code}/"${error!.message}"`).toBe(esperado)
     }
-    expect(observado).toHaveLength(8)
+    expect(observado).toHaveLength(10)
   })
 })

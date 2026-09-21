@@ -140,3 +140,190 @@ describe('J11 las migraciones se pueden reaplicar', () => {
     expect(src).toContain("'active'")
   })
 })
+
+/**
+ * Spec I — **Las migraciones se aplican sobre una base VACÍA, que es lo que J11 no puede comprobar.**
+ *
+ * J11 las reaplica sobre la base que ya existe, así que una **referencia hacia adelante** —un `grant`
+ * sobre una función que el mismo fichero crea más abajo— encuentra la función ya creada de una
+ * aplicación anterior y nunca falla. Es estructural: ese test no puede ver esta clase de defecto.
+ *
+ * Y no es hipotético. `20260920000100_transferir_borrar.sql` llevaba exactamente eso y **reventó el
+ * primer `db push` contra el proyecto hospedado**, donde la base estaba vacía:
+ * `ERROR: function public.delete_group(uuid) does not exist (SQLSTATE 42883)`. En local llevaba días
+ * en verde, porque su primera versión definía la función arriba y al quitar el duplicado los `grant`
+ * se quedaron donde estaban — con la función ya creada en la base de nadie más que de aquí.
+ *
+ * La base de trabajo **no se toca**: se crea una aparte y se destruye al salir. El arranque es un
+ * sustituto de la infraestructura de Supabase y vale para lo que esta fila mira —el orden y las
+ * dependencias entre sentencias—, no para el comportamiento de RLS contra el auth real.
+ */
+/**
+ * El sustituto de la infraestructura de Supabase en una base recién creada. **Una sola
+ * declaración**, porque ahora la usan dos filas: si cada una llevara su copia, la que se
+ * escriba después heredaría un arranque que ya no coincide con el de al lado.
+ *
+ * Vale para lo que estas filas miran —el orden y las dependencias entre sentencias— y no para
+ * el comportamiento de RLS contra el auth real, que se mide con el token del usuario en
+ * `unit/items-crud.test.ts`.
+ */
+/**
+ * i2-R8 — Una sola copia. Estaba escrito dos veces, con la única diferencia de `-t -A`, que
+ * sólo afecta al formato de lo que imprime; las dos filas lo quieren, y la que no lo pedía no
+ * leía ninguna salida.
+ */
+const psql = (db: string, args: string[], input?: string) =>
+  execFileSync('docker', ['exec', '-i', 'supabase_db_super', 'psql', '-U', 'postgres',
+    '-v', 'ON_ERROR_STOP=1', '-q', '-t', '-A', '-d', db, ...args],
+    { input, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] })
+
+const ARRANQUE = `
+  create schema if not exists auth;
+  create schema if not exists extensions;
+  create extension if not exists pgcrypto with schema extensions;
+  -- La columna raw_user_meta_data no estaba, y el trigger real handle_new_user la lee: sin
+  -- ella, insertar un usuario revienta con «record new has no field». El sustituto tiene que
+  -- parecerse a la tabla de verdad en lo que el producto toca, no sólo en la clave.
+  create table if not exists auth.users (id uuid primary key, email text,
+    raw_user_meta_data jsonb default '{}'::jsonb);
+  create or replace function auth.uid() returns uuid language sql stable as
+    $$ select (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')::uuid $$;
+  create publication supabase_realtime;
+`
+
+/**
+ * Spec J / j3, j4 — **La migración de la cantidad se aplica sobre una base SUCIA, y normaliza
+ * antes de restringir.**
+ *
+ * Es la propiedad que J-R1 compra, y la que nada ejercitaba: la fila de arriba aplica las
+ * migraciones sobre una base **vacía**, donde no hay ninguna cantidad que normalizar, así que
+ * un `add constraint` sin su `update` delante pasaría por verde. Medido contra la base local
+ * (2.762 cantidades por decidir): **sin el `update`, el `add constraint` es rechazado.** En el
+ * proyecto hospedado hay cero, así que una migración escrita sólo para allí habría pasado todas
+ * las comprobaciones y reventado aquí.
+ *
+ * Se siembra con las formas **medidas**, no inventadas, y una de ellas es la que el usuario
+ * corrigió: `1.5` acaba **nula**, no en `1`. Convertirla en `1` es inventar otro dato, por el
+ * mismo motivo que `299` no se trunca a `29`.
+ */
+describe('Spec J · la migración de la cantidad sobre datos sucios', () => {
+  it('j3/j4: normaliza y después restringe, sobre filas que no cumplen', () => {
+    const base = `prueba_cantidad_${process.pid}`
+
+    const LA_NUEVA = '20260921000200_cantidad_numero.sql'
+    const todas = readdirSync(DIR).filter(x => x.endsWith('.sql')).sort()
+    expect(todas, `${LA_NUEVA} no está: este test mide otra cosa`).toContain(LA_NUEVA)
+
+    psql('postgres', ['-c', `drop database if exists ${base}`])
+    psql('postgres', ['-c', `create database ${base}`])
+    try {
+      psql(base, ['-f', '-'], ARRANQUE)
+      // Todo lo anterior a la migración de la cantidad: aquí la columna todavía es texto libre.
+      for (const f of todas.filter(x => x < LA_NUEVA))
+        psql(base, ['-f', '-'], readFileSync(join(DIR, f), 'utf8'))
+
+      // Las formas medidas en la base real, con el veredicto que les toca.
+      const SUCIAS: [string, string | null][] = [
+        ['2 briks', '2'], ['2 kg', '2'], ['12 unidades', '12'],
+        ['1.5', null], ['1,5', null], ['2, briks', '2'],
+        ['299', null], ['165', null], ['-5', null], ['doce', null], ['CANT-B', null],
+        ['q'.repeat(50), null], ['99999999999999999999', null],
+        ['7', '7'], ['99', '99'],
+      ]
+      psql(base, ['-f', '-'], `
+        insert into auth.users(id, email) values
+          ('11111111-1111-1111-1111-111111111111', 'j@example.test');
+        -- El perfil lo crea el trigger handle_new_user al insertar el usuario: crearlo aquí
+        -- otra vez choca con su clave, y es la señal de que el trigger corrió.
+        insert into public.groups(id, name, owner_id) values
+          ('22222222-2222-2222-2222-222222222222', 'G',
+           '11111111-1111-1111-1111-111111111111');
+        ${SUCIAS.map(([v], i) => `insert into public.items(group_id, name, quantity, created_by)
+          values ('22222222-2222-2222-2222-222222222222', 'p${i}',
+                  ${v === null ? 'null' : `$sucia$${v}$sucia$`},
+                  '11111111-1111-1111-1111-111111111111');`).join('\n')}
+      `)
+
+      // Y ahora la migración, sobre esas filas. Si el `update` no fuera delante, esto lanza.
+      expect(() => psql(base, ['-f', '-'], readFileSync(join(DIR, LA_NUEVA), 'utf8')),
+        'la migración no aplica sobre datos sucios: le falta normalizar antes de restringir')
+        .not.toThrow()
+
+      // j3 — el veredicto de cada forma, una por una. Se compara por nombre y no por posición:
+      // un orden de filas es un detalle del motor, y hacerlo parte de la afirmación convierte
+      // un cambio de plan en un fallo de la migración.
+      const veredictos = Object.fromEntries(psql(base, ['-c',
+        `select name || '=' || coalesce(quantity, '<null>') from public.items`])
+        .trim().split('\n').map(l => l.split('=') as [string, string]))
+      expect(veredictos, 'la migración no dejó las cantidades donde la regla dice').toEqual(
+        Object.fromEntries(SUCIAS.map(([, esperado], i) => [`p${i}`, esperado ?? '<null>'])))
+
+      /**
+       * i10 — **Y aplica otra vez sobre su propio resultado, y sobre una definición previa
+       * INCOMPATIBLE.** La segunda es la que faltaba: con un `items_quantity_num` más
+       * estrecho ya puesto, el `update` del paso 1 moría —«violates check constraint»— y la
+       * migración no llegaba a tocar nada. Era falsa la propiedad que su cabecera reclama.
+       */
+      expect(() => psql(base, ['-f', '-'], readFileSync(join(DIR, LA_NUEVA), 'utf8')),
+        'la migración no es reaplicable sobre su propio resultado').not.toThrow()
+
+      /**
+       * La definición previa **incompatible** no es cualquiera, y se eligió midiendo en vez
+       * de suponiendo: una más ancha sobrevive, porque un `check` cuya expresión da NULL se
+       * considera satisfecho y la migración sólo produce nulos y valores de 1 a 99. La que
+       * rompe es la que **prohíbe el nulo** —`quantity is not null and …`—, que es la forma
+       * que tendría una versión anterior de esta misma restricción con la cantidad
+       * obligatoria. Medido: «violates check constraint … Failing row contains (null)».
+       */
+      psql(base, ['-f', '-'], `
+        alter table public.items drop constraint if exists items_quantity_num;
+        update public.items set quantity = '5' where quantity is null;
+        update public.items set quantity = '299' where name = 'p0';
+        alter table public.items add constraint items_quantity_num
+          check (quantity is not null and quantity ~ '^[1-9][0-9]{0,2}$');
+      `)
+      expect(() => psql(base, ['-f', '-'], readFileSync(join(DIR, LA_NUEVA), 'utf8')),
+        'la migración muere si ya hay un check incompatible: depende del estado de la base')
+        .not.toThrow()
+      expect(psql(base, ['-c', `select count(*) from pg_constraint
+        where conrelid = 'public.items'::regclass and conname = 'items_quantity_num'`]).trim(),
+        'quedó más de una definición, o ninguna').toBe('1')
+
+      // j4 — y la restricción quedó puesta y muerde.
+      expect(() => psql(base, ['-c', `insert into public.items(group_id, name, quantity, created_by)
+        values ('22222222-2222-2222-2222-222222222222', 'muerde', '2 briks',
+                '11111111-1111-1111-1111-111111111111')`]),
+        'la restricción no está puesta: la migración normalizó y no restringió')
+        .toThrow()
+    } finally {
+      psql('postgres', ['-c', `drop database if exists ${base}`])
+    }
+  }, 120_000)
+})
+
+describe('Spec I · las migraciones aplican sobre una base vacía', () => {
+  it('todas, en orden, desde cero', () => {
+    const base = `prueba_migraciones_${process.pid}`
+
+    psql('postgres', ['-c', `drop database if exists ${base}`])
+    psql('postgres', ['-c', `create database ${base}`])
+    try {
+      psql(base, ['-f', '-'], ARRANQUE)
+      /**
+       * i1-R10 — **Cuántas son se cuenta, no se escribe en el título.** Decía «las 15» con
+       * dieciséis en el directorio, y nada lo afirmaba: es la misma deriva de cifras que la
+       * guarda del checkpoint existe para impedir. El suelo es lo que hay hoy; si alguien
+       * borra una migración, esto se pone rojo y hay que mirarlo.
+       */
+      const ficheros = readdirSync(DIR).filter(x => x.endsWith('.sql')).sort()
+      expect(ficheros.length, 'desaparecieron migraciones del directorio').toBeGreaterThanOrEqual(16)
+      for (const f of ficheros) {
+        expect(() => psql(base, ['-f', '-'], readFileSync(join(DIR, f), 'utf8')),
+          `${f} no aplica sobre una base vacía: depende de estado que sólo existe aquí`).not.toThrow()
+      }
+    } finally {
+      // Se destruye pase lo que pase: una base huérfana por pasada es la cicatriz de esta spec.
+      psql('postgres', ['-c', `drop database if exists ${base}`])
+    }
+  }, 120_000)
+})

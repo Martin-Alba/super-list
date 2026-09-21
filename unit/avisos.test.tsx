@@ -156,10 +156,13 @@ describe('R8 la cantidad de un ítem se edita', () => {
     montar([item('i1', 'pan', '2')])
     const cant = screen.getByLabelText('Cantidad de pan') as HTMLInputElement
     expect(cant.value).toBe('2')
-    fireEvent.change(cant, { target: { value: '3 barras' } })
+    // Spec J — `'7'`, no `'3 barras'`: esta fila afirma que **se guarda al soltar**, y el
+    // texto era sólo el ejemplo a mano. Desde J-R3 el campo no admite letras, y el filtrado
+    // tiene su propia fila (j6) en vez de viajar de polizón en ésta.
+    fireEvent.change(cant, { target: { value: '7' } })
     fireEvent.blur(cant)
     await waitFor(() => expect(updateItem).toHaveBeenCalledWith(
-      expect.anything(), 'i1', { quantity: '3 barras' }))
+      expect.anything(), 'i1', { quantity: '7' }))
   })
 
   it('vaciar la cantidad la borra, no la deja en blanco', async () => {
@@ -289,13 +292,15 @@ describe('S2 editar nombre y cantidad de la misma fila conserva las dos', () => 
     const cant = screen.getByLabelText('Cantidad de pan') as HTMLInputElement
 
     fireEvent.change(nombre, { target: { value: 'pan integral' } })
-    fireEvent.change(cant, { target: { value: '3 barras' } })
+    // Spec J — igual que arriba: lo que esta fila afirma es que la cantidad tecleada **no se
+    // pierde** al confirmar el nombre, no qué caracteres admite el campo.
+    fireEvent.change(cant, { target: { value: '7' } })
     fireEvent.blur(nombre)
     await waitFor(() => expect(updateItem).toHaveBeenCalledWith(expect.anything(), 'i1', { name: 'pan integral' }))
-    expect(cant.value, 'la cantidad recién tecleada se perdió al confirmar el nombre').toBe('3 barras')
+    expect(cant.value, 'la cantidad recién tecleada se perdió al confirmar el nombre').toBe('7')
 
     fireEvent.blur(cant)
-    await waitFor(() => expect(updateItem).toHaveBeenCalledWith(expect.anything(), 'i1', { quantity: '3 barras' }))
+    await waitFor(() => expect(updateItem).toHaveBeenCalledWith(expect.anything(), 'i1', { quantity: '7' }))
   })
 })
 

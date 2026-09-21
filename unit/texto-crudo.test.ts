@@ -153,6 +153,29 @@ describe('AE3 el error de la base sólo sirve para traducirlo', () => {
   })
 
   /**
+   * Spec J / §E.4(c) — **La puerta que abre el arreglo de J-R8.**
+   *
+   * El `catch` del botón de compartir llama a su variable `fallo`, no `e`, porque esta
+   * guarda persigue el nombre de la variable de un `catch` **por todo el fichero** y con
+   * `e` los siete `onChange={e => …}` de la vista se reportaban como usos del error de la
+   * base. El rename es legítimo —la semilla es la posición, no el nombre— pero **abre una
+   * puerta que nadie miraba**: si el rename hubiera desactivado la guarda en ese bloque,
+   * el fichero saldría limpio por no estar vigilado, que es indistinguible de estar bien.
+   *
+   * Así que se prueba sobre ese bloque concreto, no sobre el fichero en general.
+   */
+  it('y sigue mordiendo en el catch de compartir, que no se llama «e»', () => {
+    const vista = readFileSync('app/g/[id]/GroupView.tsx', 'utf8')
+    expect(vista, 'el bloque que esta sonda ataca ya no existe: la sonda no mide nada')
+      .toContain('catch (fallo) {')
+    expect(usosIndebidosDelError(
+      vista.replace('if (esCancelacion(fallo)) return', 'avisarTexto(String(fallo)); return'),
+      'GroupView.tsx'),
+      'la variable del catch de compartir quedó fuera de la guarda al dejar de llamarse «e»')
+      .not.toEqual([])
+  })
+
+  /**
    * AF1 / DoD 136 — El error llega por posición: el rechazo de una promesa y la
    * variable de un `catch`. Se prueban con nombres que no son la semilla, que es
    * el punto entero.

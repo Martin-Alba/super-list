@@ -1609,3 +1609,39 @@ comprobable no es quién mide, es que la medida venga con su entorno.
 Cerrado en parte el mismo día: el `Runtime check` de `CLAUDE.md` exige ahora registrar el estado del
 entorno antes de cada corrida y declarar toda caída deliberada con su contenedor. Lo que queda abierto
 es que esa exigencia **no llega a los encargos de revisión**, que se escriben a mano.
+
+## 84 — Un grupo puede quedarse con dos invitaciones vivas (2026-09-21)
+
+`create_invite` revoca la anterior —`update … set revoked_at = now() where revoked_at is null`—
+**antes** de insertar la nueva, y como `authenticated` sólo tiene `SELECT` sobre `group_invites` y el
+único otro escritor es `service_role`, en la práctica hay como mucho un invite vivo por grupo.
+
+Pero eso es una propiedad del **orden de las sentencias**, no de la base: dos llamadas concurrentes
+pueden entrelazarse y dejar dos tokens vivos. No es una brecha —§A.2 sigue en pie, un link nunca da
+acceso, sólo permite pedirlo— y el impacto práctico es que dos personas podrían estar usando enlaces
+distintos del mismo grupo, los dos válidos.
+
+Aparece ahora porque `e2e/fixtures.ts` › `tokenVivo` lee `.limit(1)` sin orden, y su determinismo
+descansa en esa propiedad. Está escrito en su docstring, que es lo que se pudo hacer; lo que lo
+cerraría de verdad es un índice único parcial sobre `(group_id) where revoked_at is null`.
+
+## 85 — El hard fail de los `.env*` tiene una excepción que nadie ha escrito (2026-09-21)
+
+`CLAUDE.md` dice: «claves o **cualquier `.env*`** dentro del control de versiones». `.env.example`
+está en git desde el primer commit, con las claves vacías, y `unit/gitignore.test.ts` lo exime por su
+nombre.
+
+O sea que la regla, leída al pie de la letra, está incumplida desde el principio, y cada revisión
+tiene que volver a perdonarla por su cuenta. Son tres revisiones seguidas que la han mencionado. Lo
+que la cerraría: exceptuar `.env.example` por su nombre en la constitución, o borrar el fichero. La
+decisión es del usuario porque es su constitución.
+
+## 86 — El registro de migraciones de la base local está incompleto (2026-09-21)
+
+`supabase_migrations.schema_migrations` en la base local llega hasta `20260908000100`, y hay seis
+migraciones posteriores **aplicadas** que no figuran. Se descubrió al insertar la de la cantidad.
+
+No afecta a las pruebas —atacan la base directamente— ni al hospedado, que lleva su propio registro.
+Afecta a `supabase migration list` y a `supabase db reset` en local, o sea a cualquiera que confíe en
+esa tabla para saber qué hay aplicado. No se arregló en este ciclo porque tocarla es reescribir un
+registro, y hacerlo sin que nadie lo pida es exactamente la clase de cosa que `DEBT.md` §8 recoge.

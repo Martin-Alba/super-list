@@ -19,7 +19,9 @@ test('dos contextos: alta, edición y borrado llegan al otro sin recargar', asyn
 
   // ALTA
   await a.getByTestId('item-name').fill('zanahorias')
-  await a.getByTestId('item-qty').fill('1 kg')
+  // Spec J — `'1'`, no `'1 kg'`: el campo ya no admite letras, y esta línea es la última del
+  // corpus que hacía creer lo contrario. Nada afirmaba el valor, así que estaba verde y engañaba.
+  await a.getByTestId('item-qty').fill('1')
   await a.getByTestId('add-item').click()
   await expect(b.getByTestId('item').first().getByLabel('Nombre')).toHaveValue('zanahorias')
 

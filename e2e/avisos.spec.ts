@@ -1,6 +1,6 @@
 import { test, expect, type Browser } from '@playwright/test'
 import { nuevoFlujoPkce, nuevoTarro, paraNavegador, CLAVE_COOKIE } from './pkce'
-import { admin } from './fixtures'
+import { admin, tokenVivo } from './fixtures'
 
 /**
  * Los tres caminos de fallo se prueban por SEPARADO. Un solo caso de "sale un
@@ -180,11 +180,14 @@ test('DoD 14: la cantidad de un ítem de la lista se edita y se guarda', async (
   await admin.from('items').insert({ group_id: gid, name: 'pan', quantity: '2', created_by: dueno.user_id })
   await page.reload(); await page.waitForLoadState('networkidle')
 
+  // Spec J — `'7'`, no `'3 barras'`: esta prueba afirma que **editar la cantidad se guarda**,
+  // y el texto era el ejemplo a mano. Desde J-R3 el campo no admite letras y desde J-R1 la base
+  // las rechaza, así que con el literal viejo esta fila medía el filtro en vez de el guardado.
   const cant = page.getByLabel('Cantidad de pan')
-  await cant.fill('3 barras')
+  await cant.fill('7')
   await cant.blur()
   await expect.poll(async () => (await admin.from('items').select('quantity')
-    .eq('group_id', gid).is('deleted_at', null).single()).data?.quantity).toBe('3 barras')
+    .eq('group_id', gid).is('deleted_at', null).single()).data?.quantity).toBe('7')
   await ctx.close()
 })
 
@@ -235,8 +238,8 @@ test('DoD 23: dos navegadores añaden el mismo producto a la vez', async ({ brow
   // El link se genera por la interfaz del dueño: `create_invite` comprueba
   // `auth.uid()`, y la clave de servicio no tiene ninguna.
   await a.page.getByTestId('create-invite').click()
-  const enlace = await a.page.getByTestId('invite-link').inputValue()
-  const tk = enlace.split('/invite/')[1]
+  // Spec J / j15 — el token se lee por API, no del `value` de un campo que ya no existe.
+  const tk = await tokenVivo(gid)
 
   const b = await entrar(browser, 'car2')
   await b.page.goto(`/invite/${tk}`)
@@ -287,12 +290,13 @@ test('DoD 18: editar nombre y cantidad de la misma fila conserva las dos', async
   await page.reload(); await page.waitForLoadState('networkidle')
 
   await page.getByTestId('item').first().getByLabel('Nombre').fill('pan integral')
-  await page.getByLabel('Cantidad de pan').fill('3 barras')
+  // Spec J — igual: lo que esta fila afirma es que las dos ediciones se conservan.
+  await page.getByLabel('Cantidad de pan').fill('7')
   await page.getByTestId('item').first().getByLabel('Nombre').blur()
   await expect.poll(async () => (await admin.from('items').select('name')
     .eq('group_id', gid).is('deleted_at', null).single()).data?.name).toBe('pan integral')
   await expect(page.getByLabel('Cantidad de pan integral'),
-    'la cantidad recién tecleada se perdió al confirmar el nombre').toHaveValue('3 barras')
+    'la cantidad recién tecleada se perdió al confirmar el nombre').toHaveValue('7')
   await ctx.close()
 })
 
@@ -384,7 +388,7 @@ test('DoD 41: un fallo al salir del grupo se pinta, no revienta', async ({ brows
   const a = await entrar(browser, 'sale1')
   const gid = await grupoCon(a.page, 'Salida')
   await a.page.getByTestId('create-invite').click()
-  const tk = (await a.page.getByTestId('invite-link').inputValue()).split('/invite/')[1]
+  const tk = await tokenVivo(gid)
 
   const b = await entrar(browser, 'sale2')
   await b.page.goto(`/invite/${tk}`); await b.page.waitForLoadState('networkidle')
