@@ -15,7 +15,7 @@ import { decidirEncolar } from '@/lib/cola'
 import { alCambiarLaCola, barrerCaducados, encolar, guardarLista, guardarNombre, leerCola, leerLista, quitarDeCola, siguienteEnCola,
   type Pendiente } from '@/lib/local'
 import { useGroupChannel } from '@/lib/useGroupChannel'
-import { createInviteAction, decideMemberAction, leaveGroupAction } from '@/app/actions'
+import { createInviteAction, decideMemberAction, deleteGroupAction, leaveGroupAction, transferGroupAction } from '@/app/actions'
 
 type Member = { user_id: string; status: string; role: string }
 type Profile = { id: string; display_name: string | null }
@@ -135,6 +135,17 @@ export function GroupView({
   const [busy, setBusy] = useState(false)
   const [, startTransition] = useTransition()
   const isOwner = me.role === 'owner'
+  /**
+   * Spec H / H-R7 — **Confirmación en dos pasos, en el componente, y nunca `window.confirm`.** Un
+   * diálogo nativo bloquea el hilo y no se puede afirmar por identidad en la verja de navegador.
+   *
+   * Y va en los **dos** mandos, no sólo en borrar. La spec pedía confirmación para borrar «porque no
+   * se deshace»; transferir tampoco se deshace desde este lado —sólo el nuevo owner podría
+   * devolverla—, y el botón vive pegado al nombre de cada miembro, donde un toque de más cuesta la
+   * lista de la familia. Se deja anotado como lo que es: una decisión de interfaz dentro de H-R7,
+   * más estricta que la letra del requisito.
+   */
+  const [confirmando, setConfirmando] = useState<{ que: 'borrar' } | { que: 'transferir'; a: string } | null>(null)
   const nameOf = (id: string) => profiles.find(p => p.id === id)?.display_name ?? 'alguien'
 
   // Cuando el servidor re-renderiza (router.refresh) hay que resincronizar.
@@ -361,9 +372,22 @@ export function GroupView({
    * que el servidor había guardado, y la base no podía reconocerlo: fila nueva. La spec decía
    * «el alta directa no tiene nada que deduplicar», y era falso.
    */
+  /**
+   * Iteración 3 de G2 · i3-R1 — **`visibles` es un parámetro, y a propósito no tiene valor por
+   * defecto.** Antes leía `items` del cierre, y eso rompía el camino del reintento: esa rama acaba
+   * de releer y de probar que el producto **no** está vivo, pero `mergeItems` no quita una fila
+   * ausente de la lectura fresca, así que la caché conservaba el producto tachado y
+   * `decidirEncolar` contestaba «duplicado». Medido en navegador 2/2 con la caché obsoleta: cero
+   * pendientes, cero filas vivas, **producto perdido** bajo el aviso «Ese producto ya está en la
+   * lista» — sobre una lista vacía.
+   *
+   * Sin defecto porque con defecto esto vuelve: un llamador que no se acuerde hereda la caché
+   * rancia en silencio. Es el corte que la Spec E hizo con la caducidad —el dueño no depende de que
+   * cada llamador se acuerde—, aplicado a la pregunta «¿está vivo?».
+   */
   const meterEnCola = async (
-    fila: FilaAEnviar, desde: number,
-  ): Promise<{ ok: boolean; descartadas: number }> => {
+    fila: FilaAEnviar, desde: number, visibles: Item[],
+  ): Promise<{ ok: boolean; descartadas: number; motivo: 'duplicado' | 'sin-almacen' | null }> => {
     const { nombre, cantidad } = fila
     /**
      * Spec B / iteración 3 · i3-R1 — **Lo caducado se quita antes de decidir.**
@@ -397,7 +421,7 @@ export function GroupView({
      */
     const decision = decidirEncolar({
       usuario: me.id, grupo: group.id, nombre, cantidad,
-      visibles: items, cola, id: fila.id, ahora: Date.now(),
+      visibles, cola, id: fila.id, ahora: Date.now(),
     })
     /**
      * R4 — Un solo sitio para el duplicado, las dos veces que se detecta: la que
@@ -410,7 +434,10 @@ export function GroupView({
      */
     const esDuplicado = () => {
       devolver(fila, desde); void avisar('duplicado', '23505')
-      return { ok: false, descartadas }
+      // i1-R2 — `'duplicado'`, no «no se pudo»: el almacén **contestó**, así que el servidor no
+      // puede tener la fila bajo esta clave y no hay nada que recordar. Conflar los tres motivos
+      // en «desconocido» dejaba clave recordada tras un duplicado que el disco había detectado.
+      return { ok: false, descartadas, motivo: 'duplicado' as const }
     }
     if (decision.accion === 'duplicado') return esDuplicado()
     const p: Pendiente = decision.pendiente
@@ -427,11 +454,12 @@ export function GroupView({
     const puesto = await encolar(p)
     if (puesto === 'rechazado') {
       devolver(fila, desde); avisarTexto(SIN_ALMACEN, 'generico', 'mutacion')
-      return { ok: false, descartadas }
+      // El único motivo que deja el resultado desconocido: el disco no lo guardó.
+      return { ok: false, descartadas, motivo: 'sin-almacen' as const }
     }
     if (puesto === 'ya-estaba') return esDuplicado()
     setPendientes(prev => [...prev, p])
-    return { ok: true, descartadas }
+    return { ok: true, descartadas, motivo: null }
   }
 
   /**
@@ -735,11 +763,69 @@ export function GroupView({
    */
   const devueltas = useRef(new Map<string, FilaAEnviar>())
   const claveDe = (nombre: string) => devueltas.current.get(normNombre(nombre))
-  const olvidarClave = (nombre: string) => { devueltas.current.delete(normNombre(nombre)) }
+
+  /**
+   * Spec G2 / R2 — **El único sitio que decide si la clave se recuerda.** La rama informa de qué
+   * clase de resultado tuvo el gesto; la decisión se deriva de esa clase **aquí**.
+   *
+   * El corte es por **quién decide**, no por nombre: partir `devolver` en dos funciones no habría
+   * arreglado nada si el llamador siguiera eligiendo en su rama —era la primera de las tres formas
+   * de obedecer la spec al pie de la letra y fallar igual—. Una rama que dijera `'rechazado'` donde
+   * el resultado es desconocido sigue siendo un error, pero es **un** error localizable, no una
+   * decisión repartida.
+   *
+   * Sólo `'desconocido'` recuerda, y es el único caso en que el servidor **puede** tener la fila
+   * bajo esa clave: no contestó nadie que hable PostgREST **y** el disco no aceptó guardarla.
+   *
+   * Con `42501` o cualquier código, el servidor contestó y la clave se olvida. **Y con `23505` el
+   * motivo es otro, que conviene no escribir mal:** si el choque vino del índice de **nombre**, ese
+   * error no prueba nada sobre `origen_id` — puede que la fila del intento anterior siga ahí. Lo
+   * que lo hace correcto olvidarla es que el producto **está vivo**, o sea que la intención del
+   * usuario se cumplió: no hay nada que reintentar, aunque quede una clave sin resolver. La
+   * redacción anterior decía «el servidor probó que no la tiene», que es falso en ese caso.
+   *
+   * **Y esa justificación sólo vale si alguien pudo mirar** — el reparo que la revisión midió sobre
+   * la redacción de arriba, que era la segunda equivocada seguida en este mismo párrafo. «El
+   * producto está vivo» es una afirmación sobre una lectura; con la relectura caída no hay lectura
+   * que la respalde, y olvidar ahí es olvidar sin saber. Por eso el llamador de esa rama pasa
+   * `'desconocido'` cuando no se pudo leer (i3-R2): la decisión sigue estando en este único sitio,
+   * y lo que se le da es la clase del resultado, no la rama en la que ocurrió.
+   *
+   * **Su límite, escrito:** una casilla por producto, y guarda el desconocido **más reciente**. Si
+   * dos intentos del mismo producto quedan con resultado desconocido, la anterior se pierde — y de
+   * ésa responde el índice de nombre, que sigue siendo parcial y rechaza mientras la fila esté viva.
+   */
+  type Resultado = 'entro' | 'encolado' | 'desconocido' | 'rechazado'
+  const cerrarGesto = (fila: FilaAEnviar, resultado: Resultado) => {
+    const clave = normNombre(fila.nombre)
+    if (resultado === 'desconocido') devueltas.current.set(clave, fila)
+    else devueltas.current.delete(clave)
+  }
+
+  /**
+   * Iteración 1 de G2 · i1-R3 — **El camino del resultado desconocido, una vez.** R6 dice que el
+   * `'servidor'` del reintento «va por el mismo camino» que el del primer intento, y hasta aquí eso
+   * lo garantizaba un copiar-pegar de cuatro sentencias en dos sitios. Con un ayudante la igualdad
+   * es estructural y no queda nada que comprobar a mano.
+   *
+   * Y aquí está el único sitio donde se decide que un resultado es **desconocido**: cuando el
+   * servidor no contestó **y** el motivo por el que el disco no lo guardó es que no pudo. Si el
+   * disco contestó —duplicado, `'ya-estaba'`—, la intención está resuelta y no hay nada que
+   * recordar.
+   */
+  const encolarDesconocido = async (f: FilaAEnviar, desde: number, visibles: Item[]) => {
+    const r = await meterEnCola(f, desde, visibles)
+    if (!r.ok) {
+      cerrarGesto(f, r.motivo === 'sin-almacen' ? 'desconocido' : 'rechazado')
+      return
+    }
+    cerrarGesto(f, 'encolado')
+    despachar({ tipo: 'avisar', origen: 'cola', texto: EN_COLA, clase: 'servidor' })
+    void reintentarEnvio(++envio.current)
+  }
+
+  /** Devuelve lo tecleado al campo. Nada más: ya no decide nada. */
   const devolver = (fila: FilaAEnviar, desde: number) => {
-    // Se recuerda pase lo que pase con el campo: que el usuario haya tecleado otra cosa no
-    // borra el hecho de que el servidor pueda tener la fila bajo esta clave.
-    devueltas.current.set(normNombre(fila.nombre), fila)
     if (tecleado.current !== desde) return
     setName(fila.nombre); setQuantity(fila.cantidad ?? '')
   }
@@ -1126,9 +1212,9 @@ export function GroupView({
        */
       setName(''); setQuantity(''); setBusy(true)
       try {
-        const r = await meterEnCola(fila, desde)
+        const r = await meterEnCola(fila, desde, items)
         if (!r.ok) return
-        olvidarClave(trimmed)
+        cerrarGesto(fila, 'encolado')
         limpiarAviso()
         /**
          * Spec B / iteración 4 · i4-R1 — **Después de `limpiarAviso()`, no antes.**
@@ -1160,7 +1246,7 @@ export function GroupView({
     setName(''); setQuantity(''); setBusy(true)
     try {
       const { clase, code } = await addItem(createClient(), group.id, me.id, fila)
-      if (!clase) olvidarClave(trimmed)
+      if (!clase) cerrarGesto(fila, 'entro')
       if (clase) {
         /**
          * N1 — Deuda 34. `clasificar` devuelve `servidor` exactamente cuando el
@@ -1193,35 +1279,15 @@ export function GroupView({
           // i2-R4 — También aquí: si el producto acabó en la cola, su clave ya vive en disco y
           // esta casilla no tiene nada que recordar. Faltaba, y una clave que sobrevive a su
           // intención es estado mutable de proceso aplicable a un alta que no tiene que ver.
-          if (!(await meterEnCola(fila, desde)).ok) return
-          olvidarClave(trimmed)
-          /**
-           * N4 — El aviso se pinta directo, sin `avisar`. `avisar` lanza además
-           * un `reintentar` de **carga**, y con `reintentarEnvio` ya en marcha
-           * eran dos bucles con el mismo calendario: 5 `addItem` + 5
-           * `activeItems` en 23 s contra un servidor que por definición no
-           * contesta. La relectura sobra: `drenarUnaVez` ya mezcla la fila que
-           * devuelve el propio `addItem`.
-           */
-          /**
-           * Spec B / R3 — **Texto propio del hecho «encolado».** Antes se pintaba
-           * `mensajeDe` refinado por red, y eso eran dos problemas en una línea.
-           *
-           * Uno: `SERVIDOR` dice «lo reintentamos solo», y el reintento dura 23 s
-           * —`esperasDeReintento()`— y después no lo reintenta nadie; el aviso
-           * seguía en pantalla con el servicio ya contestando.
-           *
-           * Dos: el refinado existía (N5) para no enseñar «Sin conexión» y «el
-           * servicio está despertando» a la vez cuando la red caía entre pulsar y
-           * responder. Con un texto que no culpa ni a la red ni al servicio de
-           * datos —sólo dice dónde está el producto y que sale solo— esa colisión
-           * no puede volver: no hay a quién culpar mal.
-           *
-           * Y `SERVIDOR` se queda intacto para la carga y la edición fallidas, que
-           * es donde sigue siendo cierto que no hay nada guardado.
-           */
-          despachar({ tipo: 'avisar', origen: 'cola', texto: EN_COLA, clase: 'servidor' })
-          void reintentarEnvio(++envio.current)
+          // i3-R1 — `items` explícito, y aquí es lo correcto: en el desconocido del **primer**
+          // intento no ha habido relectura, así que nada desmiente la caché. La firma sin valor por
+          // defecto obliga a decir cuál de las dos listas manda en cada rama, que es el punto.
+          await encolarDesconocido(fila, desde, items)
+          // El anuncio de `EN_COLA` y el rearme del bucle viven en `encolarDesconocido`: la
+          // sustitución de esta rama por el ayudante dejó aquí la cola original, así que se
+          // anunciaba y se armaba DOS veces. Lo cazó `unit/notice-render.test.tsx` › «el aviso se
+          // limpia en la siguiente operacion con exito», una fila que la valla de la spec no
+          // nombraba — el arreglo es el borrado, no la valla.
           return
         }
         /**
@@ -1237,50 +1303,155 @@ export function GroupView({
          * texto del error —la constitución lo prohíbe— porque no hace falta: el cliente sabe si
          * heredó.
          */
-        if (code === '23505' && devuelta) {
-          olvidarClave(trimmed)
-          const otra = { id: crypto.randomUUID(), nombre: trimmed, cantidad: cantidadAhora }
-          const r2 = await addItem(createClient(), group.id, me.id, otra)
-          if (!r2.clase) {
-            if (r2.data) setItems(prev => mergeItems([r2.data as Item], prev))
-            setBusy(false)
-            return
-          }
-          devolver(otra, desde); void avisar(r2.clase, r2.code); setBusy(false)
-          return
-        }
-        devolver(fila, desde)
-        // T7 — no se espera al afinado: hacerlo dejaba el botón deshabilitado
-        // hasta 2 s tras un 42501, que es lo contrario de lo que S4 buscaba.
-        void avisar(clase, code)
-        // R7 — el duplicado lo decide el índice único de la base con 23505, no
-        // una comprobación previa aquí: dos altas simultáneas no se ven entre
-        // ellas, y comprobar antes de insertar es el check-then-act que D veta.
-        // Esto sólo lleva el foco a la fila que ya estaba, para editar su
-        // cantidad. Lo tecleado en el alta no se aplica: no se pisa lo que puso
-        // otra persona.
+        /**
+         * Spec G2 / R4 — **El reintento pregunta antes de acuñar.** Una sola lectura contesta las
+         * dos preguntas que este punto tiene: ¿es un duplicado de verdad —el producto está en la
+         * lista— o aterrizó mi intento anterior y alguien lo tachó?
+         *
+         * Reordenar, no añadir: esta lectura ya existía abajo para llevar el foco a la fila que ya
+         * estaba (R7/S11). La iteración anterior reintentaba **antes** de ella, así que en el
+         * duplicado de todos los días gastaba un viaje de red y se llevaba el foco por delante —
+         * medido: segunda pulsación, dos envíos y cero relecturas—. Ahora la lectura va primero y
+         * las dos decisiones se derivan de ella.
+         *
+         * Y el disparador deja de ser «23505 + heredada», que era adivinar: es «el resultado
+         * anterior es desconocido **y** el producto no está vivo».
+         */
         if (code === '23505') {
-          // S11 — En la carrera real, quien pierde puede no tener todavía la fila
-          // del otro: sin releer, no hay foco y nada lo denuncia.
-          let ya = items.find(i => mismoProducto(i.name, trimmed))
+          /**
+           * **La caché local no sirve para decidir el reintento, y medirlo costó una fila roja.**
+           * La spec dice «relee con `activeItems`» y la primera implementación miró primero
+           * `items`, que es lo que S11 hace para el foco. En el escenario que g7 monta —el envío
+           * llegó al servidor y su respuesta no volvió— el cliente **sí tiene** la fila en `items`,
+           * porque realtime le entregó el INSERT que él creía fallido; y el tachado posterior puede
+           * no haberla quitado de ahí. Así que la caché decía «está vivo» sobre algo tachado, el
+           * reintento no disparaba y el alta quedaba en el callejón que esta spec cierra.
+           *
+           * Con clave heredada se **relee siempre**: es la única forma de distinguir «aterrizó mi
+           * intento» de «hay una fila de otro». Sin clave heredada, la pregunta es sólo para el
+           * foco y S11 sigue valiendo: mirar local primero ahorra un viaje y su peor caso es no
+           * enfocar.
+           */
+          let ya = devuelta ? undefined : items.find(i => mismoProducto(i.name, trimmed))
+          /**
+           * Iteración 1 de G2 · i1-R1 — **«No está» y «no pude leer» no son lo mismo**, y la
+           * primera versión las confundía: con la relectura caída, `ya` se quedaba `undefined` y el
+           * reintento disparaba. Es la puerta que esta misma spec escribió —«§A.3 fallar cerrado: si
+           * la relectura falla, no se reintenta… No se acuña clave nueva sin saber»— contradicha por
+           * el código que la escribió. Medido: dos envíos donde debía haber uno, y con el producto
+           * vivo, una escritura desperdiciada **más** el callejón que G2 venía a cerrar.
+           */
+          let seLeyo = false
+          /**
+           * i3-R1 — **Lo que se leyó manda sobre la caché, y viaja como valor.** `setItems` no es
+           * síncrono y `mergeItems` no quita ausentes, así que `items` sigue teniendo el producto
+           * tachado dentro de este cierre. Quien encole aguas abajo necesita esta lista, no aquélla.
+           */
+          let visibles = items
           if (!ya) {
             const relectura = await activeItems(createClient(), group.id)
             if (!relectura.clase) {
+              seLeyo = true
+              visibles = relectura.data
               setItems(prev => mergeItems(relectura.data, prev))
               ya = relectura.data.find(i => mismoProducto(i.name, trimmed))
             }
           }
-          // T6 — El foco se pedía con un `setTimeout(0)` justo después de
-          // `setItems`, y React todavía no había pintado la fila nueva: en la
-          // carrera real el perdedor no la tiene hasta ese render. Se anota y se
-          // enfoca en un efecto, cuando el nodo ya existe.
+
+          /**
+           * Iteración 2 de G2 · **el peor caso del botón, medido y aceptado.** El camino del
+           * reintento encadena tres llamadas de red, cada una con su cota de `TIMEOUT_MS` = 10 s
+           * (`lib/items.ts`): el `addItem` que choca, la relectura, y el reintento. Son **30 s** de
+           * botón deshabilitado en el peor caso de red, frente a los 20 de antes.
+           *
+           * **Y una cuarta pata, que la iteración 2 declaró de menos:** si el reintento vuelve
+           * desconocido, `encolarDesconocido` espera a `meterEnCola`, que hace `barrerCaducados` y
+           * `encolar` sobre IndexedDB **sin cota**. El disco no tiene `TIMEOUT_MS`, así que el peor
+           * caso verdadero es 30 s de red **más** lo que tarde el disco. Se declara en vez de
+           * acotarse por lo mismo que arriba: abortar a mitad de una escritura de cola deja el
+           * gesto sin saber si quedó encolado, que es el estado que esta spec existe para no crear.
+           *
+           * §D.6 se cumple —cada llamada está acotada—; lo que creció es la composición, y se acepta
+           * porque las tres sólo se encadenan cuando el servidor está contestando lento **y** hay una
+           * clave heredada, que es un camino raro dentro de un camino raro. La alternativa —acotar el
+           * conjunto— exigiría abortar a mitad y dejar el gesto sin saber cuál de los tres quedó en
+           * vuelo, que es precisamente el estado que esta spec existe para no crear.
+           */
+          if (seLeyo && !ya && devuelta) {
+            /**
+             * El intento anterior aterrizó —su clave es la que choca— y el producto no está en la
+             * lista: alguien lo tachó. Un reintento, con clave nueva. El `23505` de una clave que
+             * **este** gesto acuñó no llega aquí, porque entonces `devuelta` es nula y lo que
+             * choca es el nombre.
+             */
+            const otra = { id: crypto.randomUUID(), nombre: trimmed, cantidad: cantidadAhora }
+            const r2 = await addItem(createClient(), group.id, me.id, otra)
+            if (!r2.clase) {
+              cerrarGesto(otra, 'entro')
+              if (r2.data) setItems(prev => mergeItems([r2.data as Item], prev))
+              return
+            }
+            if (r2.clase === 'servidor') {
+              /**
+               * R6 — El resultado desconocido del reintento va por donde va el del primer intento:
+               * a la cola, con su aviso y su bucle. Antes se perdía el producto bajo un aviso que
+               * prometía un reintento que nadie hacía.
+               */
+              await encolarDesconocido(otra, desde, visibles)
+              return
+            }
+            /**
+             * R5 — **No se re-arma.** El reintento rechazado no dice nada nuevo sobre el intento
+             * original, cuyo resultado sigue siendo desconocido: así que su clave se queda como
+             * estaba y la del reintento no se guarda. Antes esta salida sembraba el mapa con la
+             * clave nueva y el gesto siguiente heredaba **ésa**, acuñando una por gesto sin cota.
+             */
+            devolver(otra, desde); void avisar(r2.clase, r2.code)
+            return
+          }
+
+          /**
+           * Duplicado de verdad: el producto está en la lista. El camino que ya existía — **salvo
+           * cuando nadie pudo mirar.**
+           *
+           * i3-R2 — Con clave heredada y la relectura caída, `ya` es `undefined` por no haber
+           * podido leer, no por no estar. Un `23505` del índice de **nombre** no dice nada sobre si
+           * el intento anterior aterrizó bajo su `origen_id`, así que el resultado de aquel intento
+           * sigue siendo **desconocido** y su clave tiene que sobrevivir. Olvidarla aquí era tirar
+           * la única forma de reintentar, y el docstring de `cerrarGesto` lo justificaba diciendo
+           * «el producto está vivo» — que es falso justo en esta rama.
+           */
+          cerrarGesto(fila, devuelta && !seLeyo ? 'desconocido' : 'rechazado')
+          devolver(fila, desde)
+          void avisar(clase, code)
+          // T6 — El foco se pide en un efecto, cuando el nodo ya existe: pedirlo con un
+          // `setTimeout(0)` tras `setItems` llegaba antes de que React pintara la fila nueva.
           if (ya) pendienteFoco.current = ya.id
+          return
         }
+
+        cerrarGesto(fila, 'rechazado')
+        devolver(fila, desde)
+        // T7 — no se espera al afinado: hacerlo dejaba el botón deshabilitado hasta 2 s tras un
+        // 42501, que es lo contrario de lo que S4 buscaba.
+        void avisar(clase, code)
         return
       }
     } finally {
       setBusy(false)
     }
+    /**
+     * Iteración 2 de G2 · **este gesto no tiene `catch`, y queda dicho en vez de descubierto.**
+     * Una excepción entre el vaciado del campo (`setName('')`) y `devolver` pierde lo tecleado y no
+     * informa de ninguna clase, así que la casilla de la clave se queda como estaba sin que nadie lo
+     * decida — el único camino de salida que no informa.
+     *
+     * **Hoy no es alcanzable, comprobado:** `lib/local.ts` resuelve siempre en sus cuatro puertas
+     * —`abrir`, `conTienda`, `escribir` y sus callbacks— en vez de lanzar, y `supabase-js` devuelve
+     * el error en el resultado. Así que no se envuelve: un `catch` que no puede correr es código sin
+     * prueba posible. Lo que sí hace falta es que esto esté escrito, porque el día que una de esas
+     * puertas lance, el síntoma será «se perdió lo que escribí» y nadie mirará aquí.
+     */
   }
 
   // J13 — las tres decisiones de membresía eran el mismo bloque repetido.
@@ -1299,10 +1470,25 @@ export function GroupView({
   const active = members.filter(m => m.status === 'active')
 
   return (
-    <main className="mx-auto flex min-h-dvh max-w-md flex-col gap-6 p-4">
+    <main className="mx-auto flex w-full min-h-dvh max-w-md flex-col gap-6 p-4">
       <header className="flex items-center justify-between gap-3">
-        <Link href="/" className="min-h-[44px] py-3 text-sm text-neutral-500">← Grupos</Link>
-        <h1 className="text-xl font-semibold" data-testid="group-name">{group.name}</h1>
+        <Link href="/" className="min-h-[44px] shrink-0 py-3 text-sm text-neutral-500">← Grupos</Link>
+        {/**
+          * i2-R3 — El nombre del grupo lo escribe la persona y no tiene cota. Con un solo token sin
+          * espacios la cabecera llevaba la página a 783 px sobre una pantalla de 390, medido por la
+          * revisión. `truncate` funciona aquí **porque el `main` ya lleva `w-full`**: antes su
+          * `white-space: nowrap` habría estirado el contenedor en vez de recortarse, que es el
+          * defecto que la causa raíz cerró. Y `shrink-0` en el enlace, para que lo que ceda sea el
+          * título y no la salida.
+          *
+          * *(Aquí decía además «`min-w-0` para que pueda encoger dentro del flex». Es falso y se
+          * midió: `truncate` incluye `overflow: hidden`, y el mínimo automático de un ítem flex sólo
+          * se aplica con `overflow: visible` —Flexbox §4.5—, así que `min-w-0` no hace nada donde ya
+          * hay `truncate`. Se retiraron las cinco clases muertas que esa idea dejó. Se conservan las
+          * de los `<input>`, que es otro mecanismo —el ancho intrínseco del campo—, y la del `span`
+          * con `break-words`, que sí tiene `overflow` visible.)*
+          */}
+        <h1 className="truncate text-xl font-semibold" data-testid="group-name">{group.name}</h1>
       </header>
 
       {/* N2 — señal POSITIVA: sólo existe cuando el canal está vivo. Afirmar
@@ -1406,7 +1592,7 @@ export function GroupView({
         {pendientes.map(p => (
           <li key={p.id} data-testid="item-pendiente"
               className="flex items-center gap-2 rounded-xl border border-dashed border-amber-300 bg-amber-50 p-3">
-            <span className="min-w-0 flex-1 truncate text-neutral-700">{p.nombre}</span>
+            <span className="flex-1 truncate text-neutral-700">{p.nombre}</span>
             {p.cantidad && <span className="shrink-0 text-neutral-500">{p.cantidad}</span>}
             <span className="shrink-0 text-xs text-amber-700">{PENDIENTE}</span>
           </li>
@@ -1473,7 +1659,7 @@ export function GroupView({
 
           {pending.map(m => (
             <div key={m.user_id} data-testid="pending-request" className="flex items-center gap-2">
-              <span className="w-full min-w-0 truncate">{nameOf(m.user_id)}</span>
+              <span className="w-full truncate">{nameOf(m.user_id)}</span>
               <button data-testid="approve" className="min-h-[44px] rounded-xl bg-neutral-900 px-3 text-sm text-white"
                 onClick={() => decide(m.user_id, 'active')}>
                 Aceptar
@@ -1486,12 +1672,82 @@ export function GroupView({
           ))}
 
           {active.filter(m => m.user_id !== me.id).map(m => (
-            <div key={m.user_id} data-testid="active-member" className="flex items-center gap-2">
-              <span className="w-full min-w-0 truncate">{nameOf(m.user_id)}</span>
-              <button data-testid="expel" className="min-h-[44px] rounded-xl border border-neutral-300 px-3 text-sm"
-                onClick={() => decide(m.user_id, 'removed')}>
-                Expulsar
-              </button>
+            <div key={m.user_id} data-testid="active-member" className="flex flex-col gap-2">
+              {/**
+                * i1-R5 — **El nombre arriba y los mandos debajo.** Estaban los tres en una fila, y
+                * medido a 390 px con un nombre largo —los escribe quien se registra, sin cota en
+                * `profiles`—: el botón «Expulsar» acababa en x=432 y la página entera se iba a 448,
+                * 58 px de desborde horizontal. Con un nombre corto la misma fila pasaba, que es
+                * exactamente por qué la guarda de 390 px no lo veía.
+                *
+                * Dos botones al lado de un texto de longitud libre no caben en un móvil, y el que
+                * añadió el segundo fue esta spec.
+                */}
+              {/**
+                * **El nombre parte; no se recorta.** `truncate` pone `white-space: nowrap`, y eso
+                * hace que el ancho mínimo del span sea el texto **entero**. El contenedor se
+                * dimensiona por contenido y se topa con `max-w-md`, así que el documento se iba a
+                * 448 px con la pantalla en 390: 58 de desborde horizontal, medido con la sonda.
+                * `w-full` no lo arregla, porque el 100% se resuelve contra un ancho que depende del
+                * propio span.
+                *
+                * Con `break-words` el nombre se parte en varias líneas y no empuja nada. Se pierde
+                * el recorte con puntos suspensivos y se gana que la pantalla quepa, que en un móvil
+                * de 390 px no es un intercambio discutible.
+                */}
+              <span className="w-full min-w-0 break-words">{nameOf(m.user_id)}</span>
+              <div className="flex items-center gap-2">
+                {/* H-R1 — Sólo sobre miembros `active`, que es lo único que la función acepta: esta
+                    lista ya está filtrada por `active`, así que la interfaz no puede ofrecer lo que
+                    el servidor va a rechazar. Y nunca sobre uno mismo: el `filter` lo excluye. */}
+                <button data-testid="transfer" className="min-h-[44px] rounded-xl border border-neutral-300 px-3 text-sm"
+                  onClick={() => setConfirmando({ que: 'transferir', a: m.user_id })}>
+                  Pasar la propiedad
+                </button>
+                <button data-testid="expel" className="min-h-[44px] rounded-xl border border-neutral-300 px-3 text-sm"
+                  onClick={() => decide(m.user_id, 'removed')}>
+                  Expulsar
+                </button>
+              </div>
+              {confirmando?.que === 'transferir' && confirmando.a === m.user_id && (
+                /**
+                 * i1-R5 — **En columna, como el de borrar.** Estaba en fila con el texto en un
+                 * `span` sin `truncate`, y los nombres los escribe la persona sin cota en
+                 * `profiles`. Medido a 390 px con un nombre largo: el panel se iba a 416 px, 58 de
+                 * desborde, y el botón **«No» quedaba con 30 de sus 44 px fuera de pantalla** —
+                 * Playwright no consiguió pulsarlo en 45 s. La salida de la única acción
+                 * irreversible era lo que se caía. El panel de borrar, que ya era `flex-col`,
+                 * aguanta 196 caracteres con desborde cero.
+                 */
+                <div data-testid="confirm-transfer" className="flex flex-col gap-2 rounded-xl bg-amber-50 p-3 text-sm">
+                  {/**
+                    * i4-R1 — **El gemelo del panel de borrar, y el ciclo lo midió dos veces antes de
+                    * arreglarlo.** Mismo defecto: el nombre va dentro de una frase, así que no se
+                    * puede recortar —se llevaría por delante lo que hay que leer— y tiene que
+                    * partir. `profiles.display_name` no tiene cota ni check de formato, y la base ya
+                    * guarda cuatro nombres de un solo token de 48 caracteres o más.
+                    * Medido a 390 px: 414 con 53 caracteres, 417 con 55.
+                    */}
+                  <span className="break-words">
+                    ¿Pasar la propiedad a {nameOf(m.user_id)}? Dejarás de poder invitar, aprobar y borrar.
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button data-testid="confirm-transfer-yes" className="min-h-[44px] rounded-xl bg-neutral-900 px-3 text-white"
+                      onClick={() => startTransition(async () => {
+                        limpiarAviso()
+                        const r = await transferGroupAction(group.id, m.user_id)
+                        setConfirmando(null)
+                        if (r.mensaje) avisarTexto(r.mensaje, r.clase ?? 'generico', 'mutacion')
+                      })}>
+                      Sí
+                    </button>
+                    <button data-testid="confirm-transfer-no" className="min-h-[44px] rounded-xl border border-neutral-300 px-3"
+                      onClick={() => setConfirmando(null)}>
+                      No
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           ))}
 
@@ -1506,6 +1762,45 @@ export function GroupView({
           </button>
           {invite && <input readOnly value={invite} data-testid="invite-link"
             className="min-h-[44px] w-full rounded-xl border border-neutral-200 bg-neutral-50 px-3 text-xs" />}
+
+          {/* H-R3 — Borrar el grupo. Abajo y separado del resto: es la única acción de esta
+              pantalla que no se deshace. */}
+          <div className="border-t border-neutral-200 pt-3">
+            <button data-testid="delete-group" className="min-h-[44px] text-sm text-red-600"
+              onClick={() => setConfirmando({ que: 'borrar' })}>
+              Borrar el grupo
+            </button>
+            {confirmando?.que === 'borrar' && (
+              <div data-testid="confirm-delete" className="mt-2 flex flex-col gap-2 rounded-xl bg-red-50 p-3 text-sm">
+                {/**
+                  * i3-R1 — Aquí el nombre va **dentro de una frase**, así que `truncate` no sirve:
+                  * recortaría la frase entera y se llevaría por delante «No se puede deshacer», que
+                  * es justo lo que hay que leer antes de pulsar. El nombre **parte**.
+                  * Medido a 390 px con un nombre de un solo token: 430 px antes, sin esto.
+                  */}
+                <span className="break-words">
+                  ¿Borrar «{group.name}»? Todos sus miembros saldrán y la lista dejará de estar
+                  disponible. No se puede deshacer.
+                </span>
+                <div className="flex items-center gap-2">
+                  <button data-testid="confirm-delete-yes" className="min-h-[44px] rounded-xl bg-red-600 px-3 text-white"
+                    onClick={() => startTransition(async () => {
+                      limpiarAviso()
+                      const r = await deleteGroupAction(group.id)
+                      // Si llega aquí es que no redirigió: sólo ocurre con error.
+                      setConfirmando(null)
+                      if (r?.mensaje) avisarTexto(r.mensaje, r.clase ?? 'generico', 'mutacion')
+                    })}>
+                    Sí, borrar
+                  </button>
+                  <button data-testid="confirm-delete-no" className="min-h-[44px] rounded-xl border border-neutral-300 px-3"
+                    onClick={() => setConfirmando(null)}>
+                    No
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </section>
       )}
 

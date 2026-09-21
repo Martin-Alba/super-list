@@ -81,3 +81,35 @@ export async function signOutAction() {
   await supabase.auth.signOut()
   redirect('/login')
 }
+
+/**
+ * Spec H / H-R1 — Transferir la propiedad. El cliente manda intención, nunca autoridad (§B.5):
+ * envía el grupo y la persona, y `transfer_group` deriva de la sesión si quien llama es el owner.
+ * Nada de rol viaja desde aquí.
+ */
+export async function transferGroupAction(groupId: string, userId: string): Promise<ActionState> {
+  const supabase = await createClient()
+  const { error } = await supabase.rpc('transfer_group', {
+    p_group_id: groupId, p_user_id: userId,
+  }).abortSignal(bounded())
+  if (error) return traducirConSesion(error, () => supabase.auth.getUser())
+  revalidatePath(`/g/${groupId}`)
+  return {}
+}
+
+/**
+ * Spec H / H-R3 — Borrar el grupo, y **redirige**, como `leaveGroupAction`.
+ *
+ * La primera versión no redirigía, con el argumento de que el borrado pone la propia membresía en
+ * `removed` y de esa transición ya se encarga la vista. Es verdad y no basta: esa transición llega
+ * **por realtime**, así que con el canal degradado quien pulsa «Borrar» se queda mirando un grupo que
+ * ya no existe sin que nada se mueva. Quien inicia una salida navega por su cuenta; el camino de la
+ * vista sigue existiendo para los **demás** miembros, que no pulsaron nada.
+ */
+export async function deleteGroupAction(groupId: string): Promise<ActionState> {
+  const supabase = await createClient()
+  const { error } = await supabase.rpc('delete_group', { p_group_id: groupId }).abortSignal(bounded())
+  if (error) return traducirConSesion(error, () => supabase.auth.getUser())
+  revalidatePath('/')
+  redirect('/')
+}
