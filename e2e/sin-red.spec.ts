@@ -757,7 +757,7 @@ test('DoD 7: la red cae entre pulsar y responder, y lo apuntado no se pierde',
  */
 test('DoD 8 y 9: desde la cáscara se apunta, y dice de qué grupo es', async ({ browser }) => {
   const a = await entrar(browser, 'cascara1')
-  await grupoCon(a.page, 'Familia Alba')
+  await grupoCon(a.page, 'Familiaalbaconunnombredeunsolotokensinespaciosningunos')
   await apuntar(a.page, 'membrillo')
   await expect(a.page.getByTestId('item')).toHaveCount(1)
   await shellGuardado(a.page)
@@ -767,7 +767,34 @@ test('DoD 8 y 9: desde la cáscara se apunta, y dice de qué grupo es', async ({
   await a.page.reload().catch(() => { /* sin red, el documento lo sirve el shell */ })
   await expect(a.page.getByTestId('sin-red')).toBeVisible({ timeout: 20_000 })
   await expect(a.page.getByTestId('nombre-grupo'),
-    'la cáscara enseña la lista sin decir de qué grupo es').toHaveText('Familia Alba')
+    'la cáscara enseña la lista sin decir de qué grupo es').toHaveText('Familiaalbaconunnombredeunsolotokensinespaciosningunos')
+
+  /**
+   * Spec H / i3-3 — **`[REGRESIÓN]`: nace verde, y el motivo importa más que la fila.**
+   *
+   * Buscando el tercer sitio donde se pinta el nombre del grupo llegué aquí, vi `truncate` sin
+   * `min-w-0` dentro de un flex —la misma forma que falló en la portada y en el panel de borrado— y
+   * **di por hecho que desbordaba**. Medido por el camino real, con el nombre de un solo token que
+   * esta fila usa ahora: `scrollWidth` **390**. No desborda, y nunca desbordó.
+   *
+   * La razón es la que me faltaba: `truncate` incluye `overflow: hidden`, y el mínimo automático de
+   * un ítem flex se resuelve a cero cuando `overflow` no es `visible`. O sea que `min-w-0` es
+   * redundante donde ya hay `truncate`. Lo que rompía las otras dos pantallas no era eso: era que el
+   * `main` se dimensionaba por contenido y no había ancho contra el que recortar — la causa que
+   * cerró la iteración 2 poniéndole `w-full`.
+   *
+   * La fila se queda porque el nombre de un solo token es la entrada que discrimina y esta pantalla
+   * también lo pinta: se pondría roja si alguien le quitara el `truncate` o el `w-full` al `main`.
+   * Pero se declara verde de nacimiento, que es lo que es.
+   *
+   * *(Encima de este bloque vivía el bloque falso que decía que la pantalla desbordaba, apilado sin
+   * borrar sobre su propia corrección. Lo cazó la revisión: corregir la spec y dejar el árbol
+   * diciendo lo contrario es la misma afirmación falsa con dos sitios donde leerla.)*
+   */
+  await a.page.setViewportSize({ width: 390, height: 844 })
+  expect(await a.page.evaluate(() =>
+    document.documentElement.scrollWidth <= document.documentElement.clientWidth),
+    'la cáscara desborda a 390 px con un nombre sin espacios').toBe(true)
 
   // Y se puede apuntar, que es el escenario que motivó la PWA.
   await a.page.getByTestId('item-name').fill('aceitunas')
@@ -1481,3 +1508,142 @@ test('DoD F5: con la escritura rechazada y el producto tachado entre pasadas, la
     'el reenvío insertó una segunda fila').toHaveLength(1)
   await a.ctx.close()
 })
+
+/**
+ * Spec G2 / g7 — **El camino completo, con servidor de verdad.**
+ *
+ * Un gesto cuyo resultado queda **desconocido**: el insert llega al servidor y su respuesta no
+ * vuelve al cliente, y el disco tampoco acepta encolarlo. Ése es el único caso en que el servidor
+ * puede tener la fila bajo esa clave — y por tanto el único que la recuerda.
+ *
+ * Después alguien tacha el producto. Al reintentar, la clave heredada choca contra
+ * `items_origen_unico`; el cliente **pregunta** con la relectura, ve que el producto no está vivo,
+ * acuña clave nueva y entra. Una sola fila viva al final.
+ */
+test('DoD g7: resultado desconocido, producto tachado, y al reintentar entra una sola fila', async ({ browser }) => {
+  const a = await entrar(browser, 'specG7')
+  const gid = await grupoCon(a.page, 'ReintentoG7')
+
+  // El disco no acepta escribir en `cola`: sin eso el gesto se encolaría y su resultado dejaría de
+  // ser desconocido. Es la misma sonda que F5/F8, por la causa real y sin nombrar el borrado.
+  await a.ctx.addInitScript(() => {
+    const abrir = indexedDB.open.bind(indexedDB)
+    Object.defineProperty(indexedDB, 'open', {
+      value: (nombre: string, version?: number) => {
+        const req = abrir(nombre, version)
+        req.addEventListener('success', () => {
+          const db = req.result
+          const tx = db.transaction.bind(db)
+          Object.defineProperty(db, 'transaction', {
+            value: (nombres: string | string[], modo?: IDBTransactionMode) => {
+              const t = tx(nombres as string, modo)
+              const toca = ([] as string[]).concat(nombres as string[]).includes('cola')
+              if (toca && modo === 'readwrite') queueMicrotask(() => { try { t.abort() } catch { /* ya terminó */ } })
+              return t
+            },
+          })
+        })
+        return req
+      },
+    })
+  })
+  await a.page.reload()
+  // i1-R6 — La puerta de hidratación que sus vecinas sí tienen: sin ella, el rojo de esta fila no
+  // distingue «el mecanismo falló» de «la página no estaba lista».
+  // **Y lo que la motivó era un diagnóstico equivocado, que queda dicho aquí en vez de borrado:** se
+  // añadió creyendo que explicaba un rojo intermitente, y el rojo no era intermitente ni de
+  // hidratación — la aserción del final afirmaba lo contrario de lo correcto. La puerta se conserva
+  // porque es una precondición legítima; lo que no se conserva es la cifra que la justificaba.
+  await expect(a.page.getByTestId('channel-live')).toHaveCount(1)
+
+  // El insert llega al servidor; la respuesta no vuelve. Resultado desconocido.
+  // La señal de que el escenario está montado es **la base**, no un contador de peticiones
+  // interceptadas: contar antes del `fetch` no dice que el servidor lo tenga —lo midió una carrera
+  // que me monté yo al mover el contador—, y contar después no distingue un `fetch` que falla.
+  await a.page.route(/\/rest\/v1\/items/, async r => {
+    if (r.request().method() !== 'POST') return r.continue()
+    await r.fetch(); return r.abort('connectionfailed')
+  })
+  await apuntar(a.page, 'romero')
+  await expect.poll(async () =>
+    (await admin.from('items').select('id').eq('group_id', gid)).data?.length ?? 0,
+    { message: 'el servidor no guardó el ítem: el escenario no es el que se quiere' }).toBe(1)
+
+  const creado = (await admin.from('items').select('id,origen_id').eq('group_id', gid)).data!
+  const primera = creado[0].origen_id!
+  expect(primera, 'el envío no llevó clave de origen').toBeTruthy()
+
+  /**
+   * Iteración 3 · i3-R4 — **la precondición se espera, no se supone.** Arriba se confirmó que el
+   * *servidor* guardó la fila; esto confirma que el **cliente** la tiene, que es otra cosa: el
+   * INSERT viaja por realtime y llega cuando llega. Sin esta espera, la mitad de las veces se
+   * tachaba la fila antes de que el cliente la conociera, la caché nunca la tenía, y el escenario
+   * que esta fila dice montar no se montaba.
+   *
+   * Lo que cuesta no esperarla, medido con el cambio real que g7 tiene que cazar (leer la caché
+   * antes de releer): **1 de 6 corridas roja** sin la línea, **3 de 3 roja** con ella, y 3 de 3
+   * verde con el código bueno. Una fila que caza 1 de 6 no es una guarda, es una moneda al aire
+   * (§E.4c).
+   */
+  await expect(a.page.getByTestId('item'),
+    'el cliente no llegó a conocer la fila: sin eso el escenario no existe').toHaveCount(1)
+
+  // Alguien lo tacha. A partir de aquí el índice de nombre ya no puede cazar nada.
+  await admin.from('items').update({ deleted_at: new Date().toISOString() }).eq('id', creado[0].id)
+
+  // Segundo gesto, con red: la clave heredada choca, la relectura dice que no está vivo, entra otra.
+  await a.page.unroute(/\/rest\/v1\/items/)
+  await apuntar(a.page, 'romero')
+
+  await expect.poll(async () =>
+    (await admin.from('items').select('id').eq('group_id', gid).is('deleted_at', null)).data?.length ?? 0,
+    { message: 'el reintento no metió el producto: el alta queda en callejón', timeout: 15_000 }).toBe(1)
+
+  const todas = (await admin.from('items').select('id,origen_id').eq('group_id', gid)).data!
+  expect(todas, 'acabaron más de dos filas: el reintento no fue uno').toHaveLength(2)
+  const claves = todas.map(x => x.origen_id)
+  expect(new Set(claves).size, 'el reintento repitió la clave que acababa de chocar').toBe(2)
+  expect(claves, 'la clave del primer intento no se conservó').toContain(primera)
+  /**
+   * Por **identidad**, no por texto: el proyecto tiene una guarda que prohíbe `getByText` en los
+   * e2e (`unit/locators.test.ts` › «K9»), y me la comí al escribir esto — un localizador por texto
+   * se rompe al reescribir una frase y lo que devuelve es indistinguible de un defecto.
+   *
+   */
+  /**
+   * **No queda aviso, y esta aserción cambió de dirección dos veces porque el código debajo estaba
+   * mal.** Antes de la iteración 1 quedaba un `EN_COLA` huérfano: la extracción del ayudante había
+   * dejado la cola original en su sitio, así que se anunciaba dos veces y el segundo anuncio caía
+   * **después** del `limpiarAviso` del gesto siguiente. Con la cola duplicada fuera, el segundo
+   * gesto limpia y su reintento entra sin nada que decir — que es la conducta correcta.
+   *
+   * Se afirma la **ausencia del aviso**, no que su texto no diga algo: con el elemento ausente,
+   * `not.toContainText` falla por «element not found» en vez de pasar, y eso es lo que dio la falsa
+   * pista que me hizo girar la aserción.
+   */
+  await expect(a.page.getByTestId('notice'),
+    'dejó un aviso: con el reintento entrando no hay nada que decir').toHaveCount(0)
+  await a.ctx.close()
+})
+
+/**
+ * Spec G2 · **i1-6 dejó de estar sin cobertura, y lo que faltaba era una línea de espera.**
+ *
+ * La novedad de G2 —con clave heredada se relee **siempre** en vez de creerle a la caché local— sólo
+ * se distingue cuando la caché afirma «está vivo» sobre algo que el servidor ya tachó. La iteración
+ * 1 lo declaró UNCOVERED tras tres intentos, y el tercer motivo que escribió era **falso**: decía
+ * que «la fila nunca aparece en la lista del cliente». Aparece. La espera de `toHaveCount(1)` que
+ * g7 lleva ahora lo demuestra por construcción — si no apareciera, g7 no pasaría.
+ *
+ * Lo que de verdad pasaba es lo que el primer motivo describe bien: g7 **tachaba la fila antes de
+ * que el cliente la conociera**, así que la caché quedaba vacía, las dos versiones releían y no
+ * discriminaba. No era que el escenario no se pudiera montar; era que g7 no lo esperaba.
+ *
+ * Medido con el cambio real —leer la caché antes de releer, con `pnpm build` de por medio para que
+ * el navegador sirva el bundle mutado y no el anterior—: **3 de 3 rojas** con la espera, **1 de 6**
+ * sin ella, y 3 de 3 verdes con el código bueno. Así que la cobertura de navegador que i1-6 pedía
+ * es `g7`, y la declaración de no-cobertura se retira.
+ *
+ * Complemento en la capa de módulo, que mira la otra mitad —lo que la caché rancia le hace al
+ * encolado—: `unit/drenado.test.tsx` › «i3-1» y › «i3-2».
+ */

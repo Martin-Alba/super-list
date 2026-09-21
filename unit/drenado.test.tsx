@@ -1858,6 +1858,11 @@ describe('Spec F / iteración 2 · la clave sobrevive al gesto, y no más de lo 
     addItem.mockReset()
     addItem.mockResolvedValueOnce({ data: null, clase: 'duplicado', code: '23505' })
     addItem.mockResolvedValueOnce({ data: fila('leche'), clase: null, code: null })
+    // Spec G2 — **La siembra que faltaba, declarada en la spec como cambio de forma sin cambio de
+    // propiedad.** Con el reintento condicionado a la lectura, este caso sólo es el que dice ser si
+    // el producto NO está vivo. Antes lo conseguía por el valor por defecto del `beforeEach`: verde
+    // por un motivo que no declaraba. Ahora lo dice.
+    activeItems.mockResolvedValue({ data: [], clase: null, code: null })
     await apuntarEn(r, 'leche')
 
     expect(addItem.mock.calls.length, 'no reintentó con clave nueva: el alta queda en callejón').toBe(2)
@@ -1953,5 +1958,292 @@ describe('Spec F / iteración 2 · dos altas del mismo producto en la ventana', 
     // La afirmación es sobre lo que **la base aceptó**, que es donde vive el invariante de la
     // Spec F. El pintado no se afirma aquí: este arnés no renderiza filas vivas, y una aserción
     // que no mide lo que dice es peor que ninguna.
+  })
+})
+
+/**
+ * Spec G2 — **`devolver` hace dos trabajos con calendarios distintos.**
+ *
+ * Devolver el texto al campo toca en **todo** fallo; recordar la clave sólo tiene sentido cuando
+ * el resultado es **desconocido**, porque sólo entonces el servidor puede tener la fila bajo ella.
+ * Fundidos, la clave se recuerda también tras `42501` y `23505`, donde el servidor **probó** que no
+ * la tiene — y el reintento dispara sobre una clave rechazada.
+ *
+ * Las seis filas de abajo son g1…g6. El corte que prueban es **por quién decide**: recordar se
+ * deriva de la clase del resultado en un solo sitio, no se elige en la rama.
+ */
+describe('Spec G2 · recordar la clave se deriva del resultado, no de la rama', () => {
+  const claves = () => addItem.mock.calls.map(c => (c[3] as { id: string }).id)
+  /** Un gesto cuyo resultado es DESCONOCIDO: el servidor no contestó y el disco no aceptó. */
+  const desconocido = () => {
+    addItem.mockResolvedValue({ data: null, clase: 'servidor', code: null })
+    encolar.mockResolvedValue('rechazado')
+  }
+
+  it('g1: tras un 42501, el gesto siguiente NO hereda clave', async () => {
+    addItem.mockResolvedValue({ data: null, clase: 'sin-acceso', code: '42501' })
+    const r = montar()
+    await apuntarEn(r, 'leche')
+    await apuntarEn(r, 'leche')
+    expect(claves().length, 'no hubo dos envíos: el caso no mide nada').toBe(2)
+    expect(claves()[1], 'heredó una clave que el servidor RECHAZÓ: no puede tener la fila bajo ella')
+      .not.toBe(claves()[0])
+  })
+
+  it('g2: tras un resultado desconocido, sí la hereda', async () => {
+    desconocido()
+    const r = montar()
+    await apuntarEn(r, 'leche')
+    await apuntarEn(r, 'leche')
+    // i1-4 — La cuenta que le faltaba: sin ella, un gesto heredado que **no manda nada** satisface
+    // `size === 1` y la fila pasa. Medido por la revisión con ese mutante exacto.
+    expect(claves().length, 'no hubo dos envíos: el caso no mide nada').toBe(2)
+    expect(new Set(claves()).size, 'dejó de heredar donde el servidor sí puede tener la fila').toBe(1)
+  })
+
+  it('g3: con el producto VIVO, el 23505 heredado no reintenta: relee y lo dice', async () => {
+    desconocido()
+    const r = montar()
+    await apuntarEn(r, 'leche')
+
+    addItem.mockReset(); activeItems.mockClear()
+    addItem.mockResolvedValue({ data: null, clase: 'duplicado', code: '23505' })
+    activeItems.mockResolvedValue({ data: [fila('leche')], clase: null, code: null })
+    await apuntarEn(r, 'leche')
+
+    expect(addItem.mock.calls.length, 'reintentó sobre un producto que SÍ está en la lista').toBe(1)
+    expect(activeItems, 'no releyó: entonces adivinó en vez de preguntar').toHaveBeenCalled()
+    expect(r.queryByTestId('notice')?.textContent ?? '',
+      'no dijo lo que de verdad pasa: el producto está en la lista').toMatch(/ya está en la lista/i)
+    /**
+     * Iteración 3 · i3-R3 — **el foco se afirma, y la declaración de no-cobertura de la iteración 2
+     * era falsa.** Aquella decía que este arnés «no renderiza filas vivas» y que por eso el efecto
+     * del foco no tenía nodo al que ir. Lo comprobé mal: la relectura entra por `setItems`, la fila
+     * se pinta, y `document.activeElement` cae en su campo de cantidad.
+     *
+     * Vale la pena dejar dicho por qué esto es peor que no haber afirmado nada: **una declaración de
+     * no-cobertura falsa cierra la pregunta.** Un hueco sin declarar lo encuentra el siguiente que
+     * mire; un hueco declarado con motivo medido —y el motivo era medido, sólo que de una medición
+     * equivocada— no lo vuelve a mirar nadie.
+     *
+     * Rojo sin el mecanismo: anulando `pendienteFoco.current = ya.id` (`GroupView.tsx`), el foco se
+     * queda en el campo del nombre y esta aserción falla.
+     */
+    expect(document.activeElement?.getAttribute('data-cantidad-de'),
+      'no enfocó la cantidad de la fila viva: g3 promete «avisa Y enfoca»').toBe('id-leche')
+  })
+
+  it('g4: con el producto TACHADO, sí reintenta con clave nueva y entra', async () => {
+    desconocido()
+    const r = montar()
+    await apuntarEn(r, 'leche')
+    const heredada = claves()[0]
+
+    addItem.mockReset()
+    addItem.mockResolvedValueOnce({ data: null, clase: 'duplicado', code: '23505' })
+    addItem.mockResolvedValueOnce({ data: fila('leche'), clase: null, code: null })
+    activeItems.mockResolvedValue({ data: [], clase: null, code: null })
+    await apuntarEn(r, 'leche')
+
+    expect(addItem.mock.calls.length, 'no reintentó: el alta queda en callejón').toBe(2)
+    const [k1, k2] = addItem.mock.calls.map(c => (c[3] as { id: string }).id)
+    expect(k1, 'el primer envío del gesto no heredó').toBe(heredada)
+    expect(k2, 'el reintento repitió la clave que acababa de chocar').not.toBe(heredada)
+  })
+
+  /**
+   * i1-R5 — **Rotulada por lo que mide.** La fila de la DoD decía «tres claves, no cuatro», y
+   * medido son tres antes y tres después: ese número no puede estar rojo antes. Lo que este caso
+   * afirma —y sí cambia— es la **identidad** de la clave que el tercer gesto hereda: la original,
+   * no la del reintento.
+   */
+  it('g5: el reintento no se re-arma — el tercer gesto hereda la original, no la del reintento', async () => {
+    desconocido()
+    const r = montar()
+    await apuntarEn(r, 'leche')
+    const heredada = claves()[0]
+
+    // El reintento entra y falla con un rechazo del servidor: NO puede quedar su clave recordada.
+    addItem.mockReset()
+    addItem.mockResolvedValueOnce({ data: null, clase: 'duplicado', code: '23505' })
+    addItem.mockResolvedValueOnce({ data: null, clase: 'sin-acceso', code: '42501' })
+    activeItems.mockResolvedValue({ data: [], clase: null, code: null })
+    await apuntarEn(r, 'leche')
+
+    // Tercer gesto: tiene que heredar la ORIGINAL, la única cuyo resultado sigue desconocido.
+    addItem.mockReset()
+    addItem.mockResolvedValue({ data: null, clase: 'duplicado', code: '23505' })
+    await apuntarEn(r, 'leche')
+    expect((addItem.mock.calls[0][3] as { id: string }).id,
+      'heredó la clave del reintento: el reintento se re-armó y acuña una clave por gesto')
+      .toBe(heredada)
+  })
+
+  /**
+   * Iteración 1 de G2 · i1-1 y i1-2 — **La puerta que la propia spec escribió y el código
+   * contradecía.** §A.3: «si la relectura falla, no se reintenta… No se acuña clave nueva sin
+   * saber». Con `relectura.clase` puesto, `ya` se queda `undefined` y el reintento disparaba: el
+   * mecanismo construido para dejar de adivinar, adivinando en el único caso en que no puede saber.
+   */
+  it('i1-1: con la relectura caída, no reintenta ni acuña', async () => {
+    desconocido()
+    const r = montar()
+    await apuntarEn(r, 'leche')
+
+    addItem.mockReset()
+    addItem.mockResolvedValue({ data: null, clase: 'duplicado', code: '23505' })
+    activeItems.mockResolvedValue({ data: [], clase: 'servidor', code: null })
+    await apuntarEn(r, 'leche')
+
+    expect(addItem.mock.calls.length,
+      'acuñó clave nueva sin saber si el producto está vivo: fallar abierto').toBe(1)
+  })
+
+  /**
+   * Iteración 3 · i3-R8 — **rotulada por lo que mide.** El nombre decía «y el producto vivo», y este
+   * montaje no puede representarlo: `activeItems` devuelve `clase: 'servidor'`, o sea que la lectura
+   * **falló**, y con la lectura caída no hay forma de saber si el producto está vivo. Ése era el
+   * mismo defecto de rótulo que esta vuelta corrigió en g3, en una fila que escribió esta vuelta.
+   *
+   * No se funde con i1-1 aunque el montaje sea el mismo: i1-1 afirma que **no se reintenta ni se
+   * acuña**, ésta afirma **qué se le dice al usuario**. Dos propiedades del mismo escenario, y cada
+   * una se puede romper sin la otra.
+   */
+  it('i1-2: con la relectura caída, el aviso es el del duplicado y no se escribe a ciegas', async () => {
+    desconocido()
+    const r = montar()
+    await apuntarEn(r, 'leche')
+
+    addItem.mockReset()
+    addItem.mockResolvedValue({ data: null, clase: 'duplicado', code: '23505' })
+    activeItems.mockResolvedValue({ data: [], clase: 'servidor', code: null })
+    await apuntarEn(r, 'leche')
+
+    expect(r.queryByTestId('notice')?.textContent ?? '',
+      'no dijo nada sobre un 23505 que no pudo explicar').toMatch(/ya está en la lista/i)
+  })
+
+  /**
+   * i1-3 — `'desconocido'` deja de conflarse: con `'ya-estaba'` el almacén **sí** contestó, así que
+   * el servidor no puede tener la fila bajo esa clave y no hay nada que recordar.
+   */
+  it('i1-3: un `ya-estaba` del almacén no deja clave recordada', async () => {
+    addItem.mockResolvedValue({ data: null, clase: 'servidor', code: null })
+    encolar.mockResolvedValue('ya-estaba')
+    const r = montar()
+    await apuntarEn(r, 'leche')
+    const primera = claves()[0]
+    await apuntarEn(r, 'leche')
+    expect(claves()[1], 'heredó una clave que el almacén rechazó por duplicado').not.toBe(primera)
+  })
+
+  it('g6: el resultado desconocido del reintento encola y anuncia EN_COLA', async () => {
+    desconocido()
+    const r = montar()
+    await apuntarEn(r, 'leche')
+
+    addItem.mockReset(); encolar.mockClear()
+    addItem.mockResolvedValueOnce({ data: null, clase: 'duplicado', code: '23505' })
+    addItem.mockResolvedValueOnce({ data: null, clase: 'servidor', code: null })
+    activeItems.mockResolvedValue({ data: [], clase: null, code: null })
+    encolar.mockResolvedValue('entro')
+    await apuntarEn(r, 'leche')
+
+    expect(encolar, 'el reintento perdió el producto: no lo encoló').toHaveBeenCalled()
+    expect(r.queryByTestId('notice')?.textContent ?? '',
+      'no anunció dónde quedó el producto').toMatch(/se envía solo/i)
+  })
+
+  /**
+   * Iteración 3 de G2 · i3-R1 — **la caché que desmiente a la relectura.** g6 no caza esto porque
+   * su caché está vacía: `visibles` e `items` valen lo mismo y la sustitución no se nota. El defecto
+   * necesita que la caché **tenga** el producto en el momento de encolar y que la relectura acabe de
+   * decir que no está.
+   *
+   * La carga diferida es lo que representa eso, y no es un artificio: en el navegador la caché
+   * aprende la fila por el canal *después* del gesto —el intento anterior sí aterrizó—, y cuando
+   * alguien la tacha con el canal cortado, la caché se la queda. `mergeItems` (`lib/items.ts`)
+   * **nunca quita** una fila ausente de la lectura fresca, así que la relectura vacía no la limpia.
+   * Aquí la fila entra por la carga del montaje resuelta tarde, que deja el mismo estado con lo que
+   * este arnés sí puede controlar.
+   */
+  const conCacheRancia = async () => {
+    const r = montar()
+    await apuntarEn(r, 'leche')
+
+    /**
+     * La caché se ensucia como se ensucia de verdad: **con una lectura legítima.** Un gesto sobre
+     * otro producto no encuentra su nombre en la caché, relee, y `mergeItems` mete en ella todo lo
+     * que la lectura trajo — incluido `leche`. Después alguien tacha `leche` y nadie limpia la
+     * caché, porque `mergeItems` **nunca quita** una fila ausente de la lectura fresca.
+     *
+     * Dos intentos anteriores de montar esto fallaron por el montaje y no por el producto, y vale
+     * decir cuáles: sembrar la caché desde el montaje hace que el primer gesto salga «duplicado» y
+     * no deje clave —`decidirEncolar` corre antes de `'sin-almacen'`—; y diferir la carga del
+     * montaje impide que el primer gesto ocurra siquiera. Esta vía no toca el primer gesto.
+     */
+    addItem.mockResolvedValueOnce({ data: null, clase: 'duplicado', code: '23505' })
+    activeItems.mockResolvedValueOnce({ data: [fila('leche')], clase: null, code: null })
+    await apuntarEn(r, 'pan')
+    return r
+  }
+
+  it('i3-1: con la caché conservando el producto tachado, el reintento desconocido SÍ encola', async () => {
+    desconocido()
+    const r = await conCacheRancia()
+
+    addItem.mockReset(); encolar.mockClear()
+    addItem.mockResolvedValueOnce({ data: null, clase: 'duplicado', code: '23505' })
+    addItem.mockResolvedValueOnce({ data: null, clase: 'servidor', code: null })
+    activeItems.mockResolvedValue({ data: [], clase: null, code: null })
+    encolar.mockResolvedValue('entro')
+    await apuntarEn(r, 'leche')
+
+    expect(encolar,
+      'perdió el producto: encoló contra la caché que la relectura acababa de desmentir')
+      .toHaveBeenCalled()
+  })
+
+  it('i3-2: y no dice «ya está en la lista» sobre algo que la relectura no encontró', async () => {
+    desconocido()
+    const r = await conCacheRancia()
+
+    addItem.mockReset(); encolar.mockClear()
+    addItem.mockResolvedValueOnce({ data: null, clase: 'duplicado', code: '23505' })
+    addItem.mockResolvedValueOnce({ data: null, clase: 'servidor', code: null })
+    activeItems.mockResolvedValue({ data: [], clase: null, code: null })
+    encolar.mockResolvedValue('entro')
+    await apuntarEn(r, 'leche')
+
+    expect(r.queryByTestId('notice')?.textContent ?? '',
+      'dijo «ya está en la lista» contradiciendo a su propia relectura')
+      .not.toMatch(/ya está en la lista/i)
+  })
+
+  /**
+   * Iteración 3 de G2 · i3-R2 — **«no pude leer» no cierra un resultado desconocido.** i1-1 cubre
+   * la otra mitad de esta rama —que no se reintenta— y se conserva. Ésta mira lo que i1-1 no mira:
+   * qué pasa con la clave heredada. Antes caía en «duplicado de verdad» y se olvidaba, con lo que
+   * el gesto siguiente acuñaba una nueva y el intento original quedaba sin forma de reintentarse.
+   */
+  it('i3-3: con la relectura caída y clave heredada, el gesto siguiente HEREDA la clave', async () => {
+    desconocido()
+    const r = montar()
+    await apuntarEn(r, 'leche')
+    const primera = addItem.mock.calls.map(c => (c[3] as { id: string }).id)[0]
+
+    addItem.mockReset()
+    addItem.mockResolvedValue({ data: null, clase: 'duplicado', code: '23505' })
+    activeItems.mockResolvedValue({ data: [], clase: RELECTURA, code: null })
+    await apuntarEn(r, 'leche')
+
+    addItem.mockClear()
+    activeItems.mockResolvedValue({ data: [], clase: null, code: null })
+    addItem.mockResolvedValue({ data: null, clase: 'servidor', code: null })
+    await apuntarEn(r, 'leche')
+
+    expect(addItem.mock.calls.map(c => (c[3] as { id: string }).id)[0],
+      'olvidó la clave sin haber podido mirar: el intento original ya no se puede reintentar')
+      .toBe(primera)
   })
 })
