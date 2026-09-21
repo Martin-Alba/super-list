@@ -140,3 +140,51 @@ describe('J11 las migraciones se pueden reaplicar', () => {
     expect(src).toContain("'active'")
   })
 })
+
+/**
+ * Spec I — **Las migraciones se aplican sobre una base VACÍA, que es lo que J11 no puede comprobar.**
+ *
+ * J11 las reaplica sobre la base que ya existe, así que una **referencia hacia adelante** —un `grant`
+ * sobre una función que el mismo fichero crea más abajo— encuentra la función ya creada de una
+ * aplicación anterior y nunca falla. Es estructural: ese test no puede ver esta clase de defecto.
+ *
+ * Y no es hipotético. `20260920000100_transferir_borrar.sql` llevaba exactamente eso y **reventó el
+ * primer `db push` contra el proyecto hospedado**, donde la base estaba vacía:
+ * `ERROR: function public.delete_group(uuid) does not exist (SQLSTATE 42883)`. En local llevaba días
+ * en verde, porque su primera versión definía la función arriba y al quitar el duplicado los `grant`
+ * se quedaron donde estaban — con la función ya creada en la base de nadie más que de aquí.
+ *
+ * La base de trabajo **no se toca**: se crea una aparte y se destruye al salir. El arranque es un
+ * sustituto de la infraestructura de Supabase y vale para lo que esta fila mira —el orden y las
+ * dependencias entre sentencias—, no para el comportamiento de RLS contra el auth real.
+ */
+describe('Spec I · las migraciones aplican sobre una base vacía', () => {
+  it('las 15, en orden, desde cero', () => {
+    const base = `prueba_migraciones_${process.pid}`
+    const psql = (db: string, args: string[], input?: string) =>
+      execFileSync('docker', ['exec', '-i', 'supabase_db_super', 'psql', '-U', 'postgres',
+        '-v', 'ON_ERROR_STOP=1', '-q', '-d', db, ...args],
+        { input, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] })
+
+    psql('postgres', ['-c', `drop database if exists ${base}`])
+    psql('postgres', ['-c', `create database ${base}`])
+    try {
+      psql(base, ['-f', '-'], `
+        create schema if not exists auth;
+        create schema if not exists extensions;
+        create extension if not exists pgcrypto with schema extensions;
+        create table if not exists auth.users (id uuid primary key, email text);
+        create or replace function auth.uid() returns uuid language sql stable as
+          $$ select (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')::uuid $$;
+        create publication supabase_realtime;
+      `)
+      for (const f of readdirSync(DIR).filter(x => x.endsWith('.sql')).sort()) {
+        expect(() => psql(base, ['-f', '-'], readFileSync(join(DIR, f), 'utf8')),
+          `${f} no aplica sobre una base vacía: depende de estado que sólo existe aquí`).not.toThrow()
+      }
+    } finally {
+      // Se destruye pase lo que pase: una base huérfana por pasada es la cicatriz de esta spec.
+      psql('postgres', ['-c', `drop database if exists ${base}`])
+    }
+  }, 120_000)
+})
