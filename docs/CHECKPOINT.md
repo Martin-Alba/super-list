@@ -329,6 +329,154 @@ alcanzable por un usuario se arregló en la octava.
 
 ---
 
+# 2026-09-21 — La cantidad es un número, y el enlace se comparte (Spec J, base + 3 iteraciones)
+
+Noveno ciclo. Dos cambios de interfaz, el primero con consecuencias en la base, y **la primera
+migración que toca datos reales**. Cierra con el mismo defecto encontrado cuatro veces: *se arregla
+un camino y no su gemelo*.
+
+## Qué se construyó
+
+**La cantidad es un entero de 1 a 99, o nada, y lo hace cumplir la base** (§D.2). `check` sobre la
+columna de texto, sin cambio de tipo: compatible hacia atrás por construcción, sin reescritura de
+tabla, y la cota de longitud se conserva. La migración **normaliza antes de restringir**, y ese
+orden no es precaución: medido contra la base local —42.232 ítems, 2.762 cantidades sucias en
+dieciséis formas—, sin el `update` el `add constraint` es **rechazado**. El hospedado tiene cero
+filas así, o sea que una migración escrita sólo para allí habría pasado todas las comprobaciones y
+reventado aquí.
+
+**El enlace de invitación se manda, no se lee.** Fuera el campo de sólo lectura, que obligaba a
+seleccionar a mano en un móvil. En su lugar, uno de dos botones —compartir donde el sistema lo
+ofrece, copiar donde no, decidido en el cliente— y una salida de texto seleccionable que sólo
+aparece cuando las dos vías fallan.
+
+## Decisiones que conviene no volver a discutir
+
+- **Un decimal deja la cantidad vacía, no la trunca.** `1.5` no se convierte en `1` por el mismo
+  motivo que `299` no se convierte en `29`: un número fuera de forma no es un número dentro de
+  forma, y en una lista de la compra `1.5` son casi siempre 1,5 kilos. Lo corrigió el usuario sobre
+  una spec ya sellada, y la corrección destapó el mismo defecto **en el campo**, donde era peor:
+  `soloDigitos('1.5')` daba `'15'`, que además pasa el `check` y entraba en la base. Una cifra diez
+  veces la real.
+- **El campo deja teclear lo que la base rechaza, y quien avisa es el cliente.** `0` y `100` se
+  pueden escribir; lo que no se puede es mandarlos en silencio. Una sola comprobación
+  —`valeComoCantidad`— para los tres caminos, porque con red la contestaba la base y **sin red no
+  la contestaba nadie**: `100` se encolaba y al drenar desaparecía en nulo sin decir nada.
+- **`pattern` es validación nativa, no decoración.** Un `pattern` más estrecho que el filtro del
+  campo **bloquea el envío en silencio**: con `[0-9]*` y el filtro admitiendo `.`, pulsar «+» con
+  «1.5» dentro no hacía nada. Por eso sale de la misma declaración que el filtro (`TECLEABLE`), y la
+  guarda rechaza un `pattern` literal **aunque hoy coincida**. El peaje, escrito: en iOS anterior a
+  12.2 —sin `inputMode`— el teclado numérico deja de salir.
+- **Cancelar el menú de compartir no tiene ningún efecto observable.** Ni aviso, ni estado, ni
+  limpiar la pantalla. Se distingue por `err.name === 'AbortError'`, **nunca por el mensaje**: lo
+  redacta cada navegador y cambia entre versiones e idiomas.
+- **«Enlace copiado.» tiene origen propio.** Nació con `'mutacion'`, así que se pintaba rojo y se
+  anunciaba `role="alert"`: el único mensaje de éxito de la vista, anunciado como un fallo — la
+  cicatriz i1-R4 reproducida por código escrito tres iteraciones después de escribirla. El origen
+  `'enlace'` discrimina porque tiene un solo escritor, y pesa **0**: un acuse de éxito es lo menos
+  importante que se puede decir. El peso lo decidió una prueba — con 4 tapaba el fallo del intento
+  siguiente.
+- **F7 tiene techo, y está escrito junto a la guarda.** Tres vueltas sobre el mismo predicado
+  sintáctico: aflojar (6 agujeros medidos), apretar con `.some()` (5 más, que la versión original sí
+  cazaba), apretar del todo (7 más por el predicado vecino, que fallaba abierto). La conclusión no
+  es ajustarlo mejor: **una aproximación sintáctica a «¿es ésta la fila que se leyó?» siempre tendrá
+  agujeros.** Queda escrito que F7 es el cinturón y `unit/drenado.test.tsx` › j7 —que afirma el
+  comportamiento— los tirantes, con las **cinco formas legítimas que F7 prohíbe** y su testigo; y
+  que **si aparece un cuarto agujero, F7 se retira**.
+- **La cota de longitud de `quantity` quedó subsumida.** No existe ningún valor que
+  `items_quantity_len` rechace y `items_quantity_num` acepte, así que su mitad positiva ya no es
+  observable. Se conserva afirmando su **valor** en el catálogo (`<= 50)`, con el paréntesis: sin él
+  `<= 5000` pasa), porque el día que el check numérico se retire vuelve a ser lo único que para un
+  pegado de 200.000 caracteres.
+
+## El defecto de este ciclo, nombrado: el gemelo que nadie mira
+
+Cuatro apariciones, todas medidas en rojo por la revisión, ninguna encontrada por mí:
+
+| # | Un camino arreglado | Su gemelo, roto |
+|---|---|---|
+| 1 | la cola descarta `1.5` | el campo lo convertía en `15`, y entraba en la base |
+| 2 | copiar salía del callejón al acertar | compartir no: el enlace se quedaba pintado |
+| 3 | `spreadInocuo` fallaba cerrado | `poneLaClave`, su vecino, fallaba abierto |
+| 4 | el campo pintaba `normalizar(quantity)` | `confirmar` comparaba con el crudo: teclear y deshacer escribía |
+
+El arreglo de fondo no fue parchear el cuarto: fue **fusionar las dos vías del enlace en un
+manejador**. Donde hay un solo sitio no hay gemelo que olvidar, y una sola mutación pone rojas las
+dos filas.
+
+## Dos instrumentos que decían más de lo que medían
+
+- **La pasada de mutación comprobaba sus anclas con `grep -qF`**, que es por líneas: un ancla
+  ambigua o multilínea a medias pasaba por buena. Con una cuenta exacta destapó **cuatro anclas
+  muertas** que un refactor propio había dejado — cuatro mutaciones corriendo sobre código
+  inexistente y contándose como cazadas.
+- **Y su rama «VIVA» estaba rota y nunca se había ejecutado.** Cero vivas en veinte corridas
+  significa exactamente que el camino que informa del único resultado que importa no lo había
+  recorrido nadie. Se destapó al aparecer la primera superviviente. Además: `vitest -t` con un
+  filtro que no casa **sale 0**, así que un filtro muerto se leía como «pasó con el mecanismo roto»
+  — el veredicto correcto por el motivo equivocado.
+- **Y mutó un fichero que no respaldaba.** `lib/aviso.ts` no estaba en su lista, así que la
+  mutación sobrevivió a `restaurar` y **se quedó en el producto**; el veredicto salió «cazada» y el
+  árbol quedó roto. Ahora la pasada aborta si se le pide mutar algo que no respalda.
+
+## Los dos números, medidos en líneas
+
+Producto = `app/ lib/ supabase/` · sostén = `unit/ e2e/ docs/`.
+
+| | Producto | Sostén | Proporción |
+|---|---|---|---|
+| Spec J entera (base + 3 iteraciones) | **487** | **1.942** | 1 : 4,0 |
+
+Por vueltas: la base y las iteraciones 1 y 2 fueron lideradas por producto o equilibradas; **la
+iteración 3 fue la primera con el sostén por delante** (6 vueltas de instrumento contra 3 de
+producto), y la 4 fue de cierre. Se dijo al usuario al ocurrir, no al final.
+
+## Verificación del cierre (2026-09-21)
+
+**Entorno**, registrado antes de cada corrida: 11 contenedores `supabase_*_super` arriba, **0
+pausados**. Faltan `edge_runtime`, `imgproxy` y `pooler`, que este proyecto no usa. Ninguna caída
+deliberada en este ciclo.
+
+**Terminal**, leído por **código de salida** y no por el texto:
+
+| | Antes | Después |
+|---|---|---|
+| Ficheros de prueba unitaria | 71 | **73** |
+| Casos unitarios | 1.781 | **1.905** |
+| Ficheros de prueba de navegador | 18 | **19** |
+| Casos de navegador | 106 | **111** |
+| `typecheck` · `lint` · `test` · `build` | 0 · 0 · 0 · 0 | **0 · 0 · 0 · 0** |
+| Pasada de mutación declarada | — | **24 cazadas, 0 vivas, 0 no-aplica**, exit 0 |
+
+`pnpm build` corrió siempre sobre un `.next` borrado antes.
+
+**En marcha**, contra `next start` sobre el `.next` recién construido, a 390 px:
+
+- Tecleando «2 briks» el campo queda `2`, y el ítem entra en la base con `quantity='2'`.
+- `1.5` deja `1.5` y al pulsar «+» sale «La cantidad tiene que ser un número del 1 al 99, o quedarse
+  vacía.» **sin crear fila**. `100` igual. Comprobado en la base: tres pulsaciones, una sola fila.
+- Donde estaba el campo de sólo lectura se pinta «Compartir el enlace» (este Chrome sí tiene
+  `navigator.share`), el campo viejo no existe, y la página no desborda.
+- El aplicado de la migración sobre la base local: `UPDATE 2762`, restricción puesta, **0 filas
+  violan** sobre 42.232.
+
+**Lo que NO se verificó, por qué, y qué se hizo en su lugar:**
+
+- **El teclado numérico en un móvil.** Un navegador de escritorio no enseña teclado. Es la única
+  fila del conjunto que depende de un ojo, está declarada como tal desde el sellado, y **queda
+  pendiente de que el usuario la compruebe en su móvil**. Lo que sí se afirma: las tres entradas
+  declaran `inputMode="numeric"` y `pattern={TECLEABLE}`, ninguna usa `type="number"`, y un barrido
+  del árbol exige lo mismo a cualquier `<input>` que no esté declarado como campo de texto.
+- **El camino de éxito de copiar, a mano.** El portapapeles se deniega sin permiso, y concederlo es
+  tocar un ajuste del navegador. Se cierra en `e2e/invitar.spec.ts`, que lo concede con
+  `grantPermissions`, recorre el copiado de verdad, lee el portapapeles y afirma que el acuse es
+  `role="status"` y no rojo. **Demostrado rojo revirtiendo el origen y reconstruyendo el bundle** —
+  sin reconstruir, la prueba seguía verde sobre el bundle viejo, que es la cicatriz de siempre.
+- **El menú del sistema de compartir, a mano.** Abre una hoja modal que deja la extensión sin
+  respuesta. Se cubre en jsdom (`unit/invitar.test.tsx`, seis filas) y, para la medida del área
+  táctil mínima, sembrando `navigator.share` en la prueba de navegador del móvil — que de otro
+  modo nunca pinta ese mando y por tanto no lo medía.
+
 # 2026-09-18 — Lo pendiente sale solo, y la pantalla no dice lo contrario (Spec B, base + 5 iteraciones)
 
 Sexto ciclo. Sale de la pasada manual de la deuda 52 y se selló **acotando el borrador al
@@ -746,8 +894,8 @@ vez (2026-09-07) el documento decía 221 tests en 36 ficheros cuando eran 245 en
 37, y la guarda que debía impedirlo daba verde sobre un documento con cifras
 inventadas.
 
-- Ficheros de prueba unitaria: 71
-- Ficheros de prueba de navegador: 18
+- Ficheros de prueba unitaria: 73
+- Ficheros de prueba de navegador: 19
 
 
 ---

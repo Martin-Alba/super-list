@@ -1410,10 +1410,116 @@ describe('Spec F / R6 · el envío del drenado manda la fila que leyó', () => {
     }
     verDecls(sf)
 
-    /** Se fabrica si es un literal de objeto, o si lo es lo que hay detrás del nombre. */
+    /**
+     * Spec J / J-R4 — **Un literal de objeto ya no es fabricación por sí solo, y la regla
+     * pasa a decir lo que de verdad protege: la IDENTIDAD de la fila.**
+     *
+     * Lo que R6/F7 impide es que el `origen_id` que llega a la base sea distinto en cada
+     * intento: sin clave estable la base no tiene repetición que ver y el reenvío crea fila
+     * nueva. Un literal que **esparce** la fila leída y no toca su `id` conserva esa clave,
+     * y J-R4 necesita exactamente esa forma —`{ ...p, cantidad: normalizar(p.cantidad) }`—
+     * para normalizar la cantidad al drenar sin construir una fila nueva.
+     *
+     * Sigue siendo fabricación, y las tres formas están probadas abajo: no esparcir nada,
+     * asignar `id`, o inventar con `randomUUID`/`Date.now()` dentro del literal. La segunda
+     * es la puerta que este cambio abre, y sin su sonda el aflojamiento no se distingue de
+     * haber apagado la guarda.
+     */
+    /**
+     * i1-R5 — **Cómo se llama una propiedad, con las cuatro ortografías.** La versión
+     * anterior sólo miraba `ts.isIdentifier`, así que `{ ...p, 'id': x }` y
+     * `{ ...p, ["id"]: x }` ponían la clave nueva y pasaban por legítimas. Un nombre
+     * calculado que no es literal no se puede saber, y lo que no se puede saber cuenta
+     * como que sí: la guarda falla cerrada.
+     */
+    const nombreDeProp = (pr: ts.ObjectLiteralElementLike): string | null => {
+      const nom = (pr as { name?: ts.PropertyName }).name
+      if (!nom) return null
+      if (ts.isIdentifier(nom) || ts.isStringLiteral(nom) || ts.isNumericLiteral(nom)) return nom.text
+      if (ts.isComputedPropertyName(nom))
+        return ts.isStringLiteral(nom.expression) ? nom.expression.text : 'id'
+      return 'id'
+    }
+
+    /**
+     * ¿Este literal pone `id`, directamente o por un spread anidado?
+     *
+     * i3-R1 — **Falla cerrada, como su vecina `spreadInocuo`.** La versión anterior sólo
+     * recursaba en spreads anidados que fueran literales y devolvía `false` para todo lo
+     * demás: era el mismo defecto que la iteración 2 arregló al lado, vivo aquí. Medido:
+     * envolver cualquiera de las cinco formas de k1 en unas llaves —`{ ...p, ...{ ...q } }`—
+     * las devolvía a la vida, **siete en total, con cuatro caracteres**.
+     *
+     * Toma `esLaFilaLeida` para no acusar al spread legítimo: la fila leída no pone clave
+     * nueva, pone la suya.
+     */
+    const poneLaClave = (x: ts.ObjectLiteralExpression): boolean =>
+      x.properties.some(pr => {
+        if (ts.isSpreadAssignment(pr)) {
+          if (esLaFilaLeida(pr)) return false
+          const dentro = desnudo(pr.expression)
+          if (ts.isObjectLiteralExpression(dentro)) return poneLaClave(dentro)
+          // Ni la fila leída ni un literal que se pueda mirar: no se puede demostrar que no
+          // ponga la clave, así que cuenta como que la pone.
+          return true
+        }
+        return nombreDeProp(pr) === 'id'
+      })
+
+    /**
+     * **La fila leída de la cola**: el nombre al que se asignó `siguienteEnCola`. Es el
+     * invariante de R6 dicho entero — no «hay un spread», sino «se esparce LO QUE SE LEYÓ».
+     *
+     * i1-R5 lo aprieta porque el aflojamiento de la base J preguntaba sólo si había spread,
+     * y el review midió **seis** formas que volvían a romper R6 pasando por legítimas:
+     * `{ ...inventada, … }` con `inventada` fabricada arriba, `{ ...otra, … }` con un
+     * binding desconocido, `{ ...p, ...{ id: x } }`, y las dos ortografías de `id`.
+     */
+    const LECTURA_DE_COLA = /siguienteEnCola/
+
+    /** El nombre al que se asignó la lectura de la cola. Eso, y sólo eso, es la fila leída. */
+    const esLaFilaLeida = (pr: ts.SpreadAssignment): boolean => {
+      const e = desnudo(pr.expression)
+      if (!ts.isIdentifier(e)) return false
+      const d = declaraciones.get(e.text)
+      return !!d && LECTURA_DE_COLA.test(d.getText())
+    }
+
+    /**
+     * i2-R1 — **La regla cambió, no la lista.** Dos vueltas parcheando este predicado caso a
+     * caso dieron el mismo resultado las dos veces: la base J lo aflojó a «¿hay un spread?» y
+     * el review midió seis formas coladas; la iteración 1 lo apretó a «¿alguno es la fila
+     * leída?» —con `.some()`— y el review midió **cinco más**, que la guarda ORIGINAL sí
+     * cazaba, porque basta un spread legítimo para que los demás entren de rondón.
+     *
+     * Así que ahora: **al menos un spread tiene que ser la fila leída, y `poneLaClave` cuenta
+     * como clave nueva todo lo que no pueda mirar.** Enumerar formas rotas es una carrera que
+     * se pierde; exigir que cada parte sea demostrablemente inofensiva no lo es.
+     *
+     * i4-R3 — Aquí vivía además un `spreads.every(spreadInocuo)`, un predicado gemelo. Al
+     * apretar `poneLaClave` en i3-R1 quedó **muerto**: todo lo que rechazaba lo rechaza ya
+     * `poneLaClave(x)` —un spread que no es la fila leída y no es un literal cuenta como clave
+     * nueva— o el `INVENTA` final, porque el texto del spread está dentro del texto del
+     * literal. Comprobado por casos y quitándolo (37 filas verdes). Se retira: la iteración 2
+     * y la 3 taparon el mismo agujero por dos sitios, y **dos predicados que tienen que decir
+     * lo mismo es exactamente la clase que ha mordido tres veces en este ciclo**.
+     *
+     * **Y dónde está la guarda de verdad, dicho para que nadie confunda el cinturón con los
+     * tirantes:** `unit/drenado.test.tsx` › j7 afirma el **comportamiento** —los cuatro `id`
+     * que se envían son los cuatro que se leyeron— y no depende de ninguna heurística sobre
+     * la forma del código. Ésta es la que caza la intención antes de que llegue a correr.
+     */
+    const literalFabricado = (x: ts.ObjectLiteralExpression): boolean => {
+      const spreads = x.properties.filter(ts.isSpreadAssignment)
+      if (!spreads.some(esLaFilaLeida)) return true
+      if (poneLaClave(x)) return true
+      return INVENTA.test(x.getText())
+    }
+
+    /** Se fabrica si es un literal de objeto que no conserva la clave, o si lo es lo que hay detrás del nombre. */
     const fabricado = (n: ts.Node, salto = true): boolean => {
       const x = desnudo(n)
-      if (ts.isObjectLiteralExpression(x)) return true
+      if (ts.isObjectLiteralExpression(x)) return literalFabricado(x)
       // i2-R6 — `INVENTA` sólo sobre el **argumento** y sobre literales de objeto, nunca sobre el
       // texto entero de un inicializador: `const p = siguienteEnCola(cola, g, Date.now())` es la
       // forma legítima de leer la cola con el reloj en línea, y la versión anterior la marcaba.
@@ -1452,6 +1558,143 @@ describe('Spec F / R6 · el envío del drenado manda la fila que leyó', () => {
     expect(envios.filter(e => e.fabricada).map(e => e.texto),
       'el drenado construye la fila que manda: un uuid nuevo por intento deja la base sin repetición que ver')
       .toEqual([])
+  })
+
+  /**
+   * Spec J / §E.4(c) — **La puerta que abre el aflojamiento de F7.** Esparcir la fila leída
+   * pasa a ser legítimo; sobrescribir su `id` mientras se esparce NO, y es la única forma
+   * nueva de romper R6 que el cambio hace posible. Si esta fila se pone verde con la guarda
+   * revertida, el aflojamiento habría apagado la regla en vez de precisarla.
+   */
+  it.each([
+    ['esparce pero sobrescribe la clave', '', '{ ...p, id: crypto.randomUUID() }'],
+    ['esparce pero inventa dentro', '', '{ ...p, creado: Date.now() }'],
+    ['no esparce nada', '', '{ id: p.id, nombre: p.nombre, cantidad: p.cantidad }'],
+    // i1-R5 — Las SEIS que el review midió pasando con la guarda de la base J. §E.4(c)
+    // pedía nombrar **los** caminos que abre el aflojamiento, y se probó uno de seis.
+    ['la clave en comillas', '', "{ ...p, 'id': nuevoId }"],
+    ['la clave calculada', '', '{ ...p, ["id"]: nuevoId }'],
+    ['la clave por un spread anidado', '', '{ ...p, ...{ id: nuevoId } }'],
+    ['esparce un objeto fabricado arriba', 'const inventada = { id: crypto.randomUUID(), nombre: p.nombre }',
+      '{ ...inventada, cantidad: p.cantidad }'],
+    ['esparce un binding que no salió de la cola', 'const otra = leerDeOtroSitio()',
+      '{ ...otra, nombre: p.nombre }'],
+    ['esparce algo que no se declara aquí', '', '{ ...vieneDeFuera, nombre: p.nombre }'],
+    // i2-R1 / k1 — Las CINCO que el apriete de la iteración 1 abrió y que la guarda original
+    // sí cazaba. Todas tienen un primer spread legítimo, y por eso `.some()` las dejaba pasar.
+    ['esparce la fila leída Y un objeto fabricado arriba',
+      'const q = { id: crypto.randomUUID() }', '{ ...p, ...q }'],
+    ['esparce la fila leída Y un condicional', '', '{ ...p, ...(c ? { id: nuevoId } : {}) }'],
+    ['esparce la fila leída Y una llamada', '', '{ ...p, ...conIdNuevo() }'],
+    ['esparce la fila leída Y un Object.assign', '', '{ ...p, ...Object.assign({}, { id: nuevoId }) }'],
+    ['esparce la fila leída Y algo parseado', '', '{ ...p, ...JSON.parse(crudo) }'],
+    /**
+     * m1 / i3-R1 — **Las mismas cinco, envueltas en unas llaves.** Cuatro caracteres bastaban
+     * para devolverlas a la vida, porque `poneLaClave` fallaba abierto donde `spreadInocuo`
+     * falla cerrado. Es la tercera vez en este ciclo que el defecto es «se arregló un
+     * predicado y no su gemelo», y por eso estas siete están escritas aparte.
+     */
+    ['envuelve un objeto fabricado arriba', 'const q = { id: crypto.randomUUID() }', '{ ...p, ...{ ...q } }'],
+    ['envuelve un condicional', '', '{ ...p, ...{ ...(c ? { id: nuevoId } : {}) } }'],
+    ['envuelve una llamada', '', '{ ...p, ...{ ...conIdNuevo() } }'],
+    ['envuelve un Object.assign', '', '{ ...p, ...{ ...Object.assign({}, { id: nuevoId }) } }'],
+    ['envuelve algo parseado', '', '{ ...p, ...{ ...JSON.parse(crudo) } }'],
+    ['envuelve un binding de fuera', '', '{ ...p, ...{ ...vieneDeFuera } }'],
+    ['envuelve dos capas', 'const q = { id: crypto.randomUUID() }', '{ ...p, ...{ ...{ ...q } } }'],
+  ])('F7: la sonda del aflojamiento — %s se sigue cazando', (_n, antes, fila) => {
+    const sembrado = `const drenarUnaVez = async () => {
+      const p = siguienteEnCola(cola, group.id, ahora)
+      ${antes}
+      const r = await addItem(createClient(), group.id, me.id, ${fila})
+    }
+    const drenar = () => {}`
+    expect(DEL_DRENADO(sembrado).filter(e => e.fabricada).length,
+      'esta forma rompe la identidad de la fila y la guarda la dejó pasar').toBe(1)
+  })
+
+  /**
+   * k2 — **La sonda al revés del apriete.** Sin ella, «caza todo lo que no demuestra ser la
+   * fila leída» lo cumpliría también una guarda que marcara cualquier literal, que es de donde
+   * venimos: entonces J-R4 sería imposible de escribir y la guarda estaría prohibiendo el
+   * requisito en vez de protegerlo.
+   */
+  it.each([
+    ['esparce la fila leída y un literal estático sin clave', '{ ...p, ...{ cantidad: null } }'],
+    ['esparce la fila leída dos veces', '{ ...p, ...p }'],
+    ['esparce la fila leída y pone un campo que no es la clave', '{ ...p, cantidad: normalizar(p.cantidad) }'],
+  ])('F7: %s NO es fabricar', (_n, fila) => {
+    const sembrado = `const drenarUnaVez = async () => {
+      const p = siguienteEnCola(cola, group.id, ahora)
+      const r = await addItem(createClient(), group.id, me.id, ${fila})
+    }
+    const drenar = () => {}`
+    const envios = DEL_DRENADO(sembrado)
+    expect(envios.length, 'el instrumento no vio el envío: no mide nada').toBe(1)
+    expect(envios[0].fabricada,
+      'la guarda marcó como fabricación una forma que conserva la clave: prohíbe el requisito')
+      .toBe(false)
+  })
+
+  /**
+   * m2 / i3-R2 — **Lo que F7 prohíbe siendo legítimo, escrito, y el techo de esta guarda.**
+   *
+   * Tres vueltas sobre el mismo predicado sintáctico en un solo ciclo: la base J lo aflojó a
+   * «¿hay un spread?» (seis agujeros medidos), la iteración 1 lo apretó con `.some()` (cinco
+   * más, que la versión original sí cazaba), la iteración 2 exigió que todos fueran inocuos
+   * (siete más por el predicado vecino, que fallaba abierto). El patrón está medido y no es
+   * casualidad: **una aproximación sintáctica a «¿es ésta la fila que se leyó?» siempre tendrá
+   * agujeros**, porque el espacio de formas es infinito y el de las que alguien enumera no.
+   *
+   * Así que la decisión queda aquí en vez de volver a tomarse desde cero:
+   *
+   * - **F7 es el cinturón**: caza la intención de fabricar antes de que llegue a correr.
+   * - **`unit/drenado.test.tsx` › j7 son los tirantes**: afirma el **comportamiento** —los `id`
+   *   que se envían son los que se leyeron— y no depende de ninguna heurística sobre la forma.
+   *   Caza además cosas que F7 no ve, como mutar `p.id` antes de la llamada.
+   * - **Si aparece un cuarto agujero, F7 se retira** y j7 se queda sola.
+   *
+   * Y estas cinco filas son el peaje, escrito para que quien toque el drenado sepa qué le va a
+   * pasar y por qué, en vez de aflojar la guarda a ciegas. **Son falsos positivos declarados**:
+   * cada una conserva la clave y aun así se marca, porque el analizador no puede demostrarlo.
+   *
+   * i4-R4 — Eran seis. `{ ...p, ...camposNormalizados(p) }` se ha retirado porque **estaba mal
+   * etiquetada**: es la misma forma sintáctica que `{ ...p, ...conIdNuevo() }`, que está tres
+   * bloques más arriba como una de las que rompen R6. Decir que «conserva la clave» de una
+   * llamada es afirmar lo que no se puede saber ni leyendo, así que no es un falso positivo:
+   * es la regla de fallar cerrado funcionando, y el peaje no puede reclamar lo contrario.
+   * Si alguna se pone roja, es que alguien aflojó la regla — y entonces hay que leer lo de
+   * arriba antes de decidir si eso está bien.
+   */
+  it.each([
+    ['un alias de la fila leída', 'const fila = p', '{ ...fila, cantidad: null }'],
+    ['un condicional que no toca la clave', '', '{ ...p, ...(c ? { cantidad: null } : {}) }'],
+    ['un objeto auxiliar sin clave', 'const extra = { cantidad: null }', '{ ...p, ...extra }'],
+    ['repetir la clave con su propio valor', '', '{ ...p, id: p.id }'],
+    ['leer la cola destructurando', 'const { id, nombre, cantidad } = p', '{ id, nombre, cantidad }'],
+  ])('F7: el peaje declarado — %s se marca aunque conserve la clave', (_n, antes, fila) => {
+    const sembrado = `const drenarUnaVez = async () => {
+      const p = siguienteEnCola(cola, group.id, ahora)
+      ${antes}
+      const r = await addItem(createClient(), group.id, me.id, ${fila})
+    }
+    const drenar = () => {}`
+    expect(DEL_DRENADO(sembrado).filter(e => e.fabricada).length,
+      'esta forma dejó de marcarse: alguien aflojó F7 — lee la decisión del techo antes de seguir')
+      .toBe(1)
+  })
+
+  /** Y la forma que J-R4 necesita, que es la que el aflojamiento habilita. */
+  it('F7: normalizar la cantidad esparciendo la fila leída NO es fabricar', () => {
+    const sembrado = `const drenarUnaVez = async () => {
+      const p = siguienteEnCola(cola, group.id, ahora)
+      const r = await addItem(createClient(), group.id, me.id, { ...p, cantidad: normalizar(p.cantidad) })
+    }
+    const drenar = () => {}`
+    const envios = DEL_DRENADO(sembrado)
+    expect(envios.length, 'el instrumento no vio el envío: no mide nada').toBe(1)
+    expect(envios[0].fabricada,
+      'la forma que J-R4 necesita se marcó como fabricación: la guarda prohíbe el requisito')
+      .toBe(false)
   })
 
   it('F7: la sonda — un envío que se inventa la fila se caza', () => {

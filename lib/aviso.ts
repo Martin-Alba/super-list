@@ -21,7 +21,20 @@ import type { Clase } from './errors'
  * del peso daba una partición distinta en dos de los cinco, y esos dos —`cola` y
  * `apertura`— son los que produjeron los dos últimos fallos.
  */
-export type Origen = 'mutacion' | 'relectura' | 'apertura' | 'carga' | 'cola'
+/**
+ * i4-R1 — **`'enlace'` existe porque «Enlace copiado.» no es un fallo, y la única forma de
+ * decirlo es el origen.**
+ *
+ * Se pintaba rojo y se anunciaba con `role="alert"`: a quien usa lector de pantalla se le
+ * anunciaba de forma asertiva, como un error, el único mensaje de éxito que tiene esta vista.
+ * Es literalmente la cicatriz i1-R4, que ya está documentada en `unit/disparadores.test.tsx`.
+ *
+ * No se puede resolver por `clase` —el propio i1-R4 lo dice: `'servidor'` la comparten la
+ * carga y la edición fallidas— ni reutilizando `'mutacion'`, que es el de los dos fallos del
+ * enlace. Un origen discrimina **porque tiene un solo escritor**, y éste lo tiene: el `if
+ * (siSaleBien)` de `intentarEnlace`. Los fallos de las dos vías siguen en `'mutacion'`.
+ */
+export type Origen = 'mutacion' | 'relectura' | 'apertura' | 'carga' | 'cola' | 'enlace'
 
 export type Aviso = { texto: string; clase: Clase; origen: Origen; token?: number }
 
@@ -38,7 +51,7 @@ export type Accion =
 
 /** Qué es cada aviso. Dato, no deducción: ver el encabezado. */
 export const DURACION: Record<Origen, 'una-vez' | 'nivel'> = {
-  mutacion: 'una-vez', relectura: 'una-vez', apertura: 'una-vez',
+  mutacion: 'una-vez', relectura: 'una-vez', apertura: 'una-vez', enlace: 'una-vez',
   carga: 'nivel', cola: 'nivel',
 }
 
@@ -54,7 +67,18 @@ export const DURACION: Record<Origen, 'una-vez' | 'nivel'> = {
  * peso, hará falta decidirlo y probarlo entonces.
  */
 export const PESO: Record<Origen, number> = {
-  mutacion: 3, relectura: 2, apertura: 1,
+  /**
+   * i4-R1 — `enlace` pesa **0**: el más ligero de los de una vez, y distinto de los otros
+   * tres, porque el encabezado declara que no hay empates posibles y por eso no hay regla de
+   * desempate.
+   *
+   * El peso lo decidió una prueba, no una intuición. Con 4 —«lo último que hizo el usuario
+   * manda»— «Enlace copiado.» **tapaba el fallo del intento siguiente**: copiar bien y volver
+   * a copiar con el permiso revocado dejaba en pantalla el acuse de éxito del intento
+   * anterior. Un acuse de que algo salió bien es lo menos importante que se puede decir: lo
+   * cubre cualquier cosa que haya perdido algo.
+   */
+  mutacion: 3, relectura: 2, apertura: 1, enlace: 0,
   carga: 2, cola: 1,
 }
 

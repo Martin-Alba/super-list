@@ -9,7 +9,7 @@
  * decía que había perdido el acceso al grupo. El **código** sí los separa, y
  * `lib/items.ts` lo recibía y lo descartaba.
  */
-export type Clase = 'sesion' | 'sin-acceso' | 'integridad' | 'duplicado' | 'texto' | 'red' | 'servidor' | 'generico'
+export type Clase = 'sesion' | 'sin-acceso' | 'integridad' | 'duplicado' | 'texto' | 'cantidad' | 'red' | 'servidor' | 'generico'
 
 export const SESION = 'Tu sesión ha caducado. Vuelve a entrar para seguir.'
 export const SIN_ACCESO = 'Ya no tienes acceso a este grupo.'
@@ -86,6 +86,45 @@ export const ESCRIBE_NOMBRE = 'Escribe un nombre de producto.'
  * «no se puede» a secas deja al usuario sin salida.
  */
 export const SIN_RED_ACCION = 'Sin conexión sólo puedes apuntar productos nuevos. Para editar o borrar, espera a tener red.'
+
+/**
+ * Spec J / J-R6..J-R9 — Los tres textos del enlace de invitación.
+ *
+ * El que **no** está aquí es el importante: **cancelar el menú de compartir no dice nada.**
+ * `navigator.share` rechaza con `AbortError` cuando alguien cierra el menú, y eso no es un
+ * fallo, es un cambio de opinión. La distinción se hace por `err.name`, **nunca por el
+ * mensaje**: el mensaje lo escribe cada navegador y cambia entre versiones e idiomas, así
+ * que un filtro por texto se rompe en silencio y vuelve a avisar de una cancelación.
+ */
+/**
+ * J-R8 — **Cancelar el menú de compartir no es un fallo**, y la decisión vive aquí, con los
+ * textos, porque es una afirmación sobre lo que un error *significa* — exactamente lo que
+ * este fichero es.
+ *
+ * Y vive aquí también por una segunda razón, medida: `unit/texto-crudo.test.ts` › AE3 exige
+ * que un error capturado sólo se pase a un símbolo importado de este módulo. Escribir
+ * `e.name` en la vista lo pone rojo, y la salida barata —renombrar la variable para que la
+ * guarda no la reconozca— es la cicatriz AF1, que está escrita ahí. Así que la guarda
+ * empujó esto a su sitio en vez de a un rodeo.
+ *
+ * **Por `name`, nunca por el mensaje.** El mensaje lo redacta cada navegador y cambia entre
+ * versiones e idiomas: un `includes('abort')` se rompe en silencio el día que alguien
+ * traduce la cadena, y volver a avisar de una cancelación es justo el fallo que J-R8 cierra.
+ */
+export const esCancelacion = (e: unknown): boolean =>
+  typeof e === 'object' && e !== null && 'name' in e && e.name === 'AbortError'
+
+/**
+ * i1-R2 / i1-R3 — El aviso del rango. Lo dice el cliente **antes** de mandar, porque sin
+ * red no hay nadie al otro lado que conteste, y con red la respuesta de la base llegaba
+ * traducida como `'texto'`: «revisa que no esté vacío y que no sea demasiado largo», que
+ * no es ninguna de las dos cosas cuando el problema es que `100` no cabe en 1..99.
+ */
+export const CANTIDAD_FUERA = 'La cantidad tiene que ser un número del 1 al 99, o quedarse vacía.'
+
+export const COPIADO = 'Enlace copiado.'
+export const COPIAR_FALLO = 'No se ha podido copiar el enlace. Aquí lo tienes, para seleccionarlo a mano.'
+export const COMPARTIR_FALLO = 'No se ha podido compartir el enlace. Aquí lo tienes, para copiarlo a mano.'
 
 /**
  * R1 — El estado se **nombra**, y de forma permanente mientras dura. Sin esto, la
@@ -183,6 +222,23 @@ export const GONE = 'Alguien lo quitó de la lista antes que tú.'
 /** Lo que el trigger de integridad dice, en su propio idioma. */
 const ES_INTEGRIDAD = /immutable|cannot be restored/
 
+/**
+ * i1-R3 — `23514` lo levantan **cuatro** restricciones distintas de este esquema, y una de
+ * ellas es el rango de la cantidad. Sin desviarla, `100` se le anunciaba a alguien como
+ * «revisa que no esté vacío y que no sea demasiado largo», que no es ninguna de las dos
+ * cosas: es un número que no cabe en 1..99, y el aviso no daba ninguna pista de qué hacer.
+ *
+ * Es el mismo desvío que `42501` ya hace con `items_guard`, y por el mismo motivo escrito
+ * allí: **cada clase tiene su código es falso**, y el afinado vive aquí dentro porque aquí
+ * es donde el texto crudo está permitido y donde muere.
+ *
+ * **Con las comillas**, que es como el mensaje real lo entrega —medido contra PostgREST, no
+ * supuesto: `new row … violates check constraint "items_quantity_num"`—. Sin ellas el patrón
+ * es una subcadena y una futura `items_quantity_numeric` se desviaría aquí sin que nadie lo
+ * pretendiera.
+ */
+const ES_CANTIDAD = /"items_quantity_num"/
+
 export function clasificar(
   code: string | null | undefined, raw: string | null | undefined, haySesion = true,
 ): Clase {
@@ -200,6 +256,7 @@ export function clasificar(
     return haySesion ? 'sin-acceso' : 'sesion'
   }
   if (code === '23505') return 'duplicado'
+  if (code === '23514' && ES_CANTIDAD.test(texto)) return 'cantidad'
   if (code === '23514' || code === '23502' || code === '22001') return 'texto'
 
   // Sin código: sólo queda el texto. Los fallos de red no traen código porque no
@@ -228,7 +285,8 @@ export function clasificar(
 // puertas la vista usaba la de atrás mientras la spec declaraba la de delante.
 const MENSAJE: Record<Clase, string> = {
   sesion: SESION, 'sin-acceso': SIN_ACCESO, integridad: INTEGRIDAD,
-  duplicado: DUPLICADO, texto: TEXTO, red: RED, servidor: SERVIDOR, generico: GENERICO,
+  duplicado: DUPLICADO, texto: TEXTO, cantidad: CANTIDAD_FUERA,
+  red: RED, servidor: SERVIDOR, generico: GENERICO,
 }
 
 /**

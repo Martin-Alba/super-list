@@ -292,6 +292,16 @@ distinga cola cruda de cola viva— cuesta lo mismo y la derrota un `as`.
 Borrar la cuenta y llevarse los datos · purgar de verdad lo borrado lógicamente ·
 papelera o deshacer · notificaciones push · múltiples owners · escritorio.
 
+**Lo que la Spec J dejó fuera por su nombre (2026-09-21):** el botón de agregar, que se
+resuelve con `/design` · **unidades** (kg, briks, docenas): la cantidad es un número pelado, y
+si alguna vez hace falta unidad es otra columna y otra spec · ordenar o sumar por cantidad, que
+ahora es posible y nada de esto construye · compartir cualquier otra cosa que no sea el enlace
+de invitación.
+
+**Y una comprobación pendiente de un ojo:** el teclado numérico de la cantidad en un móvil de
+verdad. Es la única fila de la Spec J que ninguna suite puede cerrar —un navegador de escritorio
+no enseña teclado— y está declarada como tal desde el sellado.
+
 **Borrar la cuenta merece una nota:** hasta que exista, nadie puede irse del
 sistema ni llevarse sus datos. Es una decisión tomada a conciencia para acotar
 el primer corte, no un olvido.

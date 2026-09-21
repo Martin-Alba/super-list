@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, waitFor, cleanup, act, fireEvent } from '@testing-library/react'
+import { render, screen, waitFor, cleanup, act, fireEvent } from '@testing-library/react'
 import type { Item } from '@/lib/items'
 import type { Pendiente } from '@/lib/local'
 import { dobleDeLaPuerta } from './puertaDeLaCola'
 import { reparte } from '@/lib/local'
-import { claseDe, DUPLICADO, EN_COLA, mensajeDe, SIN_ALMACEN, GONE, SIN_ACCESO, RELECTURA, type Clase } from '@/lib/errors'
+import { TECLEABLE } from '@/lib/cantidad'
+import { CANTIDAD_FUERA, claseDe, DUPLICADO, EN_COLA, mensajeDe, SIN_ALMACEN, GONE, SIN_ACCESO, RELECTURA, type Clase } from '@/lib/errors'
 
 /**
  * I7/I9 — El drenado, atacado en la capa donde vive: montado dentro de la vista.
@@ -150,6 +151,202 @@ beforeEach(() => {
   updateItem.mockResolvedValue({ data: fila('x'), clase: null, code: null })
 })
 afterEach(() => cleanup())
+
+/** Una entrada de cola con la cantidad que se le diga, para atacar J-R4. */
+const pendienteCon = (nombre: string, cantidad: string | null) =>
+  ({ id: `p-${nombre}`, usuario: 'u1', grupo: 'g1', nombre, cantidad, creado: Date.now() - 1000 })
+
+describe('Spec J · la cantidad en la vista y en el drenado', () => {
+  /**
+   * j5 — Las **dos** entradas de cantidad de esta vista, no una: el alta y la edición por
+   * fila. Se piden por su identidad, así que si alguien renombra un `data-testid` esto se
+   * pone rojo en vez de dejar de mirar.
+   *
+   * Lo que esta fila **no** puede comprobar: que el teclado numérico salga de verdad. Un
+   * navegador de escritorio no enseña teclado. `inputMode` es el mecanismo, y que el
+   * mecanismo esté declarado es todo lo que se puede afirmar aquí; el resto es el ojo que
+   * la spec declara, en un móvil.
+   */
+  it('j5: las dos entradas de cantidad de la vista piden teclado numérico', async () => {
+    const { container } = render(vista(null, [fila('pan')]))
+    await waitFor(() => expect(container.querySelector('[data-testid="item-qty"]')).not.toBeNull())
+    const alta = container.querySelector('[data-testid="item-qty"]') as HTMLInputElement
+    const edicion = container.querySelector('[data-cantidad-de="id-pan"]') as HTMLInputElement
+    expect(edicion, 'no hay campo de cantidad por fila: la fila mide una entrada de menos').not.toBeNull()
+    for (const [donde, campo] of [['el alta', alta], ['la edición', edicion]] as const) {
+      expect(campo.inputMode, `${donde} no pide teclado numérico`).toBe('numeric')
+      // `pattern` va con él: iOS mira los dos, y sin él algunas versiones siguen
+      // enseñando el teclado completo aunque `inputMode` esté puesto.
+      expect(campo.getAttribute('pattern'), `${donde} no declara pattern`).toBe(TECLEABLE)
+      expect(campo.getAttribute('type'), `${donde} usa type=number, que la spec descarta`)
+        .not.toBe('number')
+    }
+  })
+
+  /**
+   * j6 — Lo que el campo no deja teclear no se manda. Se ataca pegando, que es el gesto que
+   * mete texto de golpe: teclear letra a letra ya lo filtra cada pulsación.
+   */
+  it('j6: pegar «2 briks» en el campo deja 2, y 2 es lo que se manda', async () => {
+    colaViva()
+    const { container, getByTestId } = render(vista())
+    await waitFor(() => expect(container.querySelector('[data-testid="item-qty"]')).not.toBeNull())
+    const qty = getByTestId('item-qty') as HTMLInputElement
+    fireEvent.change(getByTestId('item-name'), { target: { value: 'pan' } })
+    fireEvent.change(qty, { target: { value: '2 briks' } })
+    expect(qty.value, 'el campo se quedó con el texto').toBe('2')
+    await act(async () => { fireEvent.submit(getByTestId('add-item').closest('form')!) })
+    await waitFor(() => expect(addItem).toHaveBeenCalled())
+    expect((addItem.mock.calls[0][3] as { cantidad: string | null }).cantidad,
+      'salió texto hacia la base').toBe('2')
+  })
+
+  /**
+   * i1 — **El campo deja de inventar.** La versión de la base J tiraba los separadores, así
+   * que «1.5» quedaba en `15` y **entraba en la base**: una cifra diez veces la real. Es el
+   * mismo defecto que la regla del decimal cerró para la cola, y peor, porque allí se
+   * descarta y aquí se falseaba.
+   */
+  it.each([
+    ['1.5', '1.5'], ['1,5', '1,5'], ['2 briks', '2'], ['briks', ''], ['12 unidades', '12'],
+  ])('i1: pegar «%s» deja «%s» en el campo, y nunca una cifra inventada', async (pegado, esperado) => {
+    colaViva()
+    const { container, getByTestId } = render(vista())
+    await waitFor(() => expect(container.querySelector('[data-testid="item-qty"]')).not.toBeNull())
+    const qty = getByTestId('item-qty') as HTMLInputElement
+    fireEvent.change(qty, { target: { value: pegado } })
+    expect(qty.value).toBe(esperado)
+    expect(qty.value, 'el campo concatenó los dígitos de un decimal y se inventó una cantidad')
+      .not.toBe('15')
+  })
+
+  /**
+   * i2 — **Una cantidad que la base va a rechazar no se manda.** Con red la contestaba la
+   * base; el punto de esta fila es que la respuesta exista antes, y sea la misma que sin red.
+   */
+  it.each(['100', '0', '1.5', '007'])('i2: con red, «%s» avisa y no se manda', async (valor) => {
+    colaViva()
+    const { container, getByTestId, queryByTestId } = render(vista())
+    await waitFor(() => expect(container.querySelector('[data-testid="item-qty"]')).not.toBeNull())
+    fireEvent.change(getByTestId('item-name'), { target: { value: 'pan' } })
+    fireEvent.change(getByTestId('item-qty'), { target: { value: valor } })
+    // Se **pulsa el botón**, no se envía el formulario a mano: `fireEvent.submit` salta la
+    // validación nativa del navegador, y fue justamente ahí donde un `pattern` más estrecho
+    // que el filtro bloqueaba el envío en silencio sin que este test lo viera.
+    await act(async () => { fireEvent.click(getByTestId('add-item')) })
+    await waitFor(() => expect(queryByTestId('notice')?.textContent).toContain(CANTIDAD_FUERA))
+    expect(addItem, `se mandó ${valor}, que la base va a rechazar`).not.toHaveBeenCalled()
+    // Y lo tecleado se queda: un envío que no sale no se lleva lo escrito.
+    expect((getByTestId('item-qty') as HTMLInputElement).value).toBe(valor)
+  })
+
+  /**
+   * i7 — **La edición por fila también.** Quitar el filtro de ese campo dejaba 198/198 en
+   * verde: al cambiar el literal `'3 barras'` por `'7'` se fue su último testigo, y J-R3
+   * pasó a tener guarda en dos de las tres entradas.
+   */
+  it('i7: la edición por fila filtra el texto y rechaza lo que no cabe', async () => {
+    const { container } = render(vista(null, [fila('pan')]))
+    await waitFor(() => expect(container.querySelector('[data-cantidad-de="id-pan"]')).not.toBeNull())
+    const campo = container.querySelector('[data-cantidad-de="id-pan"]') as HTMLInputElement
+    fireEvent.change(campo, { target: { value: '2 briks' } })
+    expect(campo.value, 'el campo de edición se quedó con el texto').toBe('2')
+    fireEvent.change(campo, { target: { value: '100' } })
+    fireEvent.blur(campo)
+    await waitFor(() => expect(screen.queryByTestId('notice')?.textContent).toContain(CANTIDAD_FUERA))
+    expect(updateItem, 'se mandó una cantidad fuera de rango desde la edición').not.toHaveBeenCalled()
+  })
+
+  /**
+   * k4 — **Una fila heredada no se puede convertir en una cifra inventada.**
+   *
+   * Es el estado normal de la ventana de §6: el código ya está desplegado y la migración
+   * todavía no. La fila trae `2 briks`. Medido en rojo por la revisión: el campo pintaba
+   * `2 briks`, teclear un `5` al final entregaba `2 briks5`, el filtro lo dejaba en `25`, y
+   * `25` es válido, así que se guardaba. El mismo `1.5`→`15` que i1-R1 cerró, en la tercera
+   * entrada.
+   */
+  it.each([
+    ['2 briks', '2'], ['1.5', ''], ['medio kilo', ''], ['12 unidades', '12'], ['7', '7'],
+  ])('k4: una fila heredada con «%s» se pinta como «%s»', async (guardado, visible) => {
+    const heredada = { ...fila('pan'), quantity: guardado }
+    const { container } = render(vista(null, [heredada]))
+    await waitFor(() => expect(container.querySelector('[data-cantidad-de="id-pan"]')).not.toBeNull())
+    const campo = container.querySelector('[data-cantidad-de="id-pan"]') as HTMLInputElement
+    expect(campo.value, 'el campo enseña algo que no puede producir').toBe(visible)
+  })
+
+  it('k4: y teclear sobre una heredada no fabrica una cantidad', async () => {
+    const heredada = { ...fila('pan'), quantity: '2 briks' }
+    const { container } = render(vista(null, [heredada]))
+    await waitFor(() => expect(container.querySelector('[data-cantidad-de="id-pan"]')).not.toBeNull())
+    const campo = container.querySelector('[data-cantidad-de="id-pan"]') as HTMLInputElement
+    // El gesto exacto: poner el cursor al final y teclear un dígito.
+    fireEvent.change(campo, { target: { value: `${campo.value}5` } })
+    expect(campo.value, 'se fabricó una cantidad pegando el dígito al texto heredado').toBe('25')
+    fireEvent.blur(campo)
+    await waitFor(() => expect(updateItem).toHaveBeenCalled())
+    // `25` es lo que el usuario **ve** y lo que pidió, porque el campo ya enseñaba `2`.
+    expect((updateItem.mock.calls[0][2] as { quantity: string | null }).quantity).toBe('25')
+  })
+
+  /**
+   * m6 — **Si la pantalla no cambió, no se escribe.**
+   *
+   * i2-R3 puso el campo a pintar `normalizar(item.quantity)` y dejó a `confirmar` comparando
+   * con el valor **crudo**: los dos gemelos volvieron a leer fuentes distintas. Medido: en una
+   * fila heredada con `2 briks`, teclear un dígito y borrarlo —la pantalla queda exactamente
+   * como estaba— escribía `2` encima y se llevaba el «briks» sin decir nada. Tercera aparición
+   * de la misma clase en este ciclo.
+   */
+  it.each(['2 briks', '1.5', 'medio kilo', '299'])(
+    'm6: teclear y deshacer sobre una fila con «%s» no escribe nada', async (guardado) => {
+      const heredada = { ...fila('pan'), quantity: guardado }
+      const { container } = render(vista(null, [heredada]))
+      await waitFor(() => expect(container.querySelector('[data-cantidad-de="id-pan"]')).not.toBeNull())
+      const campo = container.querySelector('[data-cantidad-de="id-pan"]') as HTMLInputElement
+      const pintado = campo.value
+      fireEvent.change(campo, { target: { value: `${pintado}5` } })
+      fireEvent.change(campo, { target: { value: pintado } })
+      fireEvent.blur(campo)
+      await act(async () => {})
+      expect(updateItem, `se escribió sobre «${guardado}» sin que la pantalla cambiara`)
+        .not.toHaveBeenCalled()
+    })
+
+  /**
+   * j7 — **Una entrada de cola escrita antes de este cambio tiene respuesta al drenarse.**
+   *
+   * Es el caso que no se puede migrar: vive en el IndexedDB de un móvil que nadie controla,
+   * la escribió un bundle que invitaba a teclear «2 briks», y la base nueva la rechaza. Sin
+   * normalizar al drenar, el bucle para en ella para conservar el orden y **todo lo que hay
+   * detrás se queda en la cola para siempre**.
+   *
+   * Los cuatro casos son los de la decisión 2, con el decimal incluido: `1.5` entra **sin
+   * cantidad**, no como `1`. El producto entra en los cuatro.
+   */
+  it('j7: la cola con texto dentro se drena normalizada, y el producto entra siempre', async () => {
+    colaViva()
+    cola = [
+      pendienteCon('briks', '2 briks'),
+      pendienteCon('leche', 'briks de leche'),
+      pendienteCon('harina', '1.5'),
+      pendienteCon('azucar', '1,5'),
+    ]
+    leerCola.mockImplementation(leerComoLaPuerta)
+    barrerCaducados.mockResolvedValue({ vivos: cola, descartadas: 0 })
+    render(vista())
+    await waitFor(() => expect(addItem).toHaveBeenCalledTimes(4))
+
+    const enviados = addItem.mock.calls.map(c => c[3] as { nombre: string; cantidad: string | null })
+    expect(enviados.map(e => [e.nombre, e.cantidad]), 'la normalización del drenado no coincide con la regla')
+      .toEqual([['briks', '2'], ['leche', null], ['harina', null], ['azucar', null]])
+    // Y la clave de la fila es la que se leyó: normalizar no puede fabricar una fila nueva,
+    // porque sin clave estable la base no tiene repetición que ver (R6/F7).
+    expect(addItem.mock.calls.map(c => (c[3] as { id: string }).id))
+      .toEqual(['p-briks', 'p-leche', 'p-harina', 'p-azucar'])
+  })
+})
 
 describe('R4/I7 el drenado va en orden, uno cada vez y sin solaparse', () => {
   it('DoD 28: sale el más antiguo primero, y sólo un envío en vuelo', async () => {
